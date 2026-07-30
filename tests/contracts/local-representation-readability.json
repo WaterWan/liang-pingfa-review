@@ -1,0 +1,28 @@
+{
+  "case_id": "local-representation-readability",
+  "scope": "representation-and-readability-only",
+  "input_storage": "local-only",
+  "expected_findings": [
+    {
+      "variant": "left-with-auxiliary-text-overlays",
+      "status": "疑似不一致",
+      "required_evidence": [
+        "visible auxiliary text overlays",
+        "affected beam geometry or ordinary annotations",
+        "blocked field classification or position binding"
+      ]
+    },
+    {
+      "variant": "right-without-corresponding-overlays",
+      "status": "一致",
+      "condition": "Only for fields whose representation is readable and whose position binding is clear."
+    }
+  ],
+  "non_claims": [
+    "structural calculation",
+    "strength",
+    "anchorage",
+    "construction approval",
+    "design approval"
+  ]
+}
