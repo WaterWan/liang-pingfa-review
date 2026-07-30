@@ -1,0 +1,81 @@
+# Local work products and generated output
+tmp/
+output/
+
+# Source documents and CAD exports
+*.pdf
+*.PDF
+*.dwg
+*.DWG
+*.dxf
+*.DXF
+
+# Raster and rendered images
+*.png
+*.PNG
+*.jpg
+*.JPG
+*.jpeg
+*.JPEG
+*.gif
+*.GIF
+*.bmp
+*.BMP
+*.tif
+*.TIF
+*.tiff
+*.TIFF
+*.webp
+*.WEBP
+
+# OCR, archives, and binary exports
+*.ocr
+*.hocr
+*.alto
+*.djvu
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.tbz
+*.tbz2
+*.tar.bz2
+*.xz
+*.txz
+*.tar.xz
+*.zst
+*.tar.zst
+*.cab
+*.iso
+*.bin
+*.exe
+*.dll
+
+# Local regression fixtures, preserving their instructions
+/tests/local-fixtures/*
+!/tests/local-fixtures/
+!/tests/local-fixtures/README.md
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
