@@ -1,6 +1,13 @@
 # Local work products and generated output
 tmp/
 output/
+.liang-pingfa-oda/
+audit.json
+edit-plan.json
+verification.json
+audit.md
+plan-review.md
+*.overlay-cleaned.dwg
 
 # Source documents and CAD exports
 *.pdf
@@ -68,6 +75,9 @@ __pycache__/
 .ruff_cache/
 .hypothesis/
 .coverage
+/build/
+/dist/
+*.egg-info/
 
 # IDE files
 .vscode/

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -20,6 +21,7 @@ REFERENCE_PATHS = (
     Path("references/notation-fields.md"),
     Path("references/source-scope.md"),
     Path("references/local-regression.md"),
+    Path("references/dwg-two-stage-workflow.md"),
 )
 
 ALLOWED_FILES = frozenset(
@@ -27,20 +29,57 @@ ALLOWED_FILES = frozenset(
         ".gitignore",
         "LICENSE",
         "README.md",
+        "pyproject.toml",
         ".github/workflows/validate.yml",
         ".github/skills/liang-pingfa-tuzhi-shencha/SKILL.md",
+        ".github/skills/liang-pingfa-tuzhi-shencha/references/dwg-two-stage-workflow.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/workflow-output.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/notation-fields.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/source-scope.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/local-regression.md",
         "scripts/validate_skill.py",
+        "src/liang_pingfa_review/__init__.py",
+        "src/liang_pingfa_review/__main__.py",
+        "src/liang_pingfa_review/apply.py",
+        "src/liang_pingfa_review/atomic_output.py",
+        "src/liang_pingfa_review/audit.py",
+        "src/liang_pingfa_review/canonical.py",
+        "src/liang_pingfa_review/cli.py",
+        "src/liang_pingfa_review/contracts.py",
+        "src/liang_pingfa_review/errors.py",
+        "src/liang_pingfa_review/local_regression.py",
+        "src/liang_pingfa_review/oda.py",
+        "src/liang_pingfa_review/overlay_profile.py",
+        "src/liang_pingfa_review/ownership.py",
+        "src/liang_pingfa_review/plan.py",
+        "src/liang_pingfa_review/raw_dxf.py",
+        "src/liang_pingfa_review/reports.py",
+        "src/liang_pingfa_review/snapshots.py",
+        "src/liang_pingfa_review/temporary.py",
+        "src/liang_pingfa_review/verify.py",
+        "src/liang_pingfa_review/schemas/__init__.py",
+        "src/liang_pingfa_review/schemas/audit-v1.schema.json",
+        "src/liang_pingfa_review/schemas/edit-plan-v1.schema.json",
+        "src/liang_pingfa_review/schemas/verification-v1.schema.json",
+        "tests/support/__init__.py",
+        "tests/support/owned_files.py",
+        "tests/support/synthetic_dxf.py",
+        "tests/test_apply_verify.py",
+        "tests/test_audit_plan.py",
+        "tests/test_canonical_contracts.py",
+        "tests/test_handle_ownership.py",
+        "tests/test_linux_ci_setup.py",
+        "tests/test_oda_cli.py",
+        "tests/test_source_binding.py",
         "tests/test_validate_skill.py",
         "tests/contracts/local-representation-readability.json",
+        "tests/contracts/two-stage-overlay-workflow.json",
         "tests/local-fixtures/README.md",
     }
 )
 
 IGNORED_DIRECTORIES = frozenset({".git", "__pycache__"})
+ROOT_GENERATED_DIRECTORIES = frozenset({"build", "dist"})
 FORBIDDEN_EXTENSIONS = frozenset(
     {
         ".pdf",
@@ -79,9 +118,10 @@ FORBIDDEN_EXTENSIONS = frozenset(
         ".bin",
         ".exe",
         ".dll",
+        ".whl",
     }
 )
-TEXT_FILE_SUFFIXES = frozenset({".md", ".py", ".yml", ".yaml", ".json"})
+TEXT_FILE_SUFFIXES = frozenset({".md", ".py", ".yml", ".yaml", ".json", ".toml"})
 
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
@@ -102,6 +142,7 @@ REQUIRED_HEADINGS = (
     "## 集中标注、原位标注与局部覆盖",
     "## 固定输出格式",
     "## 安全边界与升级",
+    "## 两阶段 DWG 工作流",
 )
 REQUIRED_PHRASES = (
     "阅读梁平法注写",
@@ -130,6 +171,7 @@ REQUIRED_PHRASES = (
     "设计批准",
     "施工指令",
     "结构专业人员",
+    "两阶段 DWG 工作流",
 )
 REQUIRED_GITIGNORE_RULES = (
     "tmp/",
@@ -146,6 +188,15 @@ REQUIRED_GITIGNORE_RULES = (
     ".ruff_cache/",
     ".hypothesis/",
     ".coverage",
+    "audit.json",
+    "edit-plan.json",
+    "verification.json",
+    "audit.md",
+    "plan-review.md",
+    ".liang-pingfa-oda/",
+    "/build/",
+    "/dist/",
+    "*.egg-info/",
     ".vscode/",
     ".DS_Store",
     "*.tar",
@@ -165,6 +216,49 @@ REQUIRED_GITIGNORE_RULES = (
     "*.iso",
 )
 SOURCE_SCOPE_SENTENCE = "Verified source scope: 22G101-1 printed pages 1-22 through 1-33."
+BOUNDED_THREAT_MODEL = (
+    "trusted Windows account/session, ODA executable, OS, and local NTFS volume; "
+    "no hostile same-account/admin process"
+)
+SUPPORT_BOUNDARY_PHRASES = {
+    "README.md": (
+        "R2018/AC1032 DXF-exposable",
+        "UNSAFE_ENTITY_TYPE",
+        "File Converter 只是文件转换，不是原生数据库编辑",
+        "ODA Drawings SDK",
+        "Autodesk RealDWG/AutoCAD",
+        "object enablers",
+        "私有资格夹具不会发布",
+        "per_file_compatibility",
+        "audit_required",
+    ),
+    "dwg workflow reference": (
+        "R2018/AC1032 DXF-exposable",
+        "代理实体或自定义实体/对象",
+        "代理图形",
+        "非空或不受支持的 `ACDSDATA`",
+        "未建模的原始标签或节",
+        "SORTENTSTABLE",
+        "对象启用器",
+        "File Converter 不是原生数据库编辑",
+        "ODA Drawings SDK",
+        "Autodesk RealDWG/AutoCAD",
+        "object enablers",
+        "私有资格夹具不会发布",
+    ),
+    "SKILL.md": (
+        "R2018/AC1032 DXF-exposable",
+        "不得绕过这些兼容性门",
+        "File Converter 不是原生数据库编辑",
+        "ODA Drawings SDK",
+        "Autodesk RealDWG/AutoCAD",
+        "object enablers",
+    ),
+    "local regression reference": (
+        "安全的兼容性结果",
+        "不要剥离代理/自定义状态来强迫",
+    ),
+}
 
 
 class ValidationError(Exception):
@@ -206,6 +300,10 @@ def _iter_repository_files(root: Path, issues: list[str]) -> Iterable[Path]:
                 issues.append(f"symlink is not allowed: {relative}")
                 continue
             if directory_name in IGNORED_DIRECTORIES:
+                continue
+            if directory == root and directory_name in ROOT_GENERATED_DIRECTORIES:
+                continue
+            if directory_name.endswith(".egg-info"):
                 continue
             retained_directories.append(directory_name)
         directory_names[:] = retained_directories
@@ -319,14 +417,40 @@ def _validate_text_safety(root: Path, files: Iterable[Path], issues: list[str]) 
         if text is None:
             continue
         relative = _relative_posix(path, root)
-        if WINDOWS_ABSOLUTE_PATH_PATTERN.search(text):
-            issues.append(f"obvious Windows absolute local path found in {relative}")
-        if UNC_PATH_PATTERN.search(text):
-            issues.append(f"UNC local path found in {relative}")
-        if POSIX_LOCAL_PATH_PATTERN.search(text):
-            issues.append(f"obvious POSIX local path found in {relative}")
-        if SHA256_PATTERN.search(text):
-            issues.append(f"possible source hash found in {relative}")
+        values = [text]
+        if path.suffix.lower() == ".json":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                values = []
+
+                def collect_strings(value: object) -> None:
+                    if isinstance(value, str):
+                        values.append(value)
+                    elif isinstance(value, list):
+                        for item in value:
+                            collect_strings(item)
+                    elif isinstance(value, dict):
+                        for key, item in value.items():
+                            collect_strings(key)
+                            collect_strings(item)
+
+                collect_strings(parsed)
+        for value in values:
+            if WINDOWS_ABSOLUTE_PATH_PATTERN.search(value):
+                issues.append(f"obvious Windows absolute local path found in {relative}")
+                break
+            if UNC_PATH_PATTERN.search(value):
+                issues.append(f"UNC local path found in {relative}")
+                break
+            if POSIX_LOCAL_PATH_PATTERN.search(value):
+                issues.append(f"obvious POSIX local path found in {relative}")
+                break
+            if SHA256_PATTERN.search(value):
+                issues.append(f"possible source hash found in {relative}")
+                break
 
 
 def _validate_markdown_links(skill_directory: Path, issues: list[str]) -> None:
@@ -392,6 +516,154 @@ def _validate_scope_and_ignore_files(root: Path, issues: list[str]) -> None:
                 issues.append(f".gitignore is missing required rule: {rule}")
 
 
+def _validate_packaging(root: Path, issues: list[str]) -> None:
+    """Require the pinned local pipeline package and its shipped contracts."""
+
+    pyproject_path = root / "pyproject.toml"
+    pyproject_text = _read_text(pyproject_path, issues)
+    if pyproject_text is not None:
+        for required_text in (
+            'requires-python = ">=3.11"',
+            '"ezdxf==1.4.4"',
+            '"jsonschema==4.23.0"',
+            'liang-pingfa-review = "liang_pingfa_review.cli:main"',
+            'liang_pingfa_review = ["schemas/*.json"]',
+        ):
+            if required_text not in pyproject_text:
+                issues.append(f"pyproject.toml is missing required package setting: {required_text}")
+
+    required_package_paths = (
+        "src/liang_pingfa_review/cli.py",
+        "src/liang_pingfa_review/audit.py",
+        "src/liang_pingfa_review/plan.py",
+        "src/liang_pingfa_review/apply.py",
+        "src/liang_pingfa_review/verify.py",
+        "src/liang_pingfa_review/ownership.py",
+        "src/liang_pingfa_review/oda.py",
+        "src/liang_pingfa_review/schemas/audit-v1.schema.json",
+        "src/liang_pingfa_review/schemas/edit-plan-v1.schema.json",
+        "src/liang_pingfa_review/schemas/verification-v1.schema.json",
+    )
+    for relative_path in required_package_paths:
+        if not (root / relative_path).is_file():
+            issues.append(f"missing required pipeline package path: {relative_path}")
+
+
+def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
+    """Require both hermetic Ubuntu checks and native Windows phase two."""
+
+    workflow_path = root / ".github/workflows/validate.yml"
+    workflow = _read_text(workflow_path, issues)
+    if workflow is None:
+        return
+    for required_text in (
+        "validate-ubuntu:",
+        "runs-on: ubuntu-latest",
+        "validate-windows:",
+        "runs-on: windows-latest",
+        'python-version: "3.13"',
+        "python -m pip install .",
+        'python -m unittest discover -s tests -p "test_*.py" -v',
+        "python -m compileall -q src tests scripts",
+    ):
+        if required_text not in workflow:
+            issues.append(
+                f"validate workflow is missing required command or platform: {required_text}"
+            )
+    lowered = workflow.casefold()
+    for forbidden_text in (
+        "choco install oda",
+        "winget install oda",
+        "odafileconverter.exe",
+        "download oda",
+    ):
+        if forbidden_text in lowered:
+            issues.append(
+                f"validate workflow must not install or invoke real ODA: {forbidden_text}"
+            )
+
+
+def _validate_bounded_oda_contract(root: Path, issues: list[str]) -> None:
+    """Keep docs and implementation aligned with the accepted local boundary."""
+
+    readme = _read_text(root / "README.md", issues)
+    workflow = _read_text(
+        root
+        / ".github"
+        / "skills"
+        / SKILL_NAME
+        / "references"
+        / "dwg-two-stage-workflow.md",
+        issues,
+    )
+    for name, text in (("README.md", readme), ("dwg workflow reference", workflow)):
+        if text is None:
+            continue
+        normalized = re.sub(r"\s+", " ", text)
+        if BOUNDED_THREAT_MODEL not in normalized:
+            issues.append(f"{name} is missing the bounded trusted-local-session threat model")
+        for required in (
+            "ODA 执行不是",
+            "恶意软件",
+            "完整重新审计",
+        ):
+            if required not in normalized:
+                issues.append(f"{name} is missing bounded ODA contract wording: {required}")
+
+    support_documents = (
+        ("README.md", readme),
+        ("dwg workflow reference", workflow),
+        ("SKILL.md", _read_text(root / SKILL_PATH, issues)),
+        (
+            "local regression reference",
+            _read_text(
+                root / SKILL_DIRECTORY / "references" / "local-regression.md",
+                issues,
+            ),
+        ),
+    )
+    for name, text in support_documents:
+        if text is None:
+            continue
+        normalized = re.sub(r"\s+", " ", text)
+        for required in SUPPORT_BOUNDARY_PHRASES[name]:
+            if re.sub(r"\s+", " ", required) not in normalized:
+                issues.append(
+                    f"{name} is missing required public support-boundary wording: {required}"
+                )
+
+    oda_path = root / "src/liang_pingfa_review/oda.py"
+    oda_text = _read_text(oda_path, issues)
+    if oda_text is not None:
+        for forbidden in (
+            "_Preowned" + "ConverterOutput",
+            "create_new_output_" + "reservation_file",
+            "write_reservation_" + "marker",
+            "read_reservation_" + "marker",
+            "remove_reservation_" + "marker",
+        ):
+            if forbidden in oda_text:
+                issues.append(f"ODA wrapper retains incompatible reservation behavior: {forbidden}")
+        for required in (
+            "create_private_oda_root",
+            "_capture_pre_run_inventory",
+            "_adopt_converter_output",
+            "expected_state_proof",
+        ):
+            if required not in oda_text:
+                issues.append(f"ODA wrapper is missing bounded conversion control: {required}")
+
+    ownership_text = _read_text(root / "src/liang_pingfa_review/ownership.py", issues)
+    if ownership_text is not None:
+        for required in (
+            "private_staging_capability",
+            "secure_private_staging_directory",
+            "_is_ntfs_volume",
+        ):
+            if required not in ownership_text:
+                issues.append(f"ownership layer is missing private staging control: {required}")
+
+
 def validate_repository(root: Path | str) -> None:
     """Validate the full working tree without requiring Git metadata."""
 
@@ -417,6 +689,9 @@ def validate_repository(root: Path | str) -> None:
         _validate_skill_content(skill_text, issues)
         _validate_resources(repository_root, skill_text, issues)
     _validate_scope_and_ignore_files(repository_root, issues)
+    _validate_packaging(repository_root, issues)
+    _validate_ci_workflow(repository_root, issues)
+    _validate_bounded_oda_contract(repository_root, issues)
 
     if issues:
         raise ValidationError(issues)
