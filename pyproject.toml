@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liang-pingfa-review"
+version = "0.1.0"
+description = "Fail-closed, audit-first DWG representation review pipeline."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "ezdxf==1.4.4",
+    "jsonschema==4.23.0",
+]
+
+[project.scripts]
+liang-pingfa-review = "liang_pingfa_review.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+liang_pingfa_review = ["schemas/*.json"]
