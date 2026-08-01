@@ -35,55 +35,146 @@ from tests.support.synthetic_dxf import (
 from tests.support.owned_files import install_non_windows_test_ownership
 
 
+def _raw_newline(raw: bytes) -> bytes:
+    """Return the generated DXF's serialized line ending."""
+
+    if b"\r\n" in raw:
+        return b"\r\n"
+    if b"\n" in raw:
+        return b"\n"
+    raise AssertionError("synthetic DXF has no line ending")
+
+
+def _raw_payload(raw: bytes, payload: bytes) -> bytes:
+    """Rewrite a CRLF fixture payload for the generated DXF's line ending."""
+
+    return payload.replace(b"\r\n", b"\n").replace(b"\n", _raw_newline(raw))
+
+
+def _raw_tag_pairs(raw: bytes) -> list[tuple[int, int, int, bytes]]:
+    """Return generated DXF tag locations as ``(tag, value, code, value)``."""
+
+    newline = _raw_newline(raw)
+    lines = raw.split(newline)
+    if lines[-1:] == [b""]:
+        lines.pop()
+    if len(lines) % 2:
+        raise AssertionError("synthetic DXF has an incomplete tag")
+
+    tags: list[tuple[int, int, int, bytes]] = []
+    offset = 0
+    for index in range(0, len(lines), 2):
+        code_line = lines[index]
+        value = lines[index + 1]
+        try:
+            code = int(code_line)
+        except ValueError as error:
+            raise AssertionError("synthetic DXF has an invalid group code") from error
+        value_offset = offset + len(code_line) + len(newline)
+        tags.append((offset, value_offset, code, value))
+        offset = value_offset + len(value) + len(newline)
+    return tags
+
+
 def _append_before_raw_eof(path: Path, payload: bytes) -> None:
-    """Append a synthetic section before ezdxf's exact ASCII EOF marker."""
+    """Append a synthetic section before the generated ASCII EOF marker."""
 
     raw = path.read_bytes()
-    eof = b"  0\r\nEOF\r\n"
-    index = raw.rfind(eof)
-    if index < 0:
+    eof_index = next(
+        (
+            tag_offset
+            for tag_offset, _value_offset, code, value in reversed(_raw_tag_pairs(raw))
+            if code == 0 and value == b"EOF"
+        ),
+        None,
+    )
+    if eof_index is None:
         raise AssertionError("synthetic DXF has no EOF marker")
-    path.write_bytes(raw[:index] + payload + raw[index:])
+    path.write_bytes(
+        raw[:eof_index] + _raw_payload(raw, payload) + raw[eof_index:]
+    )
 
 
 def _append_to_raw_header(path: Path, payload: bytes) -> None:
     """Append one adversarial tag sequence inside the generated HEADER section."""
 
     raw = path.read_bytes()
-    header_start = raw.find(b"  0\r\nSECTION\r\n  2\r\nHEADER\r\n")
-    if header_start < 0:
+    tags = _raw_tag_pairs(raw)
+    header_index = next(
+        (
+            index
+            for index, (_offset, _value_offset, code, value) in enumerate(tags[:-1])
+            if code == 0
+            and value == b"SECTION"
+            and tags[index + 1][2:] == (2, b"HEADER")
+        ),
+        None,
+    )
+    if header_index is None:
         raise AssertionError("synthetic DXF has no HEADER section")
-    header_end = raw.find(b"  0\r\nENDSEC\r\n", header_start)
-    if header_end < 0:
+    header_end = next(
+        (
+            tag_offset
+            for tag_offset, _value_offset, code, value in tags[header_index + 1 :]
+            if code == 0 and value == b"ENDSEC"
+        ),
+        None,
+    )
+    if header_end is None:
         raise AssertionError("synthetic DXF has no terminated HEADER section")
-    path.write_bytes(raw[:header_end] + payload + raw[header_end:])
+    path.write_bytes(raw[:header_end] + _raw_payload(raw, payload) + raw[header_end:])
 
 
 def _classes_record_bounds(raw: bytes) -> tuple[int, int]:
     """Locate the first generated CLASS record without committing a fixture."""
 
-    start = raw.find(b"  0\r\nCLASS\r\n")
-    if start < 0:
-        raise AssertionError("synthetic DXF has no CLASS record")
-    next_record = raw.find(b"  0\r\nCLASS\r\n", start + 1)
-    section_end = raw.find(b"  0\r\nENDSEC\r\n", start)
-    candidates = [index for index in (next_record, section_end) if index >= 0]
-    if not candidates:
-        raise AssertionError("synthetic CLASS record is unterminated")
-    return start, min(candidates)
+    return _raw_record_bounds(raw, b"CLASS")
 
 
 def _raw_record_bounds(raw: bytes, record_type: bytes) -> tuple[int, int]:
     """Locate one generated modeled record without committing a DXF fixture."""
 
-    marker = b"  0\r\n" + record_type + b"\r\n"
-    start = raw.find(marker)
-    if start < 0:
+    tags = _raw_tag_pairs(raw)
+    start_index = next(
+        (
+            index
+            for index, (_offset, _value_offset, code, value) in enumerate(tags)
+            if code == 0 and value == record_type
+        ),
+        None,
+    )
+    if start_index is None:
         raise AssertionError("synthetic DXF record is absent")
-    end = raw.find(b"  0\r\n", start + len(marker))
-    if end < 0:
+    end = next(
+        (
+            tag_offset
+            for tag_offset, _value_offset, code, _value in tags[start_index + 1 :]
+            if code == 0
+        ),
+        None,
+    )
+    if end is None:
         raise AssertionError("synthetic DXF record is unterminated")
-    return start, end
+    return tags[start_index][0], end
+
+
+def _replace_raw_layer_table_name(path: Path, replacement: bytes) -> None:
+    """Replace the LAYER table name while preserving generated line endings."""
+
+    if b"\n" in replacement or b"\r" in replacement:
+        raise AssertionError("synthetic table name must be one DXF value line")
+    raw = path.read_bytes()
+    tags = _raw_tag_pairs(raw)
+    layer_name: tuple[int, bytes] | None = None
+    for index, (_offset, _value_offset, code, value) in enumerate(tags[:-1]):
+        _tag_offset, value_offset, name_code, name = tags[index + 1]
+        if code == 0 and value == b"TABLE" and (name_code, name) == (2, b"LAYER"):
+            layer_name = (value_offset, name)
+            break
+    if layer_name is None:
+        raise AssertionError("synthetic DXF has no LAYER table")
+    value_offset, value = layer_name
+    path.write_bytes(raw[:value_offset] + replacement + raw[value_offset + len(value) :])
 
 
 class AuditAndPlanTests(unittest.TestCase):
@@ -103,6 +194,53 @@ class AuditAndPlanTests(unittest.TestCase):
         dxf = self.root / f"{variant}.dxf"
         create_synthetic_dxf(dxf, variant=variant)
         return audit_dxf_for_testing(dxf, self.source)
+
+    def test_raw_mutation_helpers_preserve_lf_and_crlf_generated_bytes(self) -> None:
+        """Raw test construction follows each generated DXF's line ending."""
+
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline):
+                dxf = self.root / f"raw-helper-{len(newline)}.dxf"
+                create_synthetic_dxf(dxf)
+                generated = dxf.read_bytes().replace(b"\r\n", b"\n")
+                dxf.write_bytes(generated.replace(b"\n", newline))
+
+                raw = dxf.read_bytes()
+                line_start, line_end = _raw_record_bounds(raw, b"LINE")
+                class_start, class_end = _classes_record_bounds(raw)
+                self.assertEqual(raw[line_start : line_start + 3], b"  0")
+                self.assertLess(line_start, line_end)
+                self.assertLess(class_start, class_end)
+
+                _append_to_raw_header(dxf, b"999\r\nhelper-comment\r\n")
+                _append_before_raw_eof(
+                    dxf,
+                    b"  0\r\nSECTION\r\n  2\r\nACDSDATA\r\n  0\r\nENDSEC\r\n",
+                )
+                _replace_raw_layer_table_name(dxf, b"CUSTOM")
+
+                mutated = dxf.read_bytes()
+                self.assertIn(b"999" + newline + b"helper-comment" + newline, mutated)
+                self.assertIn(
+                    b"  0"
+                    + newline
+                    + b"SECTION"
+                    + newline
+                    + b"  2"
+                    + newline
+                    + b"ACDSDATA"
+                    + newline,
+                    mutated,
+                )
+                self.assertIn(
+                    (2, b"CUSTOM"),
+                    [
+                        (code, value)
+                        for _tag, _value, code, value in _raw_tag_pairs(mutated)
+                    ],
+                )
+                if newline == b"\n":
+                    self.assertNotIn(b"\r\n", mutated)
 
     def assert_variant_has_no_plan(self, variant: str) -> None:
         """Assert a synthetic counterexample cannot become a mutation plan."""
@@ -468,7 +606,8 @@ class AuditAndPlanTests(unittest.TestCase):
 
         trailing = self.root / "trailing-data.dxf"
         create_synthetic_dxf(trailing)
-        trailing.write_bytes(trailing.read_bytes() + b"999\r\ntrailing\r\n")
+        raw = trailing.read_bytes()
+        trailing.write_bytes(raw + _raw_payload(raw, b"999\r\ntrailing\r\n"))
         with self.assertRaises(PipelineError) as raised:
             preflight_ascii_dxf(trailing)
         self.assertEqual(raised.exception.code, ErrorCode.UNSAFE_ENTITY_TYPE)
@@ -568,7 +707,7 @@ class AuditAndPlanTests(unittest.TestCase):
             (
                 "unknown-class-tag",
                 lambda raw, _start, end, _record: raw[:end]
-                + b"999\r\nunsupported\r\n"
+                + _raw_payload(raw, b"999\r\nunsupported\r\n")
                 + raw[end:],
             ),
             (
@@ -611,7 +750,7 @@ class AuditAndPlanTests(unittest.TestCase):
                 create_synthetic_dxf(dxf)
                 raw = dxf.read_bytes()
                 start, end = _raw_record_bounds(raw, b"LINE")
-                dxf.write_bytes(raw[:end] + payload + raw[end:])
+                dxf.write_bytes(raw[:end] + _raw_payload(raw, payload) + raw[end:])
                 with mock.patch(
                     "liang_pingfa_review.snapshots.ezdxf.read"
                 ) as readfile:
@@ -629,10 +768,12 @@ class AuditAndPlanTests(unittest.TestCase):
         raw = flags.read_bytes()
         start, end = _classes_record_bounds(raw)
         record = raw[start:end]
-        marker = b"280\r\n0\r\n"
+        marker = _raw_payload(raw, b"280\r\n0\r\n")
         self.assertIn(marker, record)
         flags.write_bytes(
-            raw[:start] + record.replace(marker, b"280\r\n1\r\n", 1) + raw[end:]
+            raw[:start]
+            + record.replace(marker, _raw_payload(raw, b"280\r\n1\r\n"), 1)
+            + raw[end:]
         )
         after = snapshot_dxf(flags)
         self.assertNotEqual(
@@ -652,10 +793,12 @@ class AuditAndPlanTests(unittest.TestCase):
         raw = lossy.read_bytes()
         start, end = _classes_record_bounds(raw)
         record = raw[start:end]
-        marker = b" 90\r\n0\r\n"
+        marker = _raw_payload(raw, b" 90\r\n0\r\n")
         self.assertIn(marker, record)
         lossy.write_bytes(
-            raw[:start] + record.replace(marker, b" 90\r\n00\r\n", 1) + raw[end:]
+            raw[:start]
+            + record.replace(marker, _raw_payload(raw, b" 90\r\n00\r\n"), 1)
+            + raw[end:]
         )
         wire_before = preflight_ascii_dxf(lossy)
         before_normalization = snapshot_dxf(lossy)
@@ -829,16 +972,7 @@ class AuditAndPlanTests(unittest.TestCase):
 
         dxf = self.root / "unknown-table.dxf"
         create_synthetic_dxf(dxf)
-        raw = dxf.read_bytes()
-        supported_header = b"  0\r\nTABLE\r\n  2\r\nLAYER\r\n"
-        self.assertIn(supported_header, raw)
-        dxf.write_bytes(
-            raw.replace(
-                supported_header,
-                b"  0\r\nTABLE\r\n  2\r\nCUSTOM\r\n",
-                1,
-            )
-        )
+        _replace_raw_layer_table_name(dxf, b"CUSTOM")
 
         with self.assertRaises(PipelineError) as raised:
             snapshot_dxf(dxf)
