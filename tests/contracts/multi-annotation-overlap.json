@@ -1,0 +1,150 @@
+{
+  "case_id": "multi-annotation-overlap",
+  "scope": "representation-and-readability-only",
+  "input_storage": "local-only",
+  "scenarios": [
+    {
+      "scenario_id": "unresolved-overlap",
+      "candidate_clusters": [
+        {
+          "id": "cluster-a",
+          "scope": "concentrated_annotation",
+          "candidate_hints": [
+            {"type": "color", "value": "hint-a", "non_semantic": true}
+          ]
+        },
+        {
+          "id": "cluster-b",
+          "scope": "in_situ_annotation",
+          "candidate_hints": [
+            {"type": "layer", "value": "hint-b", "non_semantic": true}
+          ]
+        }
+      ],
+      "overlap_evidence": [
+        {
+          "type": "ink_mask_intersection",
+          "candidate_ids": ["cluster-a", "cluster-b"]
+        },
+        {
+          "type": "field_boundary_intersection",
+          "candidate_ids": ["cluster-a", "cluster-b"]
+        }
+      ],
+      "unresolved": [
+        "field boundaries or ownership",
+        "row relation or leader endpoint"
+      ],
+      "expected": {
+        "findings": [
+          {"candidate_id": "cluster-a", "status": "证据不足"},
+          {"candidate_id": "cluster-b", "status": "证据不足"}
+        ],
+        "p1": "failed-for-each-affected-cluster",
+        "p2": "blocked",
+        "region_status_must_not_be": "一致",
+        "forbidden": [
+          "partial OCR pass",
+          "nearest-distance binding",
+          "candidate concatenation",
+          "field concatenation",
+          "field merge",
+          "scope merge",
+          "color-or-layer semantic proof"
+        ]
+      }
+    },
+    {
+      "scenario_id": "readable-independent-conflict",
+      "candidate_clusters": [
+        {
+          "id": "cluster-c",
+          "scope": "concentrated_annotation",
+          "candidate_hints": [
+            {"type": "color", "value": "hint-c", "non_semantic": true}
+          ]
+        },
+        {
+          "id": "cluster-d",
+          "scope": "in_situ_annotation",
+          "candidate_hints": [
+            {"type": "line_type", "value": "hint-d", "non_semantic": true}
+          ]
+        }
+      ],
+      "overlap_evidence": [
+        {
+          "type": "glyph_intersection",
+          "candidate_ids": ["cluster-c", "cluster-d"]
+        },
+        {
+          "type": "leader_intersection",
+          "candidate_ids": ["cluster-c", "cluster-d"]
+        }
+      ],
+      "readable_candidate_ids": [
+        "cluster-c",
+        "cluster-d"
+      ],
+      "candidate_evidence": [
+        {
+          "candidate_id": "cluster-c",
+          "readability_evidence": [
+            {"type": "glyphs_or_symbols_readable"}
+          ],
+          "boundary_evidence": [
+            {"type": "field_boundaries_or_rows_clear"}
+          ],
+          "binding_evidence": [
+            {"type": "leader_binding_clear"}
+          ],
+          "scope_evidence": [
+            {"type": "scope_kept_separate"}
+          ]
+        },
+        {
+          "candidate_id": "cluster-d",
+          "readability_evidence": [
+            {"type": "glyphs_or_symbols_readable"}
+          ],
+          "boundary_evidence": [
+            {"type": "field_boundaries_or_rows_clear"}
+          ],
+          "binding_evidence": [
+            {"type": "topology_binding_clear"}
+          ],
+          "scope_evidence": [
+            {"type": "scope_kept_separate"}
+          ]
+        }
+      ],
+      "visible_expression_conflict_evidence": [
+        {
+          "type": "visible_expression_conflict",
+          "candidate_ids": ["cluster-c", "cluster-d"]
+        }
+      ],
+      "expected": {
+        "permitted_status": "疑似不一致",
+        "only_when": "all independent evidence is present",
+        "not_a_claim": [
+          "design approval",
+          "structural safety"
+        ],
+        "forbidden": [
+          "candidate concatenation",
+          "field concatenation",
+          "field merge",
+          "scope merge"
+        ]
+      }
+    }
+  ],
+  "prohibited_source_content": [
+    "screenshots",
+    "drawing text",
+    "coordinates",
+    "hashes",
+    "copied values"
+  ]
+}
