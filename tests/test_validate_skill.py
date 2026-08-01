@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,17 @@ class ValidateSkillTests(unittest.TestCase):
         with self.assertRaises(validate_skill.ValidationError) as raised:
             validate_skill.validate_repository(self.repository)
         self.assertIn(expected_message, raised.exception.issues)
+
+    def mutate_multi_annotation_contract(self, mutation) -> None:
+        """Apply a JSON-only mutation to the checked multi-annotation contract."""
+
+        contract_path = self.repository / validate_skill.MULTI_ANNOTATION_CONTRACT_PATH
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        mutation(contract)
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def test_clean_repository_passes(self) -> None:
         validate_skill.validate_repository(self.repository)
@@ -166,6 +178,456 @@ class ValidateSkillTests(unittest.TestCase):
 
         self.assert_validation_fails_with(
             "missing referenced resource in SKILL.md: references/workflow-output.md"
+        )
+
+    def test_missing_multi_annotation_reference_fails(self) -> None:
+        reference_path = (
+            self.repository
+            / validate_skill.SKILL_DIRECTORY
+            / "references/multi-annotation-overlap.md"
+        )
+        reference_path.unlink()
+
+        self.assert_validation_fails_with(
+            "missing required reference file: references/multi-annotation-overlap.md"
+        )
+
+    def test_missing_multi_annotation_contract_fails(self) -> None:
+        (self.repository / validate_skill.MULTI_ANNOTATION_CONTRACT_PATH).unlink()
+
+        self.assert_validation_fails_with(
+            "missing required multi-annotation contract: "
+            "tests/contracts/multi-annotation-overlap.json"
+        )
+
+    def test_missing_multi_annotation_skill_phrase_fails(self) -> None:
+        skill_path = self.repository / validate_skill.SKILL_PATH
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace(
+                "重叠簇门在 P1 之前",
+                "removed overlap ordering",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "SKILL.md is missing required multi-annotation wording: 重叠簇门在 P1 之前"
+        )
+
+    def test_multi_annotation_duplicate_candidate_finding_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["findings"][1]["candidate_id"] = "cluster-a"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract findings contain duplicate candidate ID: cluster-a"
+        )
+
+    def test_multi_annotation_missing_candidate_finding_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["findings"].pop()
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract findings must cover every affected candidate; "
+            "missing: cluster-b"
+        )
+
+    def test_multi_annotation_extra_candidate_finding_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["findings"].append(
+                {"candidate_id": "cluster-extra", "status": "证据不足"}
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract finding candidate ID is not an affected "
+            "candidate: cluster-extra"
+        )
+
+    def test_multi_annotation_empty_candidate_finding_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["findings"][1]["candidate_id"] = ""
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract findings must use nonempty candidate IDs"
+        )
+
+    def test_multi_annotation_non_insufficient_finding_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["findings"][0]["status"] = "一致"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract every affected candidate finding must be 证据不足"
+        )
+
+    def test_multi_annotation_p1_pass_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["p1"] = "passed"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract must record P1 failure for every affected candidate"
+        )
+
+    def test_multi_annotation_p2_allowed_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["p2"] = "allowed"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract must block P2 for every failed affected candidate"
+        )
+
+    def test_multi_annotation_removed_concatenation_forbidden_behavior_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["forbidden"].remove(
+                "candidate concatenation"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract unresolved scenario must forbid: "
+            "candidate concatenation"
+        )
+
+    def test_multi_annotation_field_merge_enabled_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["forbidden"].remove("field merge")
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract unresolved scenario must forbid: field merge"
+        )
+
+    def test_multi_annotation_nearest_binding_enabled_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["forbidden"].remove(
+                "nearest-distance binding"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract unresolved scenario must forbid: "
+            "nearest-distance binding"
+        )
+
+    def test_multi_annotation_partial_ocr_enabled_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["forbidden"].remove("partial OCR pass")
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract unresolved scenario must forbid: partial OCR pass"
+        )
+
+    def test_multi_annotation_color_layer_semantic_proof_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["forbidden"].remove(
+                "color-or-layer semantic proof"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract unresolved scenario must forbid: "
+            "color-or-layer semantic proof"
+        )
+
+    def test_multi_annotation_unresolved_consistent_region_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["expected"]["region_status_must_not_be"] = "不同"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract must prohibit a region status of 一致 while "
+            "overlap is unresolved"
+        )
+
+    def test_multi_annotation_readable_conflict_must_be_evidence_backed(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["expected"]["only_when"] = "automatic conflict"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract must permit only evidence-backed readable conflict"
+        )
+
+    def test_multi_annotation_proximity_only_overlap_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["overlap_evidence"] = ["proximity only"]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract overlap_evidence must use allowlisted "
+            "actual intersection types and exactly identify affected candidates"
+        )
+
+    def test_multi_annotation_color_only_overlap_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["overlap_evidence"] = [
+                {
+                    "type": "color",
+                    "candidate_ids": ["cluster-a", "cluster-b"],
+                }
+            ]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract overlap_evidence must use allowlisted "
+            "actual intersection types and exactly identify affected candidates"
+        )
+
+    def test_multi_annotation_empty_intersection_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["overlap_evidence"] = [
+                {"type": "ink_mask_intersection", "candidate_ids": []}
+            ]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract overlap_evidence must use allowlisted "
+            "actual intersection types and exactly identify affected candidates"
+        )
+
+    def test_multi_annotation_duplicate_readable_candidate_id_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["readable_candidate_ids"][1] = "cluster-c"
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable_candidate_ids contain duplicate "
+            "candidate ID: cluster-c"
+        )
+
+    def test_multi_annotation_missing_readable_candidate_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["readable_candidate_ids"].pop()
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable_candidate_ids must cover every "
+            "candidate; missing: cluster-d"
+        )
+
+    def test_multi_annotation_extra_readable_candidate_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["readable_candidate_ids"].append("cluster-extra")
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable candidate ID is not a candidate "
+            "cluster: cluster-extra"
+        )
+
+    def test_multi_annotation_color_only_independent_evidence_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["independent_evidence"] = [
+                {"type": "color", "value": "hint-c"}
+            ]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario must not use free-form "
+            "or legacy evidence fields"
+        )
+
+    def test_multi_annotation_color_only_visible_conflict_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["visible_expression_conflict_evidence"] = [
+                {
+                    "type": "color",
+                    "candidate_ids": ["cluster-c", "cluster-d"],
+                }
+            ]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract visible expression conflict evidence must "
+            "be allowlisted and identify every readable candidate"
+        )
+
+    def test_multi_annotation_missing_readable_boundary_evidence_fails(self) -> None:
+        def mutate(contract) -> None:
+            del contract["scenarios"][1]["candidate_evidence"][0]["boundary_evidence"]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable evidence requires allowlisted "
+            "boundary_evidence for: cluster-c"
+        )
+
+    def test_multi_annotation_missing_readable_scope_evidence_fails(self) -> None:
+        def mutate(contract) -> None:
+            del contract["scenarios"][1]["candidate_evidence"][0]["scope_evidence"]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable evidence requires allowlisted "
+            "scope_evidence for: cluster-c"
+        )
+
+    def test_multi_annotation_missing_readable_binding_evidence_fails(self) -> None:
+        def mutate(contract) -> None:
+            del contract["scenarios"][1]["candidate_evidence"][0]["binding_evidence"]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable evidence requires allowlisted "
+            "binding_evidence for: cluster-c"
+        )
+
+    def test_multi_annotation_missing_visible_conflict_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["visible_expression_conflict_evidence"] = []
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario requires separate visible "
+            "expression conflict evidence"
+        )
+
+    def test_multi_annotation_readable_field_concatenation_enabled_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["expected"]["forbidden"].remove(
+                "field concatenation"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario must forbid: "
+            "field concatenation"
+        )
+
+    def test_multi_annotation_readable_field_merge_enabled_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["expected"]["forbidden"].remove("field merge")
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario must forbid: field merge"
+        )
+
+    def test_multi_annotation_readable_scope_merge_enabled_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["expected"]["forbidden"].remove("scope merge")
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario must forbid: scope merge"
+        )
+
+    def test_multi_annotation_merged_scope_string_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["candidate_clusters"][0]["scope"] = (
+                "concentrated-and-in-situ-merged"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract candidate scope must be exactly one "
+            "allowlisted semantic scope: concentrated_annotation or "
+            "in_situ_annotation"
+        )
+
+    def test_multi_annotation_combined_scope_string_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["candidate_clusters"][0]["scope"] = (
+                "concentrated_and_in_situ_combined"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract candidate scope must be exactly one "
+            "allowlisted semantic scope: concentrated_annotation or "
+            "in_situ_annotation"
+        )
+
+    def test_multi_annotation_scope_list_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["candidate_clusters"][0]["scope"] = [
+                "concentrated_annotation",
+                "in_situ_annotation",
+            ]
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract candidates must use separate scope and "
+            "structured non-semantic candidate_hints"
+        )
+
+    def test_multi_annotation_unknown_scope_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["candidate_clusters"][0]["scope"] = (
+                "section_annotation"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract candidate scope must be exactly one "
+            "allowlisted semantic scope: concentrated_annotation or "
+            "in_situ_annotation"
+        )
+
+    def test_multi_annotation_duplicate_same_scope_candidates_fail(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["candidate_clusters"][1]["scope"] = (
+                "concentrated_annotation"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario must not contain "
+            "duplicate same-scope candidates"
+        )
+
+    def test_multi_annotation_missing_required_scope_role_fails(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][1]["candidate_clusters"][0]["scope"] = (
+                "in_situ_annotation"
+            )
+
+        self.mutate_multi_annotation_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "multi-annotation contract readable scenario is missing required "
+            "scope role: concentrated_annotation"
         )
 
     def test_forbidden_source_artifact_fails(self) -> None:

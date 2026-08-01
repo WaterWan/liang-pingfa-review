@@ -22,6 +22,54 @@ REFERENCE_PATHS = (
     Path("references/source-scope.md"),
     Path("references/local-regression.md"),
     Path("references/dwg-two-stage-workflow.md"),
+    Path("references/multi-annotation-overlap.md"),
+)
+MULTI_ANNOTATION_CONTRACT_PATH = Path("tests/contracts/multi-annotation-overlap.json")
+UNRESOLVED_OVERLAP_P1_FAILURE = "failed-for-each-affected-cluster"
+UNRESOLVED_OVERLAP_P2_BLOCKED = "blocked"
+UNRESOLVED_OVERLAP_FORBIDDEN_BEHAVIORS = (
+    "partial OCR pass",
+    "nearest-distance binding",
+    "candidate concatenation",
+    "field concatenation",
+    "field merge",
+    "scope merge",
+    "color-or-layer semantic proof",
+)
+ACTUAL_INTERSECTION_EVIDENCE_TYPES = frozenset(
+    {
+        "ink_mask_intersection",
+        "glyph_intersection",
+        "leader_intersection",
+        "field_boundary_intersection",
+        "vector_intersection",
+    }
+)
+CANDIDATE_HINT_TYPES = frozenset({"color", "layer", "line_type"})
+SEMANTIC_SCOPE_VALUES = frozenset(
+    {"concentrated_annotation", "in_situ_annotation"}
+)
+READABLE_REQUIRED_SCOPES = frozenset(
+    {"concentrated_annotation", "in_situ_annotation"}
+)
+READABLE_EVIDENCE_TYPES = {
+    "readability_evidence": frozenset({"glyphs_or_symbols_readable"}),
+    "boundary_evidence": frozenset({"field_boundaries_or_rows_clear"}),
+    "binding_evidence": frozenset(
+        {
+            "ownership_binding_clear",
+            "leader_binding_clear",
+            "topology_binding_clear",
+        }
+    ),
+    "scope_evidence": frozenset({"scope_kept_separate"}),
+}
+VISIBLE_CONFLICT_EVIDENCE_TYPE = "visible_expression_conflict"
+READABLE_FORBIDDEN_BEHAVIORS = (
+    "candidate concatenation",
+    "field concatenation",
+    "field merge",
+    "scope merge",
 )
 
 ALLOWED_FILES = frozenset(
@@ -37,6 +85,7 @@ ALLOWED_FILES = frozenset(
         ".github/skills/liang-pingfa-tuzhi-shencha/references/notation-fields.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/source-scope.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/local-regression.md",
+        ".github/skills/liang-pingfa-tuzhi-shencha/references/multi-annotation-overlap.md",
         "scripts/validate_skill.py",
         "src/liang_pingfa_review/__init__.py",
         "src/liang_pingfa_review/__main__.py",
@@ -74,6 +123,7 @@ ALLOWED_FILES = frozenset(
         "tests/test_validate_skill.py",
         "tests/contracts/local-representation-readability.json",
         "tests/contracts/two-stage-overlay-workflow.json",
+        "tests/contracts/multi-annotation-overlap.json",
         "tests/local-fixtures/README.md",
     }
 )
@@ -257,6 +307,44 @@ SUPPORT_BOUNDARY_PHRASES = {
     "local regression reference": (
         "安全的兼容性结果",
         "不要剥离代理/自定义状态来强迫",
+    ),
+}
+MULTI_ANNOTATION_DOCUMENT_PHRASES = {
+    "SKILL.md": (
+        "重叠簇门在 P1 之前",
+        "单纯文字接近不能合并簇或证明重叠",
+        "颜色、图层和线型只能提示不同候选",
+        "不得让部分 OCR 通过 P1",
+        "P1 未通过时禁止 P2",
+        "绝不拼接字符串或合并字段",
+        "区域摘要不得为 `一致`",
+    ),
+    "workflow-output.md": (
+        "重叠簇（P1 前）",
+        "每个受影响候选分别输出 `证据不足`",
+        "禁止 P2",
+        "文字接近本身不能合并候选或证明重叠",
+        "未解决的重叠区域摘要不得填写 `一致`",
+    ),
+    "notation-fields.md": (
+        "不得串接可见字符串、合并字段",
+        "用颜色/图层/线型确定语义或所有权",
+        "逐候选标为 `证据不足` 并阻断绑定",
+    ),
+    "README.md": (
+        "先逐簇完成重叠门",
+        "文字接近不能合并候选",
+        "未解决重叠区域不得报告 `一致`",
+        "仅当每个候选独立可读",
+    ),
+    "multi-annotation-overlap.md": (
+        "两个及以上",
+        "单纯文字接近",
+        "每个受影响候选分别创建一项 `证据不足`",
+        "部分 OCR 的可读片段不得让该簇通过 P1",
+        "不得按最近文字/对象距离强制绑定",
+        "区域摘要不得为 `一致`",
+        "全部候选簇的行和列",
     ),
 }
 
@@ -499,6 +587,499 @@ def _validate_resources(root: Path, skill_text: str, issues: list[str]) -> None:
     _validate_markdown_links(skill_directory, issues)
 
 
+def _validate_candidate_clusters(
+    scenario: dict[str, object],
+    issues: list[str],
+    *,
+    require_distinct_readable_scopes: bool = False,
+) -> set[str] | None:
+    """Validate independent candidates, scopes, and non-semantic visual hints."""
+
+    candidates = scenario.get("candidate_clusters")
+    if not isinstance(candidates, list) or len(candidates) < 2:
+        issues.append(
+            "multi-annotation contract must model at least two independent candidates"
+        )
+        return None
+
+    candidate_ids: list[str] = []
+    candidate_scopes: list[str] = []
+    valid = True
+    for candidate in candidates:
+        if (
+            not isinstance(candidate, dict)
+            or set(candidate) != {"id", "scope", "candidate_hints"}
+            or not isinstance(candidate.get("id"), str)
+            or not candidate["id"].strip()
+            or not isinstance(candidate.get("scope"), str)
+            or not candidate["scope"].strip()
+        ):
+            valid = False
+            continue
+
+        candidate_ids.append(candidate["id"])
+        scope = candidate["scope"]
+        if scope not in SEMANTIC_SCOPE_VALUES:
+            issues.append(
+                "multi-annotation contract candidate scope must be exactly one "
+                "allowlisted semantic scope: concentrated_annotation or "
+                "in_situ_annotation"
+            )
+            valid = False
+        else:
+            candidate_scopes.append(scope)
+        hints = candidate["candidate_hints"]
+        if not isinstance(hints, list):
+            valid = False
+            continue
+        for hint in hints:
+            if (
+                not isinstance(hint, dict)
+                or set(hint) != {"type", "value", "non_semantic"}
+                or hint.get("type") not in CANDIDATE_HINT_TYPES
+                or not isinstance(hint.get("value"), str)
+                or not hint["value"].strip()
+                or hint.get("non_semantic") is not True
+            ):
+                valid = False
+
+    if not valid:
+        issues.append(
+            "multi-annotation contract candidates must use separate scope and "
+            "structured non-semantic candidate_hints"
+        )
+        return None
+    if len(set(candidate_ids)) != len(candidate_ids):
+        issues.append("multi-annotation contract candidate IDs must be nonempty and unique")
+        return None
+    if require_distinct_readable_scopes:
+        if len(set(candidate_scopes)) != len(candidate_scopes):
+            issues.append(
+                "multi-annotation contract readable scenario must not contain "
+                "duplicate same-scope candidates"
+            )
+        missing_scopes = sorted(READABLE_REQUIRED_SCOPES - set(candidate_scopes))
+        if missing_scopes:
+            issues.append(
+                "multi-annotation contract readable scenario is missing required "
+                f"scope role: {', '.join(missing_scopes)}"
+            )
+    return set(candidate_ids)
+
+
+def _validate_actual_intersection_evidence(
+    evidence: object, candidate_ids: set[str] | None, issues: list[str]
+) -> None:
+    """Require typed visual/vector intersections, never heuristic hints."""
+
+    if not isinstance(evidence, list) or not evidence:
+        issues.append(
+            "multi-annotation contract overlap_evidence must be a nonempty list "
+            "of structured actual intersection evidence"
+        )
+        return
+
+    valid = candidate_ids is not None
+    for item in evidence:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"type", "candidate_ids"}
+            or item.get("type") not in ACTUAL_INTERSECTION_EVIDENCE_TYPES
+            or not isinstance(item.get("candidate_ids"), list)
+        ):
+            valid = False
+            continue
+        item_ids = item["candidate_ids"]
+        if (
+            not all(isinstance(candidate_id, str) and candidate_id.strip() for candidate_id in item_ids)
+            or len(item_ids) != len(set(item_ids))
+            or candidate_ids is None
+            or set(item_ids) != candidate_ids
+        ):
+            valid = False
+    if not valid:
+        issues.append(
+            "multi-annotation contract overlap_evidence must use allowlisted "
+            "actual intersection types and exactly identify affected candidates"
+        )
+
+
+def _validate_readable_candidate_ids(
+    readable: dict[str, object], candidate_ids: set[str] | None, issues: list[str]
+) -> set[str] | None:
+    """Require a unique, complete readable candidate set."""
+
+    readable_ids = readable.get("readable_candidate_ids")
+    if not isinstance(readable_ids, list) or not all(
+        isinstance(candidate_id, str) and candidate_id.strip()
+        for candidate_id in readable_ids
+    ):
+        issues.append(
+            "multi-annotation contract readable_candidate_ids must list at least "
+            "two nonempty candidate IDs"
+        )
+        return None
+
+    too_few_ids = len(readable_ids) < 2
+    if too_few_ids:
+        issues.append(
+            "multi-annotation contract readable_candidate_ids must list at least "
+            "two nonempty candidate IDs"
+        )
+    duplicate_ids = sorted(
+        candidate_id
+        for candidate_id in set(readable_ids)
+        if readable_ids.count(candidate_id) > 1
+    )
+    for candidate_id in duplicate_ids:
+        issues.append(
+            "multi-annotation contract readable_candidate_ids contain duplicate "
+            f"candidate ID: {candidate_id}"
+        )
+    readable_id_set = set(readable_ids)
+    if candidate_ids is not None:
+        for candidate_id in sorted(readable_id_set - candidate_ids):
+            issues.append(
+                "multi-annotation contract readable candidate ID is not a "
+                f"candidate cluster: {candidate_id}"
+            )
+        missing_ids = sorted(candidate_ids - readable_id_set)
+        if missing_ids:
+            issues.append(
+                "multi-annotation contract readable_candidate_ids must cover every "
+                f"candidate; missing: {', '.join(missing_ids)}"
+            )
+    if (
+        too_few_ids
+        or duplicate_ids
+        or candidate_ids is None
+        or readable_id_set != candidate_ids
+    ):
+        return None
+    return readable_id_set
+
+
+def _validate_readable_evidence(
+    readable: dict[str, object], readable_ids: set[str] | None, issues: list[str]
+) -> None:
+    """Require candidate-local readability, boundary, binding, and scope proof."""
+
+    evidence_rows = readable.get("candidate_evidence")
+    if not isinstance(evidence_rows, list):
+        issues.append(
+            "multi-annotation contract readable scenario must contain "
+            "candidate-specific evidence"
+        )
+        return
+
+    row_ids: list[str] = []
+    rows_by_id: dict[str, dict[str, object]] = {}
+    for row in evidence_rows:
+        if not isinstance(row, dict) or not isinstance(row.get("candidate_id"), str):
+            issues.append(
+                "multi-annotation contract readable evidence must use nonempty "
+                "candidate IDs"
+            )
+            continue
+        candidate_id = row["candidate_id"]
+        if not candidate_id.strip():
+            issues.append(
+                "multi-annotation contract readable evidence must use nonempty "
+                "candidate IDs"
+            )
+            continue
+        row_ids.append(candidate_id)
+        rows_by_id[candidate_id] = row
+
+    duplicate_ids = sorted(
+        candidate_id for candidate_id in set(row_ids) if row_ids.count(candidate_id) > 1
+    )
+    for candidate_id in duplicate_ids:
+        issues.append(
+            "multi-annotation contract readable evidence contains duplicate "
+            f"candidate ID: {candidate_id}"
+        )
+
+    if readable_ids is None:
+        return
+    for candidate_id in sorted(set(row_ids) - readable_ids):
+        issues.append(
+            "multi-annotation contract readable evidence candidate ID is not "
+            f"readable: {candidate_id}"
+        )
+    missing_ids = sorted(readable_ids - set(row_ids))
+    if missing_ids:
+        issues.append(
+            "multi-annotation contract readable evidence must cover every readable "
+            f"candidate; missing: {', '.join(missing_ids)}"
+        )
+
+    required_keys = {"candidate_id", *READABLE_EVIDENCE_TYPES}
+    for candidate_id in sorted(readable_ids & set(rows_by_id)):
+        row = rows_by_id[candidate_id]
+        if set(row) != required_keys:
+            issues.append(
+                "multi-annotation contract readable evidence must contain only "
+                "candidate-specific readability, boundary, binding, and scope fields"
+            )
+        for field_name, allowed_types in READABLE_EVIDENCE_TYPES.items():
+            values = row.get(field_name)
+            if not isinstance(values, list) or not values or any(
+                not isinstance(value, dict)
+                or set(value) != {"type"}
+                or value.get("type") not in allowed_types
+                for value in values
+            ):
+                issues.append(
+                    "multi-annotation contract readable evidence requires "
+                    f"allowlisted {field_name} for: {candidate_id}"
+                )
+
+
+def _validate_visible_expression_conflict(
+    readable: dict[str, object], readable_ids: set[str] | None, issues: list[str]
+) -> None:
+    """Require a separate, typed conflict visible across the readable candidates."""
+
+    evidence = readable.get("visible_expression_conflict_evidence")
+    if not isinstance(evidence, list) or not evidence:
+        issues.append(
+            "multi-annotation contract readable scenario requires separate visible "
+            "expression conflict evidence"
+        )
+        return
+    valid = readable_ids is not None
+    for item in evidence:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"type", "candidate_ids"}
+            or item.get("type") != VISIBLE_CONFLICT_EVIDENCE_TYPE
+            or not isinstance(item.get("candidate_ids"), list)
+            or readable_ids is None
+            or set(item["candidate_ids"]) != readable_ids
+            or len(item["candidate_ids"]) != len(set(item["candidate_ids"]))
+        ):
+            valid = False
+    if not valid:
+        issues.append(
+            "multi-annotation contract visible expression conflict evidence must "
+            "be allowlisted and identify every readable candidate"
+        )
+
+
+def _validate_multi_annotation_overlap_contract(root: Path, issues: list[str]) -> None:
+    """Require the fail-closed text-only multi-cluster overlap regression."""
+
+    documents = (
+        ("SKILL.md", root / SKILL_PATH),
+        (
+            "workflow-output.md",
+            root / SKILL_DIRECTORY / "references" / "workflow-output.md",
+        ),
+        (
+            "notation-fields.md",
+            root / SKILL_DIRECTORY / "references" / "notation-fields.md",
+        ),
+        ("README.md", root / "README.md"),
+        (
+            "multi-annotation-overlap.md",
+            root / SKILL_DIRECTORY / "references" / "multi-annotation-overlap.md",
+        ),
+    )
+    for name, path in documents:
+        text = _read_text(path, issues)
+        if text is None:
+            continue
+        for phrase in MULTI_ANNOTATION_DOCUMENT_PHRASES[name]:
+            if phrase not in text:
+                issues.append(
+                    f"{name} is missing required multi-annotation wording: {phrase}"
+                )
+
+    contract_path = root / MULTI_ANNOTATION_CONTRACT_PATH
+    contract_text = _read_text(contract_path, issues)
+    if contract_text is None:
+        issues.append(
+            "missing required multi-annotation contract: "
+            f"{MULTI_ANNOTATION_CONTRACT_PATH.as_posix()}"
+        )
+        return
+    try:
+        contract = json.loads(contract_text)
+    except json.JSONDecodeError as error:
+        issues.append(f"invalid multi-annotation contract JSON: {error.msg}")
+        return
+    if not isinstance(contract, dict):
+        issues.append("multi-annotation contract must be a JSON object")
+        return
+
+    scenarios = contract.get("scenarios")
+    if contract.get("case_id") != "multi-annotation-overlap" or not isinstance(scenarios, list):
+        issues.append("multi-annotation contract must identify its scenarios")
+        return
+    by_id = {
+        scenario.get("scenario_id"): scenario
+        for scenario in scenarios
+        if isinstance(scenario, dict)
+    }
+    unresolved = by_id.get("unresolved-overlap")
+    readable = by_id.get("readable-independent-conflict")
+    if not isinstance(unresolved, dict) or not isinstance(readable, dict):
+        issues.append("multi-annotation contract must contain unresolved and readable scenarios")
+        return
+
+    expected = unresolved.get("expected")
+    affected_candidate_ids = _validate_candidate_clusters(unresolved, issues)
+    _validate_actual_intersection_evidence(
+        unresolved.get("overlap_evidence"), affected_candidate_ids, issues
+    )
+    if not isinstance(unresolved.get("unresolved"), list) or not unresolved["unresolved"]:
+        issues.append("multi-annotation contract must record unresolved evidence")
+
+    if not isinstance(expected, dict):
+        issues.append("multi-annotation contract unresolved scenario must define expected results")
+        return
+
+    findings = expected.get("findings")
+    if not isinstance(findings, list):
+        issues.append(
+            "multi-annotation contract findings must contain one entry for every affected candidate"
+        )
+    elif affected_candidate_ids is not None:
+        finding_ids: list[str] = []
+        for finding in findings:
+            if not isinstance(finding, dict) or not isinstance(
+                finding.get("candidate_id"), str
+            ) or not finding["candidate_id"].strip():
+                issues.append(
+                    "multi-annotation contract findings must use nonempty candidate IDs"
+                )
+                continue
+            finding_ids.append(finding["candidate_id"])
+
+        duplicate_ids = sorted(
+            candidate_id
+            for candidate_id in set(finding_ids)
+            if finding_ids.count(candidate_id) > 1
+        )
+        for candidate_id in duplicate_ids:
+            issues.append(
+                "multi-annotation contract findings contain duplicate candidate ID: "
+                f"{candidate_id}"
+            )
+        for candidate_id in sorted(set(finding_ids) - affected_candidate_ids):
+            issues.append(
+                "multi-annotation contract finding candidate ID is not an affected "
+                f"candidate: {candidate_id}"
+            )
+        missing_ids = sorted(affected_candidate_ids - set(finding_ids))
+        if missing_ids:
+            issues.append(
+                "multi-annotation contract findings must cover every affected "
+                f"candidate; missing: {', '.join(missing_ids)}"
+            )
+        if (
+            len(findings) != len(affected_candidate_ids)
+            and not missing_ids
+            and not duplicate_ids
+            and not (set(finding_ids) - affected_candidate_ids)
+        ):
+            issues.append(
+                "multi-annotation contract findings must contain exactly one entry "
+                "for every affected candidate"
+            )
+        if any(
+            not isinstance(finding, dict) or finding.get("status") != "证据不足"
+            for finding in findings
+        ):
+            issues.append(
+                "multi-annotation contract every affected candidate finding must be "
+                "证据不足"
+            )
+
+    if expected.get("p1") != UNRESOLVED_OVERLAP_P1_FAILURE:
+        issues.append(
+            "multi-annotation contract must record P1 failure for every affected candidate"
+        )
+    if expected.get("p2") != UNRESOLVED_OVERLAP_P2_BLOCKED:
+        issues.append(
+            "multi-annotation contract must block P2 for every failed affected candidate"
+        )
+    if expected.get("region_status_must_not_be") != "一致":
+        issues.append(
+            "multi-annotation contract must prohibit a region status of 一致 while overlap is unresolved"
+        )
+
+    forbidden = expected.get("forbidden")
+    if not isinstance(forbidden, list) or not all(
+        isinstance(behavior, str) for behavior in forbidden
+    ):
+        issues.append("multi-annotation contract unresolved scenario must list forbidden behaviors")
+    else:
+        forbidden_set = set(forbidden)
+        for behavior in UNRESOLVED_OVERLAP_FORBIDDEN_BEHAVIORS:
+            if behavior not in forbidden_set:
+                issues.append(
+                    "multi-annotation contract unresolved scenario must forbid: "
+                    f"{behavior}"
+                )
+
+    allowed_readable_fields = {
+        "scenario_id",
+        "candidate_clusters",
+        "overlap_evidence",
+        "readable_candidate_ids",
+        "candidate_evidence",
+        "visible_expression_conflict_evidence",
+        "expected",
+    }
+    if set(readable) != allowed_readable_fields:
+        issues.append(
+            "multi-annotation contract readable scenario must not use free-form "
+            "or legacy evidence fields"
+        )
+    readable_candidate_ids = _validate_candidate_clusters(
+        readable,
+        issues,
+        require_distinct_readable_scopes=True,
+    )
+    _validate_actual_intersection_evidence(
+        readable.get("overlap_evidence"), readable_candidate_ids, issues
+    )
+    readable_ids = _validate_readable_candidate_ids(
+        readable, readable_candidate_ids, issues
+    )
+    _validate_readable_evidence(readable, readable_ids, issues)
+    _validate_visible_expression_conflict(readable, readable_ids, issues)
+
+    readable_expected = readable.get("expected")
+    if (
+        not isinstance(readable_expected, dict)
+        or readable_expected.get("permitted_status") != "疑似不一致"
+        or readable_expected.get("only_when") != "all independent evidence is present"
+        or not isinstance(readable_expected.get("not_a_claim"), list)
+    ):
+        issues.append(
+            "multi-annotation contract must permit only evidence-backed readable conflict"
+        )
+        return
+
+    readable_forbidden = readable_expected.get("forbidden")
+    if not isinstance(readable_forbidden, list) or not all(
+        isinstance(behavior, str) for behavior in readable_forbidden
+    ):
+        issues.append(
+            "multi-annotation contract readable scenario must list forbidden behaviors"
+        )
+        return
+    for behavior in READABLE_FORBIDDEN_BEHAVIORS:
+        if behavior not in set(readable_forbidden):
+            issues.append(
+                "multi-annotation contract readable scenario must forbid: "
+                f"{behavior}"
+            )
+
+
 def _validate_scope_and_ignore_files(root: Path, issues: list[str]) -> None:
     source_scope_path = root / SKILL_DIRECTORY / "references/source-scope.md"
     source_scope_text = _read_text(source_scope_path, issues)
@@ -688,6 +1269,7 @@ def validate_repository(root: Path | str) -> None:
         _validate_front_matter(repository_root, skill_text, issues)
         _validate_skill_content(skill_text, issues)
         _validate_resources(repository_root, skill_text, issues)
+    _validate_multi_annotation_overlap_contract(repository_root, issues)
     _validate_scope_and_ignore_files(repository_root, issues)
     _validate_packaging(repository_root, issues)
     _validate_ci_workflow(repository_root, issues)
