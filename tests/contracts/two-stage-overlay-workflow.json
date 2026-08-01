@@ -1,0 +1,34 @@
+{
+  "case_id": "two-stage-overlay-workflow",
+  "scope": "representation-and-readability-only",
+  "input_storage": "local-only",
+  "public_commands": [
+    "doctor",
+    "audit",
+    "plan",
+    "review-plan",
+    "apply",
+    "verify",
+    "local-regression"
+  ],
+  "allowed_operation": "delete_auxiliary_overlay_text",
+  "required_gates": [
+    "read-only audit",
+    "deterministic plan",
+    "exact plan confirmation",
+    "fresh source revalidation",
+    "temporary DXF mutation",
+    "DWG round trip",
+    "non-target preservation",
+    "atomic no-replace publication"
+  ],
+  "forbidden_operations": [
+    "layer deletion",
+    "text replacement",
+    "coordinate movement",
+    "geometry changes",
+    "dimension changes",
+    "reinforcement changes",
+    "quantity changes"
+  ]
+}
