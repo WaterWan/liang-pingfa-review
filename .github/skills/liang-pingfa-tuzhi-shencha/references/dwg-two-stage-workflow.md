@@ -16,6 +16,8 @@
 
 固定状态仍为 `一致`、`疑似不一致`、`证据不足`。`一致` 与 `证据不足` 永远不能授权修改。
 
+`audit --topology-profile <profile.json>` 是第一阶段的可选只读 audit/v2 分支，不是新的修改入口。它以固定 `beam-plan-in-situ/v1` 从显式梁边、矩形支座和完整 TEXT 边界建立原位注写位置证据；不使用最近对象，不把梁交点合成支座。所有 topology finding 固定 `actionability: false` 和 `target_id: null`，其 trace 不进入 `audited_targets`。`plan`、`apply`、`verify` 不接受 profile option，仍只允许 `delete_auxiliary_overlay_text`，并在重新审计时只比较 audit/v1 基础/辅助覆盖状态。
+
 ## 已验证的公开支持边界
 
 第二阶段受控执行已经实现，但只适用于第一阶段审计准入的初始
@@ -98,5 +100,10 @@ NTFS volume; no hostile same-account/admin process**。控制用于防止意外�
 
 验证 JSON 的输出绑定只是有时间界限的证据，不是敌对替换防护或编辑授权；替换、重写或
 移动 DWG 后必须重新验证，旧证据不能授权任何后续编辑。
+
+审计工件的自完整性 SHA-256 只用于检测意外损坏；它不能认证恶意同帐户编辑者重新签名的工件。
+任何外部提供、手工编辑或不受信任的 audit/v2 在依赖结论前，必须针对其绑定的源文件和 profile 重新运行全新的 `audit --topology-profile`。
+`validate_artifact` 只验证工件模式、规范自完整性和内部关联；没有源文件时，它不证明几何事实。
+第二阶段仍会重新审计基础源文件并忽略 topology 作为授权依据。
 
 运行 `apply --dry-run` 会执行完整的暂存修改、往返转换和重新审计，但不会发布任何 DWG 或验证工件。

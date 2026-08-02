@@ -10,6 +10,8 @@
 
 判定重叠必须有实际可见的墨迹或矢量交叉、对象框/掩膜/连通域相交，或字段边界、引出线及端点的交叠证据。单纯文字接近、同一颜色、同一图层或邻近梁线不能把候选合并，也不能单独证明重叠。
 
+本地 DWG 的可选 topology profile 同样先执行此门：直接 TEXT 的实际 WCS 文字边界相交时，每个受影响候选先为 `证据不足`，不得继续解析或绑定到梁、支座或跨。该规则见[可选梁图拓扑与原位注写审计](beam-topology-audit.md)。
+
 机器可检验的记录中，`overlap_evidence` 必须是逐候选的受控对象：只可使用 `ink_mask_intersection`、`glyph_intersection`、`leader_intersection`、`field_boundary_intersection` 或 `vector_intersection`，并列出全部受影响候选 ID。颜色、图层和线型只能置于逐候选 `candidate_hints` 中且明确为非语义提示；它们、距离、OCR 或任意说明字符串都不是重叠证据。
 
 ## 失败关闭与绑定阻断
