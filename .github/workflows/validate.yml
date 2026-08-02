@@ -60,7 +60,11 @@ jobs:
         run: |
           python -m liang_pingfa_review --help
           python -m liang_pingfa_review doctor --help
+          python -m liang_pingfa_review audit --help
+          python -m liang_pingfa_review plan --help
+          python -m liang_pingfa_review review-plan --help
           python -m liang_pingfa_review apply --help
           python -m liang_pingfa_review verify --help
+          python -m liang_pingfa_review local-regression --help
       - name: Check forbidden tracked artifacts
         run: python scripts/validate_skill.py --tracked

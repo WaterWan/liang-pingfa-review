@@ -7,6 +7,9 @@ edit-plan.json
 verification.json
 audit.md
 plan-review.md
+audit-v2.json
+audit-v2.md
+beam-topology-profile.json
 *.overlay-cleaned.dwg
 
 # Source documents and CAD exports
