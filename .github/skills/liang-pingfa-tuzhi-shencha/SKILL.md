@@ -35,6 +35,7 @@ compatibility: GitHub Copilot
 4. [本地表示回归协议](references/local-regression.md) - 仅在本地夹具回归时使用。
 5. [两阶段 DWG 审计与受控修改](references/dwg-two-stage-workflow.md) - 任何 DWG 修改请求的强制审计优先流程。
 6. [多标注簇重叠门](references/multi-annotation-overlap.md) - 当密集或疑似重叠注写可见时必须读取，并在语义解析前执行。
+7. [可选梁图拓扑与原位注写审计](references/beam-topology-audit.md) - 使用本地 DWG topology profile 时的固定只读证据门。
 
 不要复述、重建或索取来源文件中的表格、图例、数值样例或版式。输出中的来源只能写页题主题，不能伪造条文、页内坐标或不可见原文。
 
@@ -127,6 +128,8 @@ compatibility: GitHub Copilot
 标签/节、`SORTENTSTABLE` 或其他不受支持的绘制顺序/对象元数据、以及对象启用器缺失时，必须在
 计划或执行前失败关闭。不得绕过这些兼容性门，也不得通过转换或剥离代理/自定义状态来强迫成功。
 稳定的脱敏错误（例如 `UNSAFE_ENTITY_TYPE`）不含图纸细节；下一步是保留只读结论。
+
+`audit --topology-profile <profile.json>` 可额外运行固定 `beam-plan-in-situ/v1`，只审查显式梁边、支座、跨与支座上部/跨中下部原位注写的位置关系。profile 仅在本地使用，角色图层互斥且不含容差、正则、实体类型、回退或修改控制；实际重叠门必须先于 token 和拓扑绑定。不得按最近梁、支座或跨绑定，也不得把梁线交点当作支座。拓扑发现永不授权编辑：它们固定为非可操作、不会进入计划目标，`plan`、`apply`、`verify` 仍只使用既有辅助覆盖文字删除流程。
 
 ODA File Converter 不是原生数据库编辑，不能使每份 DWG 获得资格。若用户要求保留代理/自定义
 状态，应说明需要适当许可的 ODA Drawings SDK、Autodesk RealDWG/AutoCAD 环境和相关 object

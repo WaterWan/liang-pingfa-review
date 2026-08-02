@@ -176,6 +176,11 @@ ODA 可执行文件、操作系统和本地 NTFS 卷；不存在恶意的同帐�
 一个狭窄支持配置的资格验证，不是一般 DWG 认证。LibreDWG 不是运行时回退，也不被要求或
 捆绑；项目不添加其 GPL 工件。
 
+审计工件的自完整性 SHA-256 只用于检测意外损坏；它不能认证恶意同帐户编辑者重新签名的工件。
+任何外部提供、手工编辑或不受信任的 audit/v2 在依赖结论前，必须针对其绑定的源文件和 profile 重新运行全新的 `audit --topology-profile`。
+`validate_artifact` 只验证工件模式、规范自完整性和内部关联；没有源文件时，它不证明几何事实。
+第二阶段仍会重新审计基础源文件并忽略 topology 作为授权依据。
+
 ### 安装与环境检查
 
 ```powershell
@@ -212,6 +217,22 @@ python -m liang_pingfa_review review-plan `
   --audit .\output\audit.json `
   --plan .\output\edit-plan.json
 ```
+
+### 可选梁图拓扑审计（只读）
+
+若本机拥有明确的图层角色约定，可只为 `audit` 额外提供严格本地 JSON profile：
+
+```powershell
+python -m liang_pingfa_review audit `
+  --input .\input.dwg `
+  --audit-out .\output\audit-v2.json `
+  --report-out .\output\audit-v2.md `
+  --topology-profile .\beam-topology-profile.json
+```
+
+profile 固定包含互斥的 `beam_edges`、`beam_ids`、`column_supports`、`wall_supports`、`generic_supports`、`support_upper_annotations`、`span_lower_annotations` 和 `leaders` 图层数组；名称按 NFC/casefold 比较，不能使用 `TEMP`/`textarea`，也不能配置容差、正则、实体类型、回退、修改或代码。该选项生成 `liang-pingfa/audit/v2`，以固定 `beam-plan-in-situ/v1` 对直接可见、不透明、共面的 Modelspace 几何建立方向无关的梁轴、显式矩形支座、跨和原位注写位置证据。
+
+它不按最近对象绑定，不把梁或次梁交点合成为支座；未互配的受控梁边保留为私有阻断几何，触及标注、引出线或目标走廊时只能输出 `证据不足`。所有精确关系共享固定预算并先经有界空间/区间索引筛选；耗尽时以 `TOPOLOGY_LIMIT_EXCEEDED` 失败关闭。v2 不公开原文、坐标、图层、颜色、路径、原始散列或 token 单独散列；token 只在内存中比较，trace 最多表达布尔的相等性门结果。所有 topology finding 都是 `actionability: false` 和 `target_id: null`，trace 永不进入 `audited_targets`。`plan`、`apply`、`verify` 没有 topology option，第二阶段仍只删除既有、精确审计过的辅助覆盖 `TEXT`；从 audit/v2 重新审计时只比较 audit/v1 基础/覆盖状态。详见[可选梁图拓扑审计参考](.github/skills/liang-pingfa-tuzhi-shencha/references/beam-topology-audit.md)。
 
 计划文件中的精确 `plan_id` 必须显式确认。`apply` 需要一个不同于源文件且尚不存在的新输出路径；没有 `--force`，也不会原地写入或替换任何已有文件。
 
