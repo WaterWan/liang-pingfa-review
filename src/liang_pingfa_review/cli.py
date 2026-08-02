@@ -24,6 +24,7 @@ from .oda import OdaRunner
 from .ownership import OwnershipError, private_staging_capability
 from .plan import generate_edit_plan, validate_plan_against_audit
 from .reports import render_audit_report, render_plan_review
+from .topology_profile import load_topology_profile
 from .verify import verify_dwg
 
 
@@ -109,6 +110,11 @@ def _doctor(arguments: argparse.Namespace) -> None:
 
 
 def _audit(arguments: argparse.Namespace) -> None:
+    topology_profile = (
+        load_topology_profile(arguments.topology_profile)
+        if arguments.topology_profile is not None
+        else None
+    )
     output_targets = _bound_new_output_paths(
         arguments.audit_out,
         arguments.report_out,
@@ -118,7 +124,11 @@ def _audit(arguments: argparse.Namespace) -> None:
         # Public artifacts are emitted while the audit's source lexical chain
         # and immutable file handle remain live. A source pathname cannot be
         # redirected between the audit binding and publication transaction.
-        with bound_audit_dwg(arguments.input, _runner(arguments)) as audit:
+        with bound_audit_dwg(
+            arguments.input,
+            _runner(arguments),
+            topology_profile=topology_profile,
+        ) as audit:
             write_new_artifacts(
                 (
                     (
@@ -245,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--input", type=Path, required=True)
     audit.add_argument("--audit-out", type=Path, required=True)
     audit.add_argument("--report-out", type=Path, required=True)
+    audit.add_argument(
+        "--topology-profile",
+        type=Path,
+        help="local read-only beam topology profile; it never authorizes edits",
+    )
     audit.add_argument("--oda-file-converter", type=Path)
     audit.set_defaults(handler=_audit)
 

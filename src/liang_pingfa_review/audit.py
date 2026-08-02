@@ -27,6 +27,11 @@ from .oda import SUPPORTED_ODA_VERSION, staged_dwg_to_dxf
 from .overlay_profile import assess_auxiliary_overlays, profile_findings
 from .snapshots import Snapshot, snapshot_dxf
 from .temporary import PrivateWorkspace
+from .topology_profile import (
+    TopologyProfile,
+    assess_beam_topology,
+    topology_snapshot_context,
+)
 
 
 class Converter(Protocol):
@@ -58,6 +63,7 @@ def build_audit(
     *,
     oda_version: str,
     now: datetime | None = None,
+    topology_profile: TopologyProfile | None = None,
 ) -> dict[str, Any]:
     """Build a signed audit artifact from an immutable temporary DXF snapshot."""
 
@@ -107,6 +113,14 @@ def build_audit(
         "findings": findings,
         "audited_targets": targets,
     }
+    if topology_profile is not None:
+        # The topology branch is strictly additive, read-only evidence.  The
+        # v1 fields remain the unchanged overlay/mutation authorization view.
+        artifact["schema_version"] = "liang-pingfa/audit/v2"
+        artifact["topology_assessment"] = assess_beam_topology(
+            snapshot,
+            topology_profile,
+        )
     signed = attach_integrity(artifact)
     return validate_artifact("audit", signed)
 
@@ -117,6 +131,7 @@ def bound_audit_dwg(
     converter: Converter,
     *,
     now: datetime | None = None,
+    topology_profile: TopologyProfile | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield an audit while its source chain/file lease remains retained.
 
@@ -138,13 +153,27 @@ def bound_audit_dwg(
                 workspace,
                 converter,  # type: ignore[arg-type]
             )
-            snapshot = snapshot_dxf(dxf_path)
+            snapshot = snapshot_dxf(
+                dxf_path,
+                include_topology_evidence=topology_profile is not None,
+                topology_context=(
+                    topology_snapshot_context(topology_profile)
+                    if topology_profile is not None
+                    else None
+                ),
+            )
             if not source_lease_matches(source_lease, source.to_artifact()):
                 raise PipelineError(
                     ErrorCode.SOURCE_CHANGED_DURING_RUN,
                     "source changed while phase-one audit ran",
                 )
-            audit = build_audit(snapshot, source, oda_version=converter.version, now=now)
+            audit = build_audit(
+                snapshot,
+                source,
+                oda_version=converter.version,
+                now=now,
+                topology_profile=topology_profile,
+            )
             yield audit
             if not source_lease_matches(source_lease, source.to_artifact()):
                 raise PipelineError(
@@ -160,8 +189,14 @@ def audit_dwg(
     converter: Converter,
     *,
     now: datetime | None = None,
+    topology_profile: TopologyProfile | None = None,
 ) -> dict[str, Any]:
     """Audit a DWG without handing ODA the original directory or output path."""
 
-    with bound_audit_dwg(source_path, converter, now=now) as audit:
+    with bound_audit_dwg(
+        source_path,
+        converter,
+        now=now,
+        topology_profile=topology_profile,
+    ) as audit:
         return audit

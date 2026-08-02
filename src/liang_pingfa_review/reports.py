@@ -37,6 +37,18 @@ def render_audit_report(audit: Mapping[str, Any]) -> str:
         "本审计不直接修改 DWG，也不公开源图文字、坐标、路径、句柄、散列或私有元数据。",
         "",
     ]
+    if audit.get("schema_version") == "liang-pingfa/audit/v2":
+        lines.extend(
+            [
+                "## 可选梁图拓扑审计",
+                "",
+                "已执行本地只读的梁轴、显式支座、跨和原位注写语义位置审计。",
+                "该分支不公开文字、坐标、图层、路径、颜色、句柄、原始散列或 token 单独散列；不报告数量。",
+                "token 只在本机内存中比较；工件至多保留布尔的相等性门结果。",
+                "无论其状态为何，拓扑发现永不授权编辑，也不会进入第二阶段目标。",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
