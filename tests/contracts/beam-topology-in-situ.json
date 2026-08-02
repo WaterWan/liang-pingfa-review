@@ -1,0 +1,84 @@
+{
+  "case_id": "beam-topology-in-situ",
+  "scope": "representation-and-readability-only",
+  "input_storage": "local-only",
+  "policy": "beam-plan-in-situ/v1",
+  "profile": {
+    "local_only": true,
+    "required_role_arrays": [
+      "beam_edges",
+      "beam_ids",
+      "column_supports",
+      "wall_supports",
+      "generic_supports",
+      "support_upper_annotations",
+      "span_lower_annotations",
+      "leaders"
+    ],
+    "forbidden_profile_controls": [
+      "tolerances",
+      "regexes",
+      "entity_types",
+      "fallback_rules",
+      "mutation",
+      "arbitrary_code"
+    ]
+  },
+  "audit_trust": {
+    "self_integrity": "accidental-corruption-detection-only",
+    "not_authenticated_against": "malicious-same-account-editor",
+    "external_or_edited_audit_requirement": "fresh-audit-topology-profile-against-bound-source-profile-before-reliance",
+    "validate_artifact": "schema-self-integrity-and-internal-links-only-not-geometric-truth"
+  },
+  "required_rules": [
+    "direct-visible-opaque-coplanar-modelspace-only",
+    "actual-overlap-gate-before-binding",
+    "controlled-text-overlap-before-role-eligibility",
+    "no-nearest-binding",
+    "explicit-support-polygons-only",
+    "different-id-collinear-beams-stay-separate",
+    "support-upper-adjacent-zones-side-neutral",
+    "bounded-chain-relations",
+    "unpaired-controlled-geometry-gate",
+    "single-relation-budget",
+    "bounded-spatial-and-interval-indexes",
+    "token-equality-in-memory-only",
+    "trace-manifest-eligibility-and-owned-tuples",
+    "topology-findings-non-actionable",
+    "phase-two-overlay-only"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "unique-legal-placement",
+      "expected_statuses": ["一致"],
+      "actionability": false
+    },
+    {
+      "scenario_id": "wrong-side-or-zone",
+      "expected_statuses": ["疑似不一致"],
+      "actionability": false
+    },
+    {
+      "scenario_id": "repeated-or-overlapping-evidence",
+      "expected_statuses": ["证据不足"],
+      "actionability": false
+    }
+  ],
+  "prohibited_output": [
+    "raw_annotation_text",
+    "coordinates",
+    "layer_names",
+    "colors",
+    "paths",
+    "raw_hashes",
+    "token_only_fingerprints"
+  ],
+  "non_claims": [
+    "structural calculation",
+    "capacity",
+    "compliance",
+    "design correctness",
+    "design approval",
+    "construction instruction"
+  ]
+}
