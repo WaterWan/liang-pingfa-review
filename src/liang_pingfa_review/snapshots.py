@@ -10,7 +10,8 @@ import io
 from math import isfinite
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+import unicodedata
 
 import ezdxf
 from ezdxf import bbox
@@ -40,6 +41,9 @@ from .ownership import (
     platform_backend,
 )
 
+if TYPE_CHECKING:
+    from .topology_profile import TopologyEntityEvidence, TopologySnapshotContext
+
 
 SUPPORTED_ENTITY_TYPES = frozenset(
     {"TEXT", "LINE", "LWPOLYLINE", "INSERT", "DIMENSION", "HATCH"}
@@ -49,6 +53,12 @@ _TOLERANCE = PLANE_TOLERANCE
 _LAYER_FROZEN_IN_NEW_VIEWPORT = 2
 _NON_DISPLAYABLE_LAYER_FLAGS = 1 | _LAYER_FROZEN_IN_NEW_VIEWPORT
 _SUPPORTED_LAYER_FLAGS = 1 | 2 | 4 | 16 | 32 | 64
+
+
+def _normalized_layer_key(value: str) -> str:
+    """Match the profile's NFC/casefolded layer namespace."""
+
+    return unicodedata.normalize("NFC", value).casefold()
 
 # Only tool-managed identity/allocation and elapsed-time fields are excluded.
 # Representation, content, coordinate, unit, version, and display settings
@@ -187,6 +197,10 @@ class EntityRecord:
     plane_elevation: float | None
     anchor: tuple[float, float] | None
     bounds: Bounds | None
+    # Optional v2-only data remains private to the in-memory snapshot.  It is
+    # deliberately omitted from ``public()`` so an audit without a topology
+    # profile remains byte/semantic audit/v1-compatible.
+    topology_evidence: TopologyEntityEvidence | None = None
 
     @property
     def visible(self) -> bool:
@@ -866,7 +880,7 @@ def _layer_visual_state_by_name(document: Any) -> dict[str, LayerVisualState]:
         name = str(layer.dxf.get("name", ""))
         if not name:
             raise PipelineError(ErrorCode.UNSAFE_ENTITY_TYPE, "layer lacks a name")
-        key = name.casefold()
+        key = _normalized_layer_key(name)
         if key in visual_state:
             raise PipelineError(ErrorCode.UNSAFE_ENTITY_TYPE, "duplicate layer name")
         visual_state[key] = LayerVisualState(
@@ -884,6 +898,8 @@ def _record(
     container_name: str,
     dxfversion: str,
     layer_visual_state: Mapping[str, LayerVisualState] | None = None,
+    include_topology_evidence: bool = False,
+    topology_context: "TopologySnapshotContext | None" = None,
 ) -> EntityRecord:
     entity_type = entity.dxftype()
     _assert_supported_entity(entity)
@@ -892,10 +908,11 @@ def _record(
     layer = str(entity.dxf.get("layer", ""))
     if not handle or not owner or not layer:
         raise PipelineError(ErrorCode.UNSAFE_ENTITY_TYPE, "entity lacks stable ownership")
-    if layer_visual_state is not None and layer.casefold() not in layer_visual_state:
+    layer_key = _normalized_layer_key(layer)
+    if layer_visual_state is not None and layer_key not in layer_visual_state:
         raise PipelineError(ErrorCode.UNSAFE_ENTITY_TYPE, "entity layer is unavailable")
     visual_state = (
-        layer_visual_state[layer.casefold()]
+        layer_visual_state[layer_key]
         if layer_visual_state is not None
         else LayerVisualState(visible=True, transparency=0.0)
     )
@@ -914,6 +931,16 @@ def _record(
         }
     )
     bounds, plane_elevation = _entity_geometry(entity, dxfversion)
+    topology_eligible = bool(
+        include_topology_evidence
+        and topology_context is not None
+        and layout == "modelspace"
+        and _entity_is_visible(entity)
+        and visual_state.visible
+        and _entity_transparency_is_opaque(_entity_transparency(entity))
+        and _layer_transparency_is_opaque(visual_state.transparency)
+        and layer_key in topology_context.role_layers
+    )
     return EntityRecord(
         handle=handle,
         entity_type=entity_type,
@@ -932,7 +959,79 @@ def _record(
         plane_elevation=plane_elevation,
         anchor=_entity_anchor(entity),
         bounds=bounds,
+        topology_evidence=(
+            _topology_evidence(entity, dxfversion)
+            if topology_eligible
+            else None
+        ),
     )
+
+
+def _topology_evidence(
+    entity: Any,
+    dxfversion: str,
+) -> "TopologyEntityEvidence | None":
+    """Extract v2-only primitives lazily so v1 never loads topology policy."""
+
+    from .topology_profile import extract_topology_evidence
+
+    return extract_topology_evidence(entity, dxfversion)
+
+
+def _assert_topology_capture_limits(
+    document: Any,
+    *,
+    layer_visual_state: Mapping[str, LayerVisualState],
+    topology_context: "TopologySnapshotContext | None",
+) -> None:
+    """Reject over-cap eligible roles before materializing private evidence."""
+
+    if topology_context is None:
+        return
+    from .topology_profile import (
+        MAX_ANNOTATIONS,
+        MAX_LEADERS,
+        MAX_ROLE_ENTITIES,
+        MAX_SUPPORTS,
+        _ANNOTATION_ROLES,
+        _SUPPORT_ROLES,
+        _limit_error,
+    )
+
+    role_count = support_count = text_count = leader_count = 0
+    for entity in document.modelspace():
+        try:
+            layer = str(entity.dxf.get("layer", ""))
+            layer_key = _normalized_layer_key(layer)
+            visual_state = layer_visual_state[layer_key]
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Structural validation/redaction remains owned by _record().
+            continue
+        if not (
+            layer_key in topology_context.role_layers
+            and _entity_is_visible(entity)
+            and visual_state.visible
+            and _entity_transparency_is_opaque(_entity_transparency(entity))
+            and _layer_transparency_is_opaque(visual_state.transparency)
+        ):
+            continue
+        role = topology_context.roles.role_for(layer_key)
+        if role is None:
+            continue
+        role_count += 1
+        if role in _SUPPORT_ROLES:
+            support_count += 1
+        elif role in {"beam_ids", *_ANNOTATION_ROLES}:
+            text_count += 1
+        elif role == "leaders":
+            leader_count += 1
+        if (
+            role_count > MAX_ROLE_ENTITIES
+            or support_count > MAX_SUPPORTS
+            or text_count > MAX_ANNOTATIONS
+            or leader_count > MAX_LEADERS
+        ):
+            raise _limit_error()
 
 
 def _assert_supported_entity(entity: Any) -> None:
@@ -1482,6 +1581,8 @@ def _snapshot_document_unchecked(
     document: Any,
     *,
     raw_preflight: RawDxfPreflight | None = None,
+    include_topology_evidence: bool = False,
+    topology_context: "TopologySnapshotContext | None" = None,
 ) -> Snapshot:
     """Create an immutable snapshot of supported DXF entities and table state.
 
@@ -1497,6 +1598,12 @@ def _snapshot_document_unchecked(
     _assert_raw_classes_match(checked_raw, normalized_classes)
     records: list[EntityRecord] = []
     layer_visual_state = _layer_visual_state_by_name(document)
+    if include_topology_evidence:
+        _assert_topology_capture_limits(
+            document,
+            layer_visual_state=layer_visual_state,
+            topology_context=topology_context,
+        )
     for layout in document.layouts:
         layout_kind = "modelspace" if str(layout.name) == "Model" else "paperspace"
         records.extend(
@@ -1507,6 +1614,8 @@ def _snapshot_document_unchecked(
                 container_name=str(layout.name),
                 dxfversion=document.dxfversion,
                 layer_visual_state=layer_visual_state,
+                include_topology_evidence=include_topology_evidence,
+                topology_context=topology_context,
             )
             for sequence_index, entity in enumerate(layout)
         )
@@ -1520,6 +1629,8 @@ def _snapshot_document_unchecked(
                 container_name=block_name,
                 dxfversion=document.dxfversion,
                 layer_visual_state=layer_visual_state,
+                include_topology_evidence=include_topology_evidence,
+                topology_context=topology_context,
             )
             for sequence_index, entity in enumerate(block)
         )
@@ -1555,6 +1666,8 @@ def snapshot_document(
     document: Any,
     *,
     raw_preflight: RawDxfPreflight | None = None,
+    include_topology_evidence: bool = False,
+    topology_context: "TopologySnapshotContext | None" = None,
 ) -> Snapshot:
     """Create a snapshot while redacting loader structural failures.
 
@@ -1565,7 +1678,12 @@ def snapshot_document(
     """
 
     try:
-        return _snapshot_document_unchecked(document, raw_preflight=raw_preflight)
+        return _snapshot_document_unchecked(
+            document,
+            raw_preflight=raw_preflight,
+            include_topology_evidence=include_topology_evidence,
+            topology_context=topology_context,
+        )
     except PipelineError:
         raise
     except (
@@ -1736,8 +1854,23 @@ def read_preflighted_dxf(path: Path) -> tuple[Any, RawDxfPreflight]:
         return document, raw_preflight
 
 
-def snapshot_dxf(path: Path) -> Snapshot:
-    """Read a temporary DXF and create a read-only preservation snapshot."""
+def snapshot_dxf(
+    path: Path,
+    *,
+    include_topology_evidence: bool = False,
+    topology_context: "TopologySnapshotContext | None" = None,
+) -> Snapshot:
+    """Read a temporary DXF and create a read-only preservation snapshot.
+
+    Topology primitives are opt-in private analysis data.  The default v1
+    path therefore retains full entity fingerprints without extracting or
+    storing geometry vertices.
+    """
 
     with open_preflighted_dxf(path) as (document, raw_preflight):
-        return snapshot_document(document, raw_preflight=raw_preflight)
+        return snapshot_document(
+            document,
+            raw_preflight=raw_preflight,
+            include_topology_evidence=include_topology_evidence,
+            topology_context=topology_context,
+        )
