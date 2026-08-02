@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from ezdxf.colors import float2transparency
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
@@ -21,6 +22,15 @@ from .canonical import (
     verify_integrity,
 )
 from .errors import ErrorCode, PipelineError
+from .topology_ids import (
+    derive_annotation_target_provenance_id,
+    derive_chain_id,
+    derive_span_id,
+    derive_support_id,
+    derive_topology_finding_id,
+    derive_trace_id,
+    entity_provenance,
+)
 
 
 ArtifactKind = Literal["audit", "plan", "verification"]
@@ -29,6 +39,154 @@ _SCHEMA_FILES: dict[ArtifactKind, str] = {
     "plan": "edit-plan-v1.schema.json",
     "verification": "verification-v1.schema.json",
 }
+_AUDIT_SCHEMA_FILES = {
+    "liang-pingfa/audit/v1": "audit-v1.schema.json",
+    "liang-pingfa/audit/v2": "audit-v2.schema.json",
+}
+_DEFAULT_ENTITY_TRANSPARENCY = float2transparency(0.0)
+_SUPPORT_TRACE_ROLES = frozenset({"support_geometry"})
+_CHAIN_ONLY_TRACE_ROLES = frozenset({"beam_edges", "beam_ids"})
+_ROLE_ENTITY_TYPES: dict[str, frozenset[str]] = {
+    "beam_edges": frozenset({"LINE", "LWPOLYLINE"}),
+    "beam_ids": frozenset({"TEXT"}),
+    "support_geometry": frozenset({"LWPOLYLINE"}),
+    "support_upper_annotations": frozenset({"TEXT"}),
+    "span_lower_annotations": frozenset({"TEXT"}),
+    "leaders": frozenset({"LINE", "LWPOLYLINE"}),
+    # A rendered ambiguity can originate from any configured role, but never
+    # from an unrelated manifest type and never retains target ownership.
+    "ambiguity": frozenset({"TEXT", "LINE", "LWPOLYLINE"}),
+}
+# A topology conclusion is meaningful only with this exact presentation and
+# evidence role.  In particular, a trace that was conservatively rendered as
+# ambiguity never establishes a legal or uniquely illegal annotation target.
+_TOPOLOGY_FINDING_PRESENTATION: dict[
+    tuple[str, str], dict[str, object]
+] = {
+    (
+        "support_upper_annotation",
+        "一致",
+    ): {
+        "object_position": "支座上部原位注写",
+        "field": "原位注写语义位置",
+        "visible_evidence": "已建立唯一拓扑位置",
+        "reasoning": "角色、文本边界和唯一拓扑目标一致",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "无",
+        "next_step": "保持只读结论",
+    },
+    (
+        "span_lower_annotation",
+        "一致",
+    ): {
+        "object_position": "跨中下部原位注写",
+        "field": "原位注写语义位置",
+        "visible_evidence": "已建立唯一拓扑位置",
+        "reasoning": "角色、文本边界和唯一拓扑目标一致",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "无",
+        "next_step": "保持只读结论",
+    },
+    (
+        "support_upper_annotation",
+        "疑似不一致",
+    ): {
+        "object_position": "支座上部原位注写",
+        "field": "原位注写语义位置",
+        "visible_evidence": "位置与已建立拓扑不相容",
+        "reasoning": "角色、文本边界或引出线与唯一拓扑目标不相容",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "无",
+        "next_step": "保持只读结论",
+    },
+    (
+        "span_lower_annotation",
+        "疑似不一致",
+    ): {
+        "object_position": "跨中下部原位注写",
+        "field": "原位注写语义位置",
+        "visible_evidence": "位置与已建立拓扑不相容",
+        "reasoning": "角色、文本边界或引出线与唯一拓扑目标不相容",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "无",
+        "next_step": "保持只读结论",
+    },
+    (
+        "support_upper_annotation",
+        "证据不足",
+    ): {
+        "object_position": "支座上部原位注写",
+        "field": "原位注写语义位置",
+        "visible_evidence": "拓扑或标注证据不足",
+        "reasoning": "不以图层、距离或最近对象推断拓扑归属",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "拓扑或标注位置证据",
+        "next_step": "补充完整可读视图后重新审计",
+    },
+    (
+        "span_lower_annotation",
+        "证据不足",
+    ): {
+        "object_position": "跨中下部原位注写",
+        "field": "原位注写语义位置",
+        "visible_evidence": "拓扑或标注证据不足",
+        "reasoning": "不以图层、距离或最近对象推断拓扑归属",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "拓扑或标注位置证据",
+        "next_step": "补充完整可读视图后重新审计",
+    },
+    (
+        "topology",
+        "证据不足",
+    ): {
+        "object_position": "梁图拓扑",
+        "field": "原位注写语义位置",
+        "visible_evidence": "拓扑或标注证据不足",
+        "reasoning": "不以图层、距离或最近对象推断拓扑归属",
+        "source_topics": ["平面与截面表达、集中与原位作用域"],
+        "unreadable_parts": "拓扑或标注位置证据",
+        "next_step": "补充完整可读视图后重新审计",
+    },
+}
+_TOPOLOGY_FINDING_ROLE_MATRIX: dict[tuple[str, str], frozenset[str]] = {
+    ("support_upper_annotation", "一致"): frozenset(
+        {"support_upper_annotations"}
+    ),
+    ("span_lower_annotation", "一致"): frozenset({"span_lower_annotations"}),
+    ("support_upper_annotation", "疑似不一致"): frozenset(
+        {"support_upper_annotations"}
+    ),
+    ("span_lower_annotation", "疑似不一致"): frozenset(
+        {"span_lower_annotations"}
+    ),
+    ("support_upper_annotation", "证据不足"): frozenset(
+        {"support_upper_annotations", "ambiguity"}
+    ),
+    ("span_lower_annotation", "证据不足"): frozenset(
+        {"span_lower_annotations", "ambiguity"}
+    ),
+    # A topology-level insufficiency can be caused by any controlled source
+    # role, but it never carries a positive or uniquely illegal conclusion.
+    ("topology", "证据不足"): frozenset(_ROLE_ENTITY_TYPES),
+}
+
+
+def _topology_manifest_eligible(manifest: Mapping[str, Any]) -> bool:
+    """Require public, direct Modelspace display evidence for every trace.
+
+    Trace fingerprints are binding evidence, not permission to reuse a hidden,
+    paperspace, block, switched-off, frozen, or translucent manifest record.
+    The manifest deliberately exposes only layout and display-state values;
+    it never needs raw layer names, coordinates, or source text for this gate.
+    """
+
+    return bool(
+        manifest["layout"] == "modelspace"
+        and manifest["entity_visible"] is True
+        and manifest["layer_visible"] is True
+        and manifest["entity_transparency"] in (None, _DEFAULT_ENTITY_TRANSPARENCY)
+        and manifest["layer_transparency"] == 0.0
+    )
 
 
 def _artifact_error(kind: ArtifactKind) -> ErrorCode:
@@ -39,10 +197,21 @@ def _artifact_error(kind: ArtifactKind) -> ErrorCode:
     }[kind]
 
 
-def schema_for(kind: ArtifactKind) -> dict[str, Any]:
+def schema_for(
+    kind: ArtifactKind,
+    schema_version: str | None = None,
+) -> dict[str, Any]:
     """Load a packaged Draft 2020-12 schema."""
 
-    filename = _SCHEMA_FILES[kind]
+    if kind == "audit":
+        filename = _AUDIT_SCHEMA_FILES.get(
+            schema_version or "liang-pingfa/audit/v1",
+            "",
+        )
+        if not filename:
+            raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "unknown audit version")
+    else:
+        filename = _SCHEMA_FILES[kind]
     try:
         text = (
             resources.files("liang_pingfa_review.schemas")
@@ -62,7 +231,12 @@ def schema_for(kind: ArtifactKind) -> dict[str, Any]:
 
 
 def _validate_schema(kind: ArtifactKind, artifact: Mapping[str, Any]) -> None:
-    validator = Draft202012Validator(schema_for(kind))
+    schema_version = artifact.get("schema_version") if kind == "audit" else None
+    if kind == "audit" and not isinstance(schema_version, str):
+        raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "audit schema version missing")
+    validator = Draft202012Validator(
+        schema_for(kind, cast(str | None, schema_version))
+    )
     errors = sorted(validator.iter_errors(artifact), key=lambda item: list(item.path))
     if errors:
         raise PipelineError(_artifact_error(kind), "JSON Schema validation failed")
@@ -291,6 +465,11 @@ def _validate_audit_semantics(artifact: dict[str, Any]) -> None:
             or manifest_entity["content_fingerprint"] != target["content_fingerprint"]
         ):
             raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "target does not match finding")
+        if target["profile"] != "auxiliary-overlay-text-delete/v1":
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "audit target is outside overlay mutation profile",
+            )
         target_handles.add(target["handle"])
 
     for finding in findings:
@@ -329,6 +508,416 @@ def _validate_audit_semantics(artifact: dict[str, Any]) -> None:
     expires = parse_utc(artifact["expires_at"])
     if expires != created + timedelta(hours=24):
         raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "invalid audit expiration")
+    if artifact["schema_version"] == "liang-pingfa/audit/v2":
+        _validate_topology_semantics(
+            artifact,
+            manifest_by_handle=manifest_by_handle,
+            target_handles=target_handles,
+            finding_ids=set(findings_by_id),
+        )
+
+
+def _validate_topology_semantics(
+    artifact: Mapping[str, Any],
+    *,
+    manifest_by_handle: Mapping[str, Mapping[str, Any]],
+    target_handles: set[str],
+    finding_ids: set[str],
+) -> None:
+    """Enforce v2's permanent topology-to-mutation firewall."""
+
+    assessment = cast(Mapping[str, Any], artifact["topology_assessment"])
+    findings = cast(list[Mapping[str, Any]], assessment["findings"])
+    traces = cast(list[Mapping[str, Any]], assessment["traces"])
+    chains = cast(list[Mapping[str, Any]], assessment["chains"])
+    topology_finding_ids = [cast(str, finding["finding_id"]) for finding in findings]
+    if len(topology_finding_ids) != len(set(topology_finding_ids)):
+        raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "duplicate topology finding")
+    if set(topology_finding_ids) & finding_ids:
+        raise PipelineError(
+            ErrorCode.AUDIT_SCHEMA_INVALID, "topology finding collides with overlay"
+        )
+    for finding in findings:
+        if (
+            finding["actionability"] is not False
+            or finding["target_id"] is not None
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology finding attempted authorization",
+            )
+
+    chain_ids = [cast(str, chain["chain_id"]) for chain in chains]
+    if len(chain_ids) != len(set(chain_ids)):
+        raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "duplicate chain")
+    trace_ids = [cast(str, trace["trace_id"]) for trace in traces]
+    handles = [cast(str, trace["entity_handle"]) for trace in traces]
+    if len(trace_ids) != len(set(trace_ids)) or len(handles) != len(set(handles)):
+        raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "duplicate topology trace")
+    chain_id_set = set(chain_ids)
+    traces_by_id = {cast(str, trace["trace_id"]): trace for trace in traces}
+    for trace in traces:
+        handle = cast(str, trace["entity_handle"])
+        manifest = manifest_by_handle.get(handle)
+        if manifest is None or handle in target_handles:
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "topology trace does not resolve"
+            )
+        if (
+            trace["identity_fingerprint"] != manifest["identity_fingerprint"]
+            or trace["content_fingerprint"] != manifest["content_fingerprint"]
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "topology trace fingerprint mismatch"
+            )
+        if not _topology_manifest_eligible(manifest):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology trace is not eligible Modelspace evidence",
+            )
+        role = cast(str, trace["role"])
+        if manifest["entity_type"] not in _ROLE_ENTITY_TYPES.get(role, frozenset()):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology trace has incompatible manifest entity type",
+            )
+        if trace["trace_id"] != derive_trace_id(
+            cast(str, trace["identity_fingerprint"]),
+            cast(str, trace["content_fingerprint"]),
+            role,
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology trace identifier is not derived from provenance",
+            )
+        # V2 discloses only the result of a local token-equality gate.  The
+        # schema excludes token values, equality classes, and token-only
+        # fingerprints; retain an explicit runtime check for hand-built maps.
+        if not isinstance(trace["token_equality_established"], bool):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "invalid topology token equality relation",
+            )
+        chain_id = trace["chain_id"]
+        support_id = trace["support_id"]
+        span_id = trace["span_id"]
+        if support_id is not None and span_id is not None:
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology trace binds support and span together",
+            )
+        if role not in {"support_upper_annotations", "span_lower_annotations"} and (
+            trace["target_provenance_id"] is not None
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "non-annotation trace has target provenance",
+            )
+        if chain_id is not None and chain_id not in chain_id_set:
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "unknown topology chain target"
+            )
+        if role in _CHAIN_ONLY_TRACE_ROLES:
+            if support_id is not None or span_id is not None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "beam trace has non-chain target",
+                )
+            if role == "beam_ids" and chain_id is None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "beam ID trace lacks admitted chain",
+                )
+        elif role in _SUPPORT_TRACE_ROLES:
+            if span_id is not None or ((chain_id is None) != (support_id is None)):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "support trace has incomplete owner binding",
+                )
+        elif role == "support_upper_annotations":
+            if chain_id is None or support_id is None or span_id is not None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "support annotation has invalid target tuple",
+                )
+            if trace["target_provenance_id"] != derive_annotation_target_provenance_id(
+                cast(str, trace["trace_id"]),
+                cast(str, chain_id),
+                cast(str, support_id),
+                None,
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "support annotation target provenance mismatch",
+                )
+        elif role == "span_lower_annotations":
+            if chain_id is None or support_id is not None or span_id is None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "span annotation has invalid target tuple",
+                )
+            if trace["target_provenance_id"] != derive_annotation_target_provenance_id(
+                cast(str, trace["trace_id"]),
+                cast(str, chain_id),
+                None,
+                cast(str, span_id),
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "span annotation target provenance mismatch",
+                )
+        elif role == "ambiguity":
+            if chain_id is not None or support_id is not None or span_id is not None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "ambiguity trace has an unproven target",
+                )
+        elif role == "leaders":
+            if chain_id is not None or support_id is not None or span_id is not None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "leader trace has an unproven target",
+                )
+        else:
+            raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "unknown trace role")
+
+    support_to_chain: dict[str, str] = {}
+    span_to_chain: dict[str, str] = {}
+    support_trace_to_id: dict[str, str] = {}
+    for chain in chains:
+        chain_id = cast(str, chain["chain_id"])
+        support_registry = cast(list[Mapping[str, str]], chain["supports"])
+        span_registry = cast(list[Mapping[str, str]], chain["spans"])
+        support_ids = [
+            cast(str, support["support_id"]) for support in support_registry
+        ]
+        span_ids = [cast(str, span["span_id"]) for span in span_registry]
+        support_trace_ids = [
+            cast(str, support["support_geometry_trace_id"])
+            for support in support_registry
+        ]
+        if (
+            len(support_ids) != len(set(support_ids))
+            or len(span_ids) != len(set(span_ids))
+            or len(support_trace_ids) != len(set(support_trace_ids))
+            or len(support_ids) < 2
+            or len(span_ids) != len(support_ids) - 1
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "invalid topology chain registry"
+            )
+        beam_entities = [
+            entity_provenance(
+                cast(str, trace["identity_fingerprint"]),
+                cast(str, trace["content_fingerprint"]),
+            )
+            for trace in traces
+            if trace["role"] == "beam_edges" and trace["chain_id"] == chain_id
+        ]
+        if not beam_entities or chain_id != derive_chain_id(beam_entities):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology chain identifier is not derived from member provenance",
+            )
+        for support in support_registry:
+            support_id = cast(str, support["support_id"])
+            support_trace_id = cast(str, support["support_geometry_trace_id"])
+            trace = traces_by_id.get(support_trace_id)
+            if (
+                not support_id.startswith("support-")
+                or support_id in support_to_chain
+                or support_trace_id in support_trace_to_id
+                or trace is None
+                or trace["role"] != "support_geometry"
+                or trace["chain_id"] != chain_id
+                or trace["support_id"] != support_id
+                or trace["span_id"] is not None
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "invalid topology support registry provenance",
+                )
+            if support_id != derive_support_id(
+                chain_id,
+                support_trace_id,
+                cast(str, trace["identity_fingerprint"]),
+                cast(str, trace["content_fingerprint"]),
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "topology support identifier is not derived from trace provenance",
+                )
+            support_to_chain[support_id] = chain_id
+            support_trace_to_id[support_trace_id] = support_id
+        for index, span in enumerate(span_registry):
+            span_id = cast(str, span["span_id"])
+            left_support_id = cast(str, span["left_support_id"])
+            right_support_id = cast(str, span["right_support_id"])
+            if (
+                not span_id.startswith("span-")
+                or span_id in span_to_chain
+                or left_support_id == right_support_id
+                or left_support_id != support_ids[index]
+                or right_support_id != support_ids[index + 1]
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID, "invalid topology span registry"
+                )
+            if span_id != derive_span_id(
+                chain_id,
+                left_support_id,
+                right_support_id,
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "topology span identifier is not derived from adjacent supports",
+                )
+            span_to_chain[span_id] = chain_id
+
+    registered_support_trace_ids = set(support_trace_to_id)
+    observed_support_trace_ids = {
+        cast(str, trace["trace_id"])
+        for trace in traces
+        if trace["role"] == "support_geometry"
+    }
+    if observed_support_trace_ids != registered_support_trace_ids:
+        raise PipelineError(
+            ErrorCode.AUDIT_SCHEMA_INVALID,
+            "orphan or missing canonical support geometry trace",
+        )
+
+    for trace in traces:
+        chain_id = cast(str | None, trace["chain_id"])
+        support_id = cast(str | None, trace["support_id"])
+        span_id = cast(str | None, trace["span_id"])
+        if support_id is not None and (
+            chain_id is None
+            or support_to_chain.get(support_id) != chain_id
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "unknown topology support target"
+            )
+        if span_id is not None and (
+            chain_id is None or span_to_chain.get(span_id) != chain_id
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "unknown topology span target"
+            )
+        if trace["role"] == "support_geometry" and (
+            support_trace_to_id.get(cast(str, trace["trace_id"])) != support_id
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "support geometry trace is not its registered support",
+            )
+
+    for finding in findings:
+        referenced_trace_ids = cast(list[str], finding["trace_ids"])
+        if (
+            len(referenced_trace_ids) != 1
+            or any(trace_id not in traces_by_id for trace_id in referenced_trace_ids)
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID, "topology finding has orphan trace"
+            )
+        category = cast(str, finding["category"])
+        status = cast(str, finding["status"])
+        canonical_presentation = _TOPOLOGY_FINDING_PRESENTATION.get(
+            (category, status)
+        )
+        expected_roles = _TOPOLOGY_FINDING_ROLE_MATRIX.get((category, status))
+        if canonical_presentation is None or expected_roles is None:
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology finding has unsupported status category",
+            )
+        if any(
+            finding[field] != expected
+            for field, expected in canonical_presentation.items()
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology finding presentation is not canonical",
+            )
+        trace = traces_by_id[referenced_trace_ids[0]]
+        role = cast(str, trace["role"])
+        if role not in expected_roles:
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology finding has status-incompatible trace role",
+            )
+        if status != "证据不足":
+            # The role matrix deliberately excludes ambiguity here.  These
+            # checks make the full target tuple explicit at the finding
+            # boundary as well as in the trace registry validation above.
+            chain_id = cast(str | None, trace["chain_id"])
+            support_id = cast(str | None, trace["support_id"])
+            span_id = cast(str | None, trace["span_id"])
+            if chain_id is None:
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "positive topology finding lacks canonical target provenance",
+                )
+            expected_target_provenance = derive_annotation_target_provenance_id(
+                referenced_trace_ids[0],
+                chain_id,
+                support_id,
+                span_id,
+            )
+            if (
+                trace["target_provenance_id"] != expected_target_provenance
+            ):
+                raise PipelineError(
+                    ErrorCode.AUDIT_SCHEMA_INVALID,
+                    "positive topology finding lacks canonical target provenance",
+                )
+        if finding["finding_id"] != derive_topology_finding_id(
+            referenced_trace_ids[0],
+            status,
+            role,
+            cast(str | None, trace["chain_id"]),
+            cast(str | None, trace["support_id"]),
+            cast(str | None, trace["span_id"]),
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "topology finding identifier is not derived from its trace",
+            )
+
+    # Ambiguity is a rendered declaration that no owner tuple was proven.  A
+    # chainless beam edge is equivalently unresolved even when it preserves
+    # the concrete beam role.  Both must have exactly one non-actionable,
+    # canonical insufficiency conclusion; otherwise a signed audit could
+    # omit, duplicate, or repoint its uncertainty evidence.
+    required_trace_ids = {
+        trace_id
+        for trace_id, trace in traces_by_id.items()
+        if trace["role"] == "ambiguity"
+        or (
+            trace["role"] == "beam_edges"
+            and trace["chain_id"] is None
+        )
+    }
+    findings_by_trace: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for finding in findings:
+        findings_by_trace[cast(list[str], finding["trace_ids"])[0]].append(finding)
+    for trace_id in required_trace_ids:
+        coverage = findings_by_trace.get(trace_id, [])
+        if len(coverage) != 1:
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "required topology trace has missing or duplicate coverage",
+            )
+        finding = coverage[0]
+        if (
+            finding["status"] != "证据不足"
+            or finding["actionability"] is not False
+            or finding["target_id"] is not None
+        ):
+            raise PipelineError(
+                ErrorCode.AUDIT_SCHEMA_INVALID,
+                "required topology trace has incompatible coverage",
+            )
 
 
 def _validate_plan_semantics(artifact: dict[str, Any]) -> None:
@@ -415,9 +1004,14 @@ def require_fresh_audit(audit: Mapping[str, Any], now: datetime | None = None) -
 
 
 def audit_semantic_projection(audit: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the source-derived audit fields that must survive a fresh audit."""
+    """Return only the overlay/base state that phase two may compare.
 
-    return {
+    Audit/v2 adds read-only topology evidence.  It is intentionally excluded
+    here so apply/verify always re-audit the base audit/v1 state and cannot
+    turn a topology conclusion into mutation authorization.
+    """
+
+    projection = {
         key: audit[key]
         for key in (
             "schema_version",
@@ -431,3 +1025,6 @@ def audit_semantic_projection(audit: Mapping[str, Any]) -> dict[str, Any]:
             "audited_targets",
         )
     }
+    if projection["schema_version"] == "liang-pingfa/audit/v2":
+        projection["schema_version"] = "liang-pingfa/audit/v1"
+    return projection

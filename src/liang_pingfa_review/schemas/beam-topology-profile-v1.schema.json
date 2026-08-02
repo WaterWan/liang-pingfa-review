@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/beam-topology-profile/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "layers"],
+  "properties": {
+    "schema_version": {
+      "const": "liang-pingfa/beam-topology-profile/v1"
+    },
+    "layers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "beam_edges",
+        "beam_ids",
+        "column_supports",
+        "wall_supports",
+        "generic_supports",
+        "support_upper_annotations",
+        "span_lower_annotations",
+        "leaders"
+      ],
+      "properties": {
+        "beam_edges": { "$ref": "#/$defs/layers" },
+        "beam_ids": { "$ref": "#/$defs/layers" },
+        "column_supports": { "$ref": "#/$defs/layers" },
+        "wall_supports": { "$ref": "#/$defs/layers" },
+        "generic_supports": { "$ref": "#/$defs/layers" },
+        "support_upper_annotations": { "$ref": "#/$defs/layers" },
+        "span_lower_annotations": { "$ref": "#/$defs/layers" },
+        "leaders": { "$ref": "#/$defs/layers" }
+      }
+    }
+  },
+  "$defs": {
+    "layers": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  }
+}
