@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
 import os
 from pathlib import Path
 import re
@@ -31,6 +32,8 @@ from tests.support.synthetic_dxf import (
     FakeOdaConverter,
     create_fake_dwg,
     create_synthetic_dxf,
+    create_topology_dxf,
+    topology_profile_payload,
 )
 
 
@@ -753,6 +756,53 @@ class CliDoctorAndWorkflowTests(unittest.TestCase):
             )
         self.assertTrue((output / "audit.json").is_file())
         self.assertTrue((output / "plan.json").is_file())
+
+    def test_cli_audit_profile_emits_read_only_v2(self) -> None:
+        source = self.root / "topology-source.dwg"
+        fixture = self.root / "topology-fixture.dxf"
+        profile = self.root / "topology-profile.json"
+        output = self.root / "topology-output"
+        output.mkdir()
+        create_fake_dwg(source)
+        create_topology_dxf(fixture)
+        profile.write_text(
+            json.dumps(topology_profile_payload(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        with mock.patch(
+            "liang_pingfa_review.cli._runner",
+            return_value=FakeOdaConverter(fixture),
+        ):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "audit",
+                        "--input",
+                        str(source),
+                        "--audit-out",
+                        str(output / "audit.json"),
+                        "--report-out",
+                        str(output / "audit.md"),
+                        "--topology-profile",
+                        str(profile),
+                    ]
+                ),
+                0,
+            )
+        audit = json.loads((output / "audit.json").read_text(encoding="utf-8"))
+        self.assertEqual(audit["schema_version"], "liang-pingfa/audit/v2")
+        self.assertEqual(
+            audit["topology_assessment"]["authorization"],
+            "topology-never-authorizes-edits",
+        )
+        self.assertTrue(
+            all(
+                finding["actionability"] is False
+                and finding["target_id"] is None
+                for finding in audit["topology_assessment"]["findings"]
+            )
+        )
 
 
 if __name__ == "__main__":

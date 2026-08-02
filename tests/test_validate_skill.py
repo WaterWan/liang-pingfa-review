@@ -58,6 +58,17 @@ class ValidateSkillTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def mutate_topology_contract(self, mutation) -> None:
+        """Apply an isolated JSON-only topology contract mutation."""
+
+        contract_path = self.repository / validate_skill.TOPOLOGY_CONTRACT_PATH
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        mutation(contract)
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def test_clean_repository_passes(self) -> None:
         validate_skill.validate_repository(self.repository)
 
@@ -198,6 +209,81 @@ class ValidateSkillTests(unittest.TestCase):
         self.assert_validation_fails_with(
             "missing required multi-annotation contract: "
             "tests/contracts/multi-annotation-overlap.json"
+        )
+
+    def test_missing_beam_topology_contract_fails(self) -> None:
+        (self.repository / validate_skill.TOPOLOGY_CONTRACT_PATH).unlink()
+
+        self.assert_validation_fails_with(
+            "missing required beam topology contract: "
+            "tests/contracts/beam-topology-in-situ.json"
+        )
+
+    def test_topology_contract_rejects_profile_execution_controls(self) -> None:
+        def mutate(contract) -> None:
+            contract["profile"]["forbidden_profile_controls"].remove("mutation")
+
+        self.mutate_topology_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "beam topology contract must forbid profile execution controls"
+        )
+
+    def test_topology_contract_rejects_overstated_self_integrity(self) -> None:
+        def mutate(contract) -> None:
+            contract["audit_trust"]["self_integrity"] = "authenticates-all-editors"
+
+        self.mutate_topology_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "beam topology contract must state self-integrity and fresh re-audit limits"
+        )
+
+    def test_missing_topology_audit_trust_wording_fails(self) -> None:
+        readme = self.repository / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8").replace(
+                "自完整性 SHA-256 只用于检测意外损坏；它不能认证恶意同帐户编辑者重新签名的工件。",
+                "removed topology audit trust boundary",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "README.md is missing topology audit trust-boundary wording: "
+            "自完整性 SHA-256 只用于检测意外损坏；它不能认证恶意同帐户编辑者重新签名的工件。"
+        )
+
+    def test_topology_contract_rejects_actionable_scenario(self) -> None:
+        def mutate(contract) -> None:
+            contract["scenarios"][0]["actionability"] = True
+
+        self.mutate_topology_contract(mutate)
+
+        self.assert_validation_fails_with(
+            "beam topology contract scenario must be non-actionable: "
+            "unique-legal-placement"
+        )
+
+    def test_audit_v2_schema_rejects_token_fingerprint_oracle(self) -> None:
+        schema_path = (
+            self.repository
+            / "src/liang_pingfa_review/schemas/audit-v2.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        trace = schema["$defs"]["topologyTrace"]
+        trace["required"].append("parsed_value_fingerprint")
+        trace["properties"]["parsed_value_fingerprint"] = {
+            "$ref": "#/$defs/sha256"
+        }
+        schema_path.write_text(
+            json.dumps(schema, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "audit v2 schema must expose only a boolean token equality relation"
         )
 
     def test_missing_multi_annotation_skill_phrase_fails(self) -> None:

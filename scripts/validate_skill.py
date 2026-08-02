@@ -23,8 +23,64 @@ REFERENCE_PATHS = (
     Path("references/local-regression.md"),
     Path("references/dwg-two-stage-workflow.md"),
     Path("references/multi-annotation-overlap.md"),
+    Path("references/beam-topology-audit.md"),
 )
 MULTI_ANNOTATION_CONTRACT_PATH = Path("tests/contracts/multi-annotation-overlap.json")
+TOPOLOGY_CONTRACT_PATH = Path("tests/contracts/beam-topology-in-situ.json")
+TOPOLOGY_ROLE_ARRAYS = (
+    "beam_edges",
+    "beam_ids",
+    "column_supports",
+    "wall_supports",
+    "generic_supports",
+    "support_upper_annotations",
+    "span_lower_annotations",
+    "leaders",
+)
+TOPOLOGY_REQUIRED_RULES = frozenset(
+    {
+        "direct-visible-opaque-coplanar-modelspace-only",
+        "actual-overlap-gate-before-binding",
+        "controlled-text-overlap-before-role-eligibility",
+        "no-nearest-binding",
+        "explicit-support-polygons-only",
+        "different-id-collinear-beams-stay-separate",
+        "support-upper-adjacent-zones-side-neutral",
+        "bounded-chain-relations",
+        "unpaired-controlled-geometry-gate",
+        "single-relation-budget",
+        "bounded-spatial-and-interval-indexes",
+        "token-equality-in-memory-only",
+        "trace-manifest-eligibility-and-owned-tuples",
+        "topology-findings-non-actionable",
+        "phase-two-overlay-only",
+    }
+)
+TOPOLOGY_FORBIDDEN_PROFILE_CONTROLS = frozenset(
+    {
+        "tolerances",
+        "regexes",
+        "entity_types",
+        "fallback_rules",
+        "mutation",
+        "arbitrary_code",
+    }
+)
+TOPOLOGY_AUDIT_TRUST = {
+    "self_integrity": "accidental-corruption-detection-only",
+    "not_authenticated_against": "malicious-same-account-editor",
+    "external_or_edited_audit_requirement": (
+        "fresh-audit-topology-profile-against-bound-source-profile-before-reliance"
+    ),
+    "validate_artifact": (
+        "schema-self-integrity-and-internal-links-only-not-geometric-truth"
+    ),
+}
+TOPOLOGY_AUDIT_TRUST_PHRASES = (
+    "自完整性 SHA-256 只用于检测意外损坏；它不能认证恶意同帐户编辑者重新签名的工件。",
+    "任何外部提供、手工编辑或不受信任的 audit/v2 在依赖结论前，必须针对其绑定的源文件和 profile 重新运行全新的 audit --topology-profile。",
+    "validate_artifact 只验证工件模式、规范自完整性和内部关联；没有源文件时，它不证明几何事实。",
+)
 UNRESOLVED_OVERLAP_P1_FAILURE = "failed-for-each-affected-cluster"
 UNRESOLVED_OVERLAP_P2_BLOCKED = "blocked"
 UNRESOLVED_OVERLAP_FORBIDDEN_BEHAVIORS = (
@@ -86,6 +142,7 @@ ALLOWED_FILES = frozenset(
         ".github/skills/liang-pingfa-tuzhi-shencha/references/source-scope.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/local-regression.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/multi-annotation-overlap.md",
+        ".github/skills/liang-pingfa-tuzhi-shencha/references/beam-topology-audit.md",
         "scripts/validate_skill.py",
         "src/liang_pingfa_review/__init__.py",
         "src/liang_pingfa_review/__main__.py",
@@ -105,9 +162,13 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/reports.py",
         "src/liang_pingfa_review/snapshots.py",
         "src/liang_pingfa_review/temporary.py",
+        "src/liang_pingfa_review/topology_ids.py",
+        "src/liang_pingfa_review/topology_profile.py",
         "src/liang_pingfa_review/verify.py",
         "src/liang_pingfa_review/schemas/__init__.py",
         "src/liang_pingfa_review/schemas/audit-v1.schema.json",
+        "src/liang_pingfa_review/schemas/audit-v2.schema.json",
+        "src/liang_pingfa_review/schemas/beam-topology-profile-v1.schema.json",
         "src/liang_pingfa_review/schemas/edit-plan-v1.schema.json",
         "src/liang_pingfa_review/schemas/verification-v1.schema.json",
         "tests/support/__init__.py",
@@ -121,9 +182,11 @@ ALLOWED_FILES = frozenset(
         "tests/test_oda_cli.py",
         "tests/test_source_binding.py",
         "tests/test_validate_skill.py",
+        "tests/test_topology_profile.py",
         "tests/contracts/local-representation-readability.json",
         "tests/contracts/two-stage-overlay-workflow.json",
         "tests/contracts/multi-annotation-overlap.json",
+        "tests/contracts/beam-topology-in-situ.json",
         "tests/local-fixtures/README.md",
     }
 )
@@ -222,6 +285,9 @@ REQUIRED_PHRASES = (
     "施工指令",
     "结构专业人员",
     "两阶段 DWG 工作流",
+    "beam-plan-in-situ/v1",
+    "不得按最近梁、支座或跨绑定",
+    "拓扑发现永不授权编辑",
 )
 REQUIRED_GITIGNORE_RULES = (
     "tmp/",
@@ -242,6 +308,9 @@ REQUIRED_GITIGNORE_RULES = (
     "edit-plan.json",
     "verification.json",
     "audit.md",
+    "audit-v2.json",
+    "audit-v2.md",
+    "beam-topology-profile.json",
     "plan-review.md",
     ".liang-pingfa-oda/",
     "/build/",
@@ -1080,6 +1149,162 @@ def _validate_multi_annotation_overlap_contract(root: Path, issues: list[str]) -
             )
 
 
+def _validate_beam_topology_contract(root: Path, issues: list[str]) -> None:
+    """Keep the source-free v2 topology contract narrow and machine-checkable."""
+
+    contract_path = root / TOPOLOGY_CONTRACT_PATH
+    contract_text = _read_text(contract_path, issues)
+    if contract_text is None:
+        issues.append(
+            "missing required beam topology contract: "
+            f"{TOPOLOGY_CONTRACT_PATH.as_posix()}"
+        )
+        return
+    try:
+        contract = json.loads(contract_text)
+    except json.JSONDecodeError as error:
+        issues.append(f"invalid beam topology contract JSON: {error.msg}")
+        return
+    if not isinstance(contract, dict):
+        issues.append("beam topology contract must be a JSON object")
+        return
+    expected_keys = {
+        "case_id",
+        "scope",
+        "input_storage",
+        "policy",
+        "profile",
+        "audit_trust",
+        "required_rules",
+        "scenarios",
+        "prohibited_output",
+        "non_claims",
+    }
+    if set(contract) != expected_keys:
+        issues.append("beam topology contract must use exactly the approved fields")
+        return
+    if (
+        contract.get("case_id") != "beam-topology-in-situ"
+        or contract.get("scope") != "representation-and-readability-only"
+        or contract.get("input_storage") != "local-only"
+        or contract.get("policy") != "beam-plan-in-situ/v1"
+    ):
+        issues.append("beam topology contract must identify the fixed local read-only policy")
+    profile = contract.get("profile")
+    if not isinstance(profile, dict) or set(profile) != {
+        "local_only",
+        "required_role_arrays",
+        "forbidden_profile_controls",
+    }:
+        issues.append("beam topology contract profile must use exact role/control fields")
+    else:
+        roles = profile.get("required_role_arrays")
+        controls = profile.get("forbidden_profile_controls")
+        if (
+            profile.get("local_only") is not True
+            or not isinstance(roles, list)
+            or tuple(roles) != TOPOLOGY_ROLE_ARRAYS
+        ):
+            issues.append("beam topology contract must require every exact role array")
+        if not isinstance(controls, list) or set(controls) != TOPOLOGY_FORBIDDEN_PROFILE_CONTROLS:
+            issues.append("beam topology contract must forbid profile execution controls")
+    if contract.get("audit_trust") != TOPOLOGY_AUDIT_TRUST:
+        issues.append(
+            "beam topology contract must state self-integrity and fresh re-audit limits"
+        )
+    rules = contract.get("required_rules")
+    if not isinstance(rules, list) or set(rules) != TOPOLOGY_REQUIRED_RULES:
+        issues.append("beam topology contract must require fixed no-nearest/read-only rules")
+    scenarios = contract.get("scenarios")
+    required_scenarios = {
+        "unique-legal-placement": "一致",
+        "wrong-side-or-zone": "疑似不一致",
+        "repeated-or-overlapping-evidence": "证据不足",
+    }
+    if not isinstance(scenarios, list):
+        issues.append("beam topology contract must define all required scenarios")
+    else:
+        by_id = {
+            item.get("scenario_id"): item
+            for item in scenarios
+            if isinstance(item, dict)
+        }
+        if set(by_id) != set(required_scenarios):
+            issues.append("beam topology contract scenarios must be exact and complete")
+        for scenario_id, status in required_scenarios.items():
+            scenario = by_id.get(scenario_id)
+            if (
+                not isinstance(scenario, dict)
+                or set(scenario) != {
+                    "scenario_id",
+                    "expected_statuses",
+                    "actionability",
+                }
+                or scenario.get("expected_statuses") != [status]
+                or scenario.get("actionability") is not False
+            ):
+                issues.append(
+                    "beam topology contract scenario must be non-actionable: "
+                    f"{scenario_id}"
+                )
+    prohibited = contract.get("prohibited_output")
+    required_prohibited = {
+        "raw_annotation_text",
+        "coordinates",
+        "layer_names",
+        "colors",
+        "paths",
+        "raw_hashes",
+        "token_only_fingerprints",
+    }
+    if not isinstance(prohibited, list) or set(prohibited) != required_prohibited:
+        issues.append("beam topology contract must prohibit raw private metadata")
+    non_claims = contract.get("non_claims")
+    if not isinstance(non_claims, list) or not {
+        "structural calculation",
+        "capacity",
+        "compliance",
+        "design correctness",
+    }.issubset(set(non_claims)):
+        issues.append("beam topology contract must retain non-design boundary")
+
+
+def _validate_topology_trace_privacy_schema(root: Path, issues: list[str]) -> None:
+    """Forbid a token-only fingerprint oracle in the shipped v2 contract."""
+
+    schema_path = root / "src/liang_pingfa_review/schemas/audit-v2.schema.json"
+    schema_text = _read_text(schema_path, issues)
+    if schema_text is None:
+        return
+    try:
+        schema = json.loads(schema_text)
+    except json.JSONDecodeError as error:
+        issues.append(f"invalid audit v2 schema JSON: {error.msg}")
+        return
+    if not isinstance(schema, dict):
+        issues.append("audit v2 schema must be a JSON object")
+        return
+    try:
+        trace = schema["$defs"]["topologyTrace"]
+        required = trace["required"]
+        properties = trace["properties"]
+    except (KeyError, TypeError):
+        issues.append("audit v2 schema is missing topology trace privacy fields")
+        return
+    if (
+        not isinstance(required, list)
+        or not isinstance(properties, dict)
+        or "parsed_value_fingerprint" in required
+        or "parsed_value_fingerprint" in properties
+        or "opaque_token" in schema_text
+        or required.count("token_equality_established") != 1
+        or properties.get("token_equality_established") != {"type": "boolean"}
+    ):
+        issues.append(
+            "audit v2 schema must expose only a boolean token equality relation"
+        )
+
+
 def _validate_scope_and_ignore_files(root: Path, issues: list[str]) -> None:
     source_scope_path = root / SKILL_DIRECTORY / "references/source-scope.md"
     source_scope_text = _read_text(source_scope_path, issues)
@@ -1122,6 +1347,8 @@ def _validate_packaging(root: Path, issues: list[str]) -> None:
         "src/liang_pingfa_review/ownership.py",
         "src/liang_pingfa_review/oda.py",
         "src/liang_pingfa_review/schemas/audit-v1.schema.json",
+        "src/liang_pingfa_review/schemas/audit-v2.schema.json",
+        "src/liang_pingfa_review/schemas/beam-topology-profile-v1.schema.json",
         "src/liang_pingfa_review/schemas/edit-plan-v1.schema.json",
         "src/liang_pingfa_review/schemas/verification-v1.schema.json",
     )
@@ -1213,6 +1440,27 @@ def _validate_bounded_oda_contract(root: Path, issues: list[str]) -> None:
                     f"{name} is missing required public support-boundary wording: {required}"
                 )
 
+    topology_documents = (
+        ("README.md", readme),
+        (
+            "beam topology reference",
+            _read_text(
+                root / SKILL_DIRECTORY / "references" / "beam-topology-audit.md",
+                issues,
+            ),
+        ),
+        ("dwg workflow reference", workflow),
+    )
+    for name, text in topology_documents:
+        if text is None:
+            continue
+        normalized = text.replace("`", "")
+        for required in TOPOLOGY_AUDIT_TRUST_PHRASES:
+            if required not in normalized:
+                issues.append(
+                    f"{name} is missing topology audit trust-boundary wording: {required}"
+                )
+
     oda_path = root / "src/liang_pingfa_review/oda.py"
     oda_text = _read_text(oda_path, issues)
     if oda_text is not None:
@@ -1273,6 +1521,8 @@ def validate_repository(root: Path | str) -> None:
     _validate_scope_and_ignore_files(repository_root, issues)
     _validate_packaging(repository_root, issues)
     _validate_ci_workflow(repository_root, issues)
+    _validate_beam_topology_contract(repository_root, issues)
+    _validate_topology_trace_privacy_schema(repository_root, issues)
     _validate_bounded_oda_contract(repository_root, issues)
 
     if issues:
