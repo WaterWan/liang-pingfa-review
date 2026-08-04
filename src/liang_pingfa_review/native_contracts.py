@@ -26,6 +26,9 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from .canonical import (
     CanonicalJsonError,
     DeadlineCheckpointSampler,
+    MAX_JSON_STRING_CODEPOINTS,
+    OpaqueJsonStringRules,
+    attach_integrity,
     canonical_json_bytes,
     canonical_sha256,
     normalize_json_value,
@@ -33,6 +36,7 @@ from .canonical import (
     strict_json_loads,
     validate_json_canonical_form,
     validate_json_nesting,
+    validate_json_string_limits,
     verify_integrity,
 )
 from .errors import ErrorCode, PipelineError
@@ -74,6 +78,7 @@ NativeSchemaKind = Literal[
     "config",
     "request",
     "response",
+    "inventory",
     *NativeArtifactKind,
 ]
 _PrivateReadResult = TypeVar("_PrivateReadResult")
@@ -83,6 +88,7 @@ _SCHEMA_FILES: dict[NativeSchemaKind, str] = {
     "config": "native-adapter-config-v1.schema.json",
     "request": "native-bridge-request-v1.schema.json",
     "response": "native-bridge-response-v1.schema.json",
+    "inventory": "native-inventory-export-v1.schema.json",
     "session": "native-bridge-session-v1.schema.json",
     "geometry": "native-geometry-export-v1.schema.json",
     "audit": "native-audit-v1.schema.json",
@@ -126,6 +132,12 @@ MAX_NATIVE_GEOMETRY_SEGMENTS: Final = 10_000
 # Schemas retain their code-point bound as a secondary structural constraint,
 # while every raw/embedded geometry boundary calls the bounded helper below.
 MAX_NATIVE_GEOMETRY_JSON_BYTES: Final = 16 * 1024 * 1024
+MAX_NATIVE_INVENTORY_JSON_BYTES: Final = 64 * 1024
+# The geometry schema's largest legitimate field is DBTEXT ``text`` at
+# 4,096 Unicode code points.  Apply that tighter limit before any inner
+# geometry scalar reaches NFC, rather than relying on schema validation after
+# normalization.
+MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS: Final = 4_096
 # Retain the earlier internal spellings for callers outside this module while
 # making the contract-specific names authoritative.
 MAX_NATIVE_ENTITIES: Final = MAX_NATIVE_GEOMETRY_ENTITIES
@@ -134,6 +146,22 @@ MAX_TRANSLATION = 1_000_000.0
 PRIVATE_RECORD_CARDINALITY: Final = "explicit_private"
 _SCHEMA_CHECKPOINT_INTERVAL: Final = 64
 _GEOMETRY_UTF8_SCAN_CHARACTERS: Final = 16 * 1024
+NATIVE_OPAQUE_EMBEDDED_JSON_RULES: Final[
+    Mapping[NativeSchemaKind, OpaqueJsonStringRules]
+] = {
+    # These are complete path tuples from the schema root, not name-based
+    # exemptions. A nested attacker-controlled ``geometry_json`` stays NFC.
+    "response": {
+        ("result", "geometry_json"): MAX_NATIVE_GEOMETRY_JSON_BYTES,
+        ("result", "inventory_json"): MAX_NATIVE_INVENTORY_JSON_BYTES,
+    },
+    "manifest": {
+        ("preconditions_geometry_json",): MAX_NATIVE_GEOMETRY_JSON_BYTES,
+    },
+    "console_export": {
+        ("geometry_json",): MAX_NATIVE_GEOMETRY_JSON_BYTES,
+    },
+}
 _PRIVATE_PERSISTED_KINDS: Final[frozenset[NativeSchemaKind]] = frozenset(
     {
         "config",
@@ -150,6 +178,55 @@ _PRIVATE_PERSISTED_KINDS: Final[frozenset[NativeSchemaKind]] = frozenset(
 )
 
 
+def opaque_embedded_json_rules(kind: NativeSchemaKind) -> OpaqueJsonStringRules:
+    """Return the one explicit opaque-carrier allowlist for a native context."""
+
+    return NATIVE_OPAQUE_EMBEDDED_JSON_RULES.get(kind, {})
+
+
+def _maximum_string_codepoints_for(kind: NativeSchemaKind) -> int:
+    """Return the schema-derived pre-NFC scalar bound for this context."""
+
+    return (
+        MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS
+        if kind == "geometry"
+        else MAX_JSON_STRING_CODEPOINTS
+    )
+
+
+def _require_embedded_json_utf8_bytes(
+    value: Any,
+    *,
+    maximum_bytes: int,
+    label: str,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> str:
+    """Bound one raw JSON carrier without normalizing or fully re-encoding it."""
+
+    if not isinstance(value, str):
+        raise PipelineError(error, f"native {label} JSON is invalid")
+    byte_count = 0
+    try:
+        for offset in range(0, len(value), _GEOMETRY_UTF8_SCAN_CHARACTERS):
+            _check_deadline(deadline_check, f"{label} UTF-8 byte limit")
+            byte_count += len(
+                value[offset : offset + _GEOMETRY_UTF8_SCAN_CHARACTERS].encode(
+                    "utf-8",
+                    errors="strict",
+                )
+            )
+            if byte_count > maximum_bytes:
+                raise PipelineError(
+                    error,
+                    f"native {label} JSON exceeds the fixed UTF-8 byte limit",
+                )
+    except UnicodeEncodeError as exc:
+        raise PipelineError(error, f"native {label} JSON is invalid") from exc
+    _check_deadline(deadline_check, f"{label} UTF-8 byte limit")
+    return value
+
+
 def require_geometry_json_utf8_bytes(
     value: Any,
     *,
@@ -164,27 +241,30 @@ def require_geometry_json_utf8_bytes(
     receive only stable, redacted errors; raw geometry is never interpolated.
     """
 
-    if not isinstance(value, str):
-        raise PipelineError(error, "native geometry JSON is invalid")
-    byte_count = 0
-    try:
-        for offset in range(0, len(value), _GEOMETRY_UTF8_SCAN_CHARACTERS):
-            _check_deadline(deadline_check, "geometry UTF-8 byte limit")
-            byte_count += len(
-                value[offset : offset + _GEOMETRY_UTF8_SCAN_CHARACTERS].encode(
-                    "utf-8",
-                    errors="strict",
-                )
-            )
-            if byte_count > MAX_NATIVE_GEOMETRY_JSON_BYTES:
-                raise PipelineError(
-                    error,
-                    "native geometry JSON exceeds the fixed UTF-8 byte limit",
-                )
-    except UnicodeEncodeError as exc:
-        raise PipelineError(error, "native geometry JSON is invalid") from exc
-    _check_deadline(deadline_check, "geometry UTF-8 byte limit")
-    return value
+    return _require_embedded_json_utf8_bytes(
+        value,
+        maximum_bytes=MAX_NATIVE_GEOMETRY_JSON_BYTES,
+        label="geometry",
+        error=error,
+        deadline_check=deadline_check,
+    )
+
+
+def require_inventory_json_utf8_bytes(
+    value: Any,
+    *,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> str:
+    """Return raw inventory JSON only below its fixed UTF-8 carrier cap."""
+
+    return _require_embedded_json_utf8_bytes(
+        value,
+        maximum_bytes=MAX_NATIVE_INVENTORY_JSON_BYTES,
+        label="inventory",
+        error=error,
+        deadline_check=deadline_check,
+    )
 
 
 def require_geometry_json_payload_bytes(
@@ -222,6 +302,7 @@ def canonical_geometry_json_bytes(
         normalized = normalize_json_value(
             geometry,
             deadline_check=deadline_check,
+            maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
         )
         encoder = json.JSONEncoder(
             ensure_ascii=False,
@@ -298,10 +379,44 @@ def geometry_text_matches_canonical_bytes(
     return offset == len(canonical)
 
 
+def canonical_native_contract_bytes(
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> bytes:
+    """Serialize one native contract while preserving its exact carriers."""
+
+    return canonical_json_bytes(
+        artifact,
+        deadline_check=deadline_check,
+        opaque_string_rules=opaque_embedded_json_rules(kind),
+        maximum_string_codepoints=_maximum_string_codepoints_for(kind),
+    )
+
+
+def attach_native_integrity(
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> dict[str, Any]:
+    """Hash one native contract with exact opaque-carrier bytes."""
+
+    return dict(
+        attach_integrity(
+            artifact,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_embedded_json_rules(kind),
+            maximum_string_codepoints=_maximum_string_codepoints_for(kind),
+        )
+    )
+
+
 def _error_for(kind: NativeSchemaKind) -> ErrorCode:
     if kind == "config":
         return ErrorCode.NATIVE_CONFIG_INVALID
-    if kind in {"request", "response"}:
+    if kind in {"request", "response", "inventory"}:
         return ErrorCode.NATIVE_PROTOCOL_INVALID
     return _ARTIFACT_ERRORS[kind]
 
@@ -344,11 +459,18 @@ def _require_nfc(
     value: Any,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
 ) -> None:
     """Use the canonical module's bounded NFC/key/finite-number traversal."""
 
     try:
-        validate_json_canonical_form(value, deadline_check=deadline_check)
+        validate_json_canonical_form(
+            value,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_string_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+        )
     except CanonicalJsonError as error:
         raise ValueError("native contract is non-canonical") from error
 
@@ -553,7 +675,7 @@ def _validate_schema(
 
 
 def _integrity_required(kind: NativeSchemaKind) -> bool:
-    return kind not in {"config", "request", "response"}
+    return kind not in {"config", "request", "response", "inventory"}
 
 
 def _validate_common(
@@ -564,12 +686,21 @@ def _validate_common(
 ) -> dict[str, Any]:
     _check_deadline(deadline_check, f"{kind} response normalization")
     normalized = _require_mapping(artifact, kind)
+    opaque_rules = opaque_embedded_json_rules(kind)
+    maximum_string_codepoints = _maximum_string_codepoints_for(kind)
     try:
         _check_deadline(deadline_check, f"{kind} canonical validation")
-        _require_nfc(normalized, deadline_check=deadline_check)
+        _require_nfc(
+            normalized,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+        )
         if _integrity_required(kind) and not verify_integrity(
             normalized,
             deadline_check=deadline_check,
+            opaque_string_rules=opaque_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
         ):
             raise PipelineError(_error_for(kind), "native integrity mismatch")
     except (CanonicalJsonError, RecursionError) as error:
@@ -1196,6 +1327,11 @@ def _preflight_geometry_limits(
     # their canonical representation only after the cheap cardinality guards
     # above, but before schema/integrity work, so they cannot bypass the same
     # raw export budget used by pipe/file boundaries.
+    validate_json_string_limits(
+        artifact,
+        deadline_check=deadline_check,
+        maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
+    )
     canonical_geometry_json_bytes(
         artifact,
         error=ErrorCode.NATIVE_GEOMETRY_INVALID,
@@ -1409,6 +1545,21 @@ def _validate_session_semantics(artifact: dict[str, Any]) -> None:
         raise ValueError("native session handshake response mismatches transcript")
 
 
+def _validate_inventory_semantics(
+    artifact: dict[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
+    """Retain an explicit semantic stage after the fixed inventory schema."""
+
+    _check_deadline(deadline_check, "inventory semantic validation")
+    if set(artifact) != {
+        "document_revision_fingerprint",
+        "inventory_digest",
+    }:
+        raise ValueError("native inventory shape is invalid")
+
+
 def _validate_audit_semantics(artifact: dict[str, Any]) -> None:
     created = parse_utc(cast(str, artifact["created_at"]))
     expires = parse_utc(cast(str, artifact["expires_at"]))
@@ -1516,26 +1667,41 @@ def _validate_plan_semantics(artifact: dict[str, Any]) -> None:
             targets.add(target)
 
 
-def _preflight_embedded_geometry_json(
+def _preflight_embedded_json(
     kind: NativeSchemaKind,
     artifact: Any,
     *,
     deadline_check: _DeadlineCheck | None = None,
 ) -> None:
-    """Apply the raw byte cap before parsing embedded geometry JSON."""
+    """Apply each exact outer embedded-JSON cap before NFC or schema work."""
 
     if not isinstance(artifact, Mapping):
         return
-    field = (
-        "preconditions_geometry_json"
-        if kind == "manifest"
-        else "geometry_json"
-        if kind == "console_export"
-        else None
-    )
-    if field is not None:
+    if kind == "response":
+        result = artifact.get("result")
+        if not isinstance(result, Mapping):
+            return
+        if "geometry_json" in result:
+            require_geometry_json_utf8_bytes(
+                result["geometry_json"],
+                error=_error_for(kind),
+                deadline_check=deadline_check,
+            )
+        if "inventory_json" in result:
+            require_inventory_json_utf8_bytes(
+                result["inventory_json"],
+                error=_error_for(kind),
+                deadline_check=deadline_check,
+            )
+    elif kind == "manifest" and "preconditions_geometry_json" in artifact:
         require_geometry_json_utf8_bytes(
-            artifact.get(field),
+            artifact["preconditions_geometry_json"],
+            error=_error_for(kind),
+            deadline_check=deadline_check,
+        )
+    elif kind == "console_export" and "geometry_json" in artifact:
+        require_geometry_json_utf8_bytes(
+            artifact["geometry_json"],
             error=_error_for(kind),
             deadline_check=deadline_check,
         )
@@ -1553,7 +1719,14 @@ def _embedded_geometry(
         deadline_check=deadline_check,
     )
     try:
-        parsed = strict_native_json(text, deadline_check=deadline_check)
+        _check_deadline(deadline_check, "embedded geometry JSON decoding")
+        parsed = strict_native_json(
+            text,
+            deadline_check=deadline_check,
+            maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
+        )
+        _check_deadline(deadline_check, "embedded geometry JSON decoding")
+        _check_deadline(deadline_check, "embedded geometry canonical validation")
         if not geometry_text_matches_canonical_bytes(
             text,
             parsed,
@@ -1561,18 +1734,78 @@ def _embedded_geometry(
             deadline_check=deadline_check,
         ):
             raise ValueError("embedded geometry is not canonical")
-        return validate_native_contract(
+        _check_deadline(deadline_check, "embedded geometry canonical validation")
+        _check_deadline(deadline_check, "embedded geometry schema validation")
+        checked = validate_native_contract(
             "geometry",
             parsed,
             deadline_check=deadline_check,
         )
+        _check_deadline(deadline_check, "embedded geometry semantic validation")
+        return checked
     except (CanonicalJsonError, RecursionError, ValueError, PipelineError) as exc:
-        if isinstance(exc, PipelineError) and exc.code == ErrorCode.NATIVE_GEOMETRY_INVALID:
-            raise
+        if isinstance(exc, PipelineError):
+            if exc.code in {
+                ErrorCode.NATIVE_GEOMETRY_INVALID,
+                ErrorCode.NATIVE_PROTOCOL_INVALID,
+                ErrorCode.NATIVE_SESSION_EXPIRED,
+            }:
+                raise
         raise PipelineError(error, "embedded native geometry is invalid") from exc
 
 
-def _validate_manifest_semantics(artifact: dict[str, Any]) -> None:
+def _embedded_inventory(
+    text: str,
+    *,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> dict[str, Any]:
+    """Parse and validate the fixed inner inventory document independently."""
+
+    text = require_inventory_json_utf8_bytes(
+        text,
+        error=error,
+        deadline_check=deadline_check,
+    )
+    try:
+        _check_deadline(deadline_check, "embedded inventory JSON decoding")
+        parsed = strict_native_json(text, deadline_check=deadline_check)
+        _check_deadline(deadline_check, "embedded inventory JSON decoding")
+        _check_deadline(deadline_check, "embedded inventory canonical validation")
+        if canonical_json_bytes(parsed, deadline_check=deadline_check) != text.encode(
+            "utf-8",
+            errors="strict",
+        ):
+            raise ValueError("embedded inventory is not canonical")
+        _check_deadline(deadline_check, "embedded inventory canonical validation")
+        _check_deadline(deadline_check, "embedded inventory schema validation")
+        checked = validate_native_contract(
+            "inventory",
+            parsed,
+            deadline_check=deadline_check,
+        )
+        _check_deadline(deadline_check, "embedded inventory semantic validation")
+        return checked
+    except (
+        CanonicalJsonError,
+        RecursionError,
+        UnicodeEncodeError,
+        ValueError,
+        PipelineError,
+    ) as exc:
+        if isinstance(exc, PipelineError) and exc.code in {
+            ErrorCode.NATIVE_PROTOCOL_INVALID,
+            ErrorCode.NATIVE_SESSION_EXPIRED,
+        }:
+            raise
+        raise PipelineError(error, "embedded native inventory is invalid") from exc
+
+
+def _validate_manifest_semantics(
+    artifact: dict[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
     created = parse_utc(cast(str, artifact["created_at"]))
     expires = parse_utc(cast(str, artifact["expires_at"]))
     if expires <= created or expires - created > timedelta(minutes=5):
@@ -1582,8 +1815,13 @@ def _validate_manifest_semantics(artifact: dict[str, Any]) -> None:
     geometry = _embedded_geometry(
         cast(str, artifact["preconditions_geometry_json"]),
         error=ErrorCode.NATIVE_MANIFEST_INVALID,
+        deadline_check=deadline_check,
     )
-    if artifact["preconditions_geometry_sha256"] != canonical_sha256(geometry):
+    _check_deadline(deadline_check, "manifest embedded geometry validation")
+    if artifact["preconditions_geometry_sha256"] != canonical_sha256(
+        geometry,
+        deadline_check=deadline_check,
+    ):
         raise ValueError("manifest geometry digest mismatch")
     prewrite = cast(Mapping[str, Any], artifact["expected_prewrite_revision"])
     source = cast(Mapping[str, Any], geometry["source"])
@@ -1638,7 +1876,11 @@ def _validate_manifest_semantics(artifact: dict[str, Any]) -> None:
         derive_native_target_id(entity): entity
         for entity in cast(list[dict[str, Any]], geometry["entities"])
     }
-    for operation in cast(list[dict[str, Any]], artifact["operations"]):
+    for operation_index, operation in enumerate(
+        cast(list[dict[str, Any]], artifact["operations"])
+    ):
+        if operation_index % _SCHEMA_CHECKPOINT_INTERVAL == 0:
+            _check_deadline(deadline_check, "manifest semantic validation")
         if operation["kind"] == "translate_dbtext":
             target = by_target.get(cast(str, operation["target_id"]))
             if target is None or target["native_type"] != "DBTEXT":
@@ -1678,12 +1920,21 @@ def _validate_console_result_semantics(artifact: dict[str, Any]) -> None:
         raise ValueError("console result final revision binding differs")
 
 
-def _validate_console_export_semantics(artifact: dict[str, Any]) -> None:
+def _validate_console_export_semantics(
+    artifact: dict[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
     geometry = _embedded_geometry(
         cast(str, artifact["geometry_json"]),
         error=ErrorCode.NATIVE_READBACK_INVALID,
+        deadline_check=deadline_check,
     )
-    if artifact["geometry_sha256"] != canonical_sha256(geometry):
+    _check_deadline(deadline_check, "console export embedded geometry validation")
+    if artifact["geometry_sha256"] != canonical_sha256(
+        geometry,
+        deadline_check=deadline_check,
+    ):
         raise ValueError("console export geometry digest mismatch")
     final = cast(Mapping[str, Any], artifact["final_document_binding"])
     if (
@@ -1708,11 +1959,18 @@ def strict_native_json(
     text: str,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
 ) -> dict[str, Any]:
     """Decode strict JSON embedded in a protocol or private workspace file."""
 
     try:
-        parsed = load_json_value(text, deadline_check=deadline_check)
+        _check_deadline(deadline_check, "embedded JSON decoding")
+        parsed = load_json_value(
+            text,
+            deadline_check=deadline_check,
+            maximum_string_codepoints=maximum_string_codepoints,
+        )
+        _check_deadline(deadline_check, "embedded JSON decoding")
     except CanonicalJsonError:
         raise
     if not isinstance(parsed, dict):
@@ -1724,10 +1982,31 @@ def load_json_value(
     text: str,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
 ) -> Any:
     """Keep the duplicate-key/NFC parser local to this native contract surface."""
 
-    return strict_json_loads(text, deadline_check=deadline_check)
+    return strict_json_loads(
+        text,
+        deadline_check=deadline_check,
+        maximum_string_codepoints=maximum_string_codepoints,
+    )
+
+
+def load_native_json_value(
+    kind: NativeSchemaKind,
+    text: str,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> Any:
+    """Decode an outer native document with only its exact carrier exceptions."""
+
+    return strict_json_loads(
+        text,
+        deadline_check=deadline_check,
+        opaque_string_rules=opaque_embedded_json_rules(kind),
+        maximum_string_codepoints=_maximum_string_codepoints_for(kind),
+    )
 
 
 def validate_native_contract(
@@ -1738,18 +2017,31 @@ def validate_native_contract(
 ) -> dict[str, Any]:
     """Validate a native contract's schema, integrity, and semantic invariants."""
 
-    if kind == "geometry":
-        _preflight_geometry_limits(artifact, deadline_check=deadline_check)
-    elif kind in {"manifest", "console_export"}:
-        _preflight_embedded_geometry_json(
-            kind,
-            artifact,
-            deadline_check=deadline_check,
-        )
+    try:
+        if kind == "geometry":
+            _preflight_geometry_limits(artifact, deadline_check=deadline_check)
+        elif kind in {"response", "manifest", "console_export"}:
+            _preflight_embedded_json(
+                kind,
+                artifact,
+                deadline_check=deadline_check,
+            )
+    except PipelineError:
+        raise
+    except (CanonicalJsonError, RecursionError, TypeError, ValueError) as error:
+        raise PipelineError(
+            _error_for(kind),
+            "native string preflight failed",
+        ) from error
     normalized = _validate_common(kind, artifact, deadline_check=deadline_check)
     try:
         if kind == "config":
             _validate_config_semantics(normalized)
+        elif kind == "inventory":
+            _validate_inventory_semantics(
+                normalized,
+                deadline_check=deadline_check,
+            )
         elif kind == "session":
             _validate_session_semantics(normalized)
         elif kind == "geometry":
@@ -1761,11 +2053,17 @@ def validate_native_contract(
         elif kind == "plan":
             _validate_plan_semantics(normalized)
         elif kind == "manifest":
-            _validate_manifest_semantics(normalized)
+            _validate_manifest_semantics(
+                normalized,
+                deadline_check=deadline_check,
+            )
         elif kind == "console_result":
             _validate_console_result_semantics(normalized)
         elif kind == "console_export":
-            _validate_console_export_semantics(normalized)
+            _validate_console_export_semantics(
+                normalized,
+                deadline_check=deadline_check,
+            )
         elif kind == "verification":
             _validate_verification_semantics(normalized)
     except PipelineError:
@@ -1828,7 +2126,7 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
         "max_entities": MAX_NATIVE_GEOMETRY_ENTITIES,
         "max_segments": MAX_NATIVE_GEOMETRY_SEGMENTS,
         "max_geometry_json_bytes": MAX_NATIVE_GEOMETRY_JSON_BYTES,
-        "max_inventory_json_bytes": 64 * 1024,
+        "max_inventory_json_bytes": MAX_NATIVE_INVENTORY_JSON_BYTES,
     }:
         raise ValueError("native geometry limits are not the fixed v1 bounds")
     if config["write_revision_transition"] not in {
@@ -2016,7 +2314,7 @@ def load_native_artifact(kind: NativeArtifactKind, path: Path) -> dict[str, Any]
                     text[:-1] if text.endswith("\n") else text,
                     error=ErrorCode.NATIVE_GEOMETRY_INVALID,
                 )
-            loaded = load_json_value(text)
+            loaded = load_native_json_value(kind, text)
         except (CanonicalJsonError, RecursionError, UnicodeDecodeError) as error:
             raise PipelineError(
                 _ARTIFACT_ERRORS[kind],
@@ -2035,7 +2333,10 @@ def load_native_config(path: Path) -> dict[str, Any]:
 
     def consume(payload: bytes) -> dict[str, Any]:
         try:
-            loaded = load_json_value(payload.decode("utf-8", errors="strict"))
+            loaded = load_native_json_value(
+                "config",
+                payload.decode("utf-8", errors="strict"),
+            )
         except (CanonicalJsonError, RecursionError, UnicodeDecodeError) as error:
             raise PipelineError(
                 ErrorCode.NATIVE_CONFIG_INVALID,

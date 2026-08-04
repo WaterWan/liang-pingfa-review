@@ -16,7 +16,13 @@ import struct
 import time
 from typing import Any, Final
 
-from .canonical import CanonicalJsonError, canonical_json_bytes, strict_json_loads
+from .canonical import (
+    CanonicalJsonError,
+    OpaqueJsonStringRules,
+    OpaqueJsonStringError,
+    canonical_json_bytes,
+    strict_json_loads,
+)
 from .errors import ErrorCode, PipelineError
 
 
@@ -78,6 +84,10 @@ CONSOLE_TIMEOUT_SECONDS: Final = {
 
 class NativeProtocolError(ValueError):
     """A malformed frame, envelope, or stream state."""
+
+
+class NativeOpaqueEmbeddedJsonError(NativeProtocolError):
+    """A schema-authorized opaque carrier exceeded its pre-NFC boundary."""
 
 
 _DeadlineCheck = Callable[[str], None]
@@ -224,11 +234,23 @@ def validate_response_envelope(
     return result
 
 
-def encode_frame(value: Mapping[str, Any], *, maximum: int) -> bytes:
-    """Create a single big-endian length-prefixed strict JSON frame."""
+def encode_frame(
+    value: Mapping[str, Any],
+    *,
+    maximum: int,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+) -> bytes:
+    """Create a single big-endian strict JSON frame.
+
+    Response callers supply only their schema's explicit opaque-carrier
+    paths.  Requests retain the default strict-NFC behavior for every scalar.
+    """
 
     try:
-        payload = canonical_json_bytes(value)
+        payload = canonical_json_bytes(
+            value,
+            opaque_string_rules=opaque_string_rules,
+        )
     except (CanonicalJsonError, RecursionError) as error:
         raise NativeProtocolError("frame JSON is not canonical") from error
     if not payload or len(payload) > maximum:
@@ -241,8 +263,14 @@ def decode_payload(
     *,
     maximum: int,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
 ) -> dict[str, Any]:
-    """Decode one UTF-8, duplicate-key-free JSON payload."""
+    """Decode one UTF-8, duplicate-key-free JSON payload.
+
+    ``opaque_string_rules`` is intentionally caller supplied rather than
+    inferred from field names, so a nested attacker-controlled
+    ``geometry_json`` or ``inventory_json`` remains strict NFC.
+    """
 
     _check_deadline(deadline_check, "response payload validation")
     if not payload or len(payload) > maximum:
@@ -253,7 +281,15 @@ def decode_payload(
         _check_deadline(deadline_check, "UTF-8 decoding")
         text = payload.decode("utf-8", errors="strict")
         _check_deadline(deadline_check, "duplicate-key JSON decoding")
-        decoded = strict_json_loads(text, deadline_check=deadline_check)
+        decoded = strict_json_loads(
+            text,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_string_rules,
+        )
+    except OpaqueJsonStringError as error:
+        raise NativeOpaqueEmbeddedJsonError(
+            "opaque embedded JSON exceeds its frame contract"
+        ) from error
     except (UnicodeDecodeError, CanonicalJsonError, RecursionError) as error:
         raise NativeProtocolError("frame is not strict UTF-8 JSON") from error
     _check_deadline(deadline_check, "duplicate-key JSON decoding")
@@ -267,6 +303,7 @@ def decode_frame(
     *,
     maximum: int,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
 ) -> dict[str, Any]:
     """Decode an in-memory frame; primarily used by platform-neutral test doubles."""
 
@@ -281,6 +318,7 @@ def decode_frame(
         frame[4:],
         maximum=maximum,
         deadline_check=deadline_check,
+        opaque_string_rules=opaque_string_rules,
     )
 
 
@@ -344,6 +382,7 @@ def read_frame(
     maximum: int,
     deadline: float,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
 ) -> dict[str, Any]:
     """Read one framed payload with no implicit retries or buffering."""
 
@@ -357,6 +396,7 @@ def read_frame(
         read_exact(reader, length, deadline=deadline),
         maximum=maximum,
         deadline_check=deadline_check,
+        opaque_string_rules=opaque_string_rules,
     )
 
 

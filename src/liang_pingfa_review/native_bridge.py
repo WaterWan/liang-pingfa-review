@@ -36,10 +36,11 @@ from .canonical import (
 )
 from .errors import ErrorCode, PipelineError
 from .native_contracts import (
-    geometry_text_matches_canonical_bytes,
+    _embedded_geometry,
+    _embedded_inventory,
     load_native_config,
     native_host_binding,
-    require_geometry_json_utf8_bytes,
+    opaque_embedded_json_rules,
     require_geometry_export_matches_session,
     strict_native_json,
     validate_native_contract,
@@ -53,6 +54,7 @@ from .native_protocol import (
     PROTOCOL_MINOR,
     PROTOCOL_VERSION,
     RpcRequest,
+    NativeOpaqueEmbeddedJsonError,
     NativeProtocolError,
     derive_challenge_response,
     encode_frame,
@@ -1876,19 +1878,11 @@ class NativeBridgeClient:
                 maximum=response_limit_for_method(method),
                 deadline=timing.deadline,
                 deadline_check=self._deadline_checker(timing),
+                opaque_string_rules=opaque_embedded_json_rules("response"),
             )
-            # ``geometry_json`` is an embedded raw JSON document.  Enforce
-            # its UTF-8 byte ceiling before generic schema normalization and
-            # well before the inner geometry parser makes another copy.
-            if method == "export_exact_geometry" and isinstance(
-                response.get("result"),
-                Mapping,
-            ):
-                require_geometry_json_utf8_bytes(
-                    response["result"].get("geometry_json"),
-                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
-                    deadline_check=self._deadline_checker(timing),
-                )
+            # The strict frame decoder receives only the response schema's
+            # exact opaque-carrier paths. It enforces their UTF-8 caps before
+            # outer NFC; nested same-named fields remain ordinary scalars.
             self._require_request_deadline(timing, "generic response schema validation")
             response = validate_native_contract(
                 "response",
@@ -1953,6 +1947,27 @@ class NativeBridgeClient:
                 ) from error
             self._invalidate_locked()
             raise
+        except NativeOpaqueEmbeddedJsonError as error:
+            if (
+                timing is not None
+                and self._session_has_expired(
+                    session_deadline=timing.session_deadline,
+                )
+            ):
+                self._invalidate_locked()
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_EXPIRED,
+                    "native session expired",
+                ) from error
+            self._invalidate_locked()
+            raise PipelineError(
+                (
+                    ErrorCode.NATIVE_GEOMETRY_INVALID
+                    if method == "export_exact_geometry"
+                    else ErrorCode.NATIVE_PROTOCOL_INVALID
+                ),
+                "native opaque JSON carrier rejected",
+            ) from error
         except (
             NativePipeClosed,
             NativeProtocolError,
@@ -2027,17 +2042,20 @@ class NativeBridgeClient:
                     "wrong native inventory response",
                 )
             try:
-                self._require_request_deadline(timing, "inventory JSON decoding")
-                inventory = strict_native_json(
+                inventory = _embedded_inventory(
                     cast(str, result["inventory_json"]),
+                    error=ErrorCode.NATIVE_PROTOCOL_INVALID,
                     deadline_check=self._deadline_checker(timing),
                 )
-                self._require_request_deadline(timing, "inventory JSON decoding")
             except (CanonicalJsonError, RecursionError, TypeError) as error:
                 raise PipelineError(
                     ErrorCode.NATIVE_PROTOCOL_INVALID,
                     "native inventory JSON invalid",
                 ) from error
+            self._require_request_deadline(
+                timing,
+                "inventory binding semantic validation",
+            )
             if (
                 set(inventory) != {"document_revision_fingerprint", "inventory_digest"}
                 or not all(
@@ -2052,6 +2070,10 @@ class NativeBridgeClient:
                     ErrorCode.NATIVE_DOCUMENT_CHANGED,
                     "native inventory binding drift",
                 )
+            self._require_request_deadline(
+                timing,
+                "inventory binding semantic validation",
+            )
             self._require_live_after_response(timing, "inventory final validation")
             self._require_request_deadline(timing, "inventory final return")
             return inventory
@@ -2117,28 +2139,23 @@ class NativeBridgeClient:
                     "wrong native geometry response",
                 )
             try:
-                self._require_request_deadline(timing, "geometry JSON decoding")
-                raw_geometry = require_geometry_json_utf8_bytes(
-                    result.get("geometry_json"),
+                decoded_geometry = _embedded_geometry(
+                    cast(str, result.get("geometry_json")),
                     error=ErrorCode.NATIVE_GEOMETRY_INVALID,
                     deadline_check=self._deadline_checker(timing),
                 )
-                decoded_geometry = strict_native_json(
-                    raw_geometry,
-                    deadline_check=self._deadline_checker(timing),
+                self._require_request_deadline(
+                    timing,
+                    "geometry session binding validation",
                 )
-                self._require_request_deadline(timing, "geometry canonical validation")
-                if not geometry_text_matches_canonical_bytes(
-                    raw_geometry,
-                    decoded_geometry,
-                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
-                    deadline_check=self._deadline_checker(timing),
-                ):
-                    raise ValueError("bridge geometry JSON is not canonical")
                 export, _checked_session = require_geometry_export_matches_session(
                     decoded_geometry,
                     self._session,
                     deadline_check=self._deadline_checker(timing),
+                )
+                self._require_request_deadline(
+                    timing,
+                    "geometry session binding validation",
                 )
             except (CanonicalJsonError, RecursionError) as error:
                 raise PipelineError(
