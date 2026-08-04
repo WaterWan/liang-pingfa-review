@@ -10,35 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  validate-ubuntu:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Install project
-        run: python -m pip install .
-      - name: Validate repository
-        run: python scripts/validate_skill.py
-      - name: Run portable unit suite
-        run: python -m unittest discover -s tests -p "test_*.py" -v
-      - name: Compile Python sources
-        run: python -m compileall -q src tests scripts
-      - name: Check CLI help
-        run: |
-          python -m liang_pingfa_review --help
-          python -m liang_pingfa_review doctor --help
-          python -m liang_pingfa_review audit --help
-          python -m liang_pingfa_review plan --help
-          python -m liang_pingfa_review review-plan --help
-          python -m liang_pingfa_review apply --help
-          python -m liang_pingfa_review verify --help
-          python -m liang_pingfa_review local-regression --help
-      - name: Check forbidden tracked artifacts
-        run: python scripts/validate_skill.py --tracked
   validate-windows:
     runs-on: windows-latest
     steps:
@@ -48,14 +19,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Set up .NET contracts SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
       - name: Install project
         run: python -m pip install .
       - name: Validate repository
         run: python scripts/validate_skill.py
+      - name: Check forbidden tracked artifacts
+        run: python scripts/validate_skill.py --tracked
       - name: Run full Windows suite including native handle tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
       - name: Compile Python sources
         run: python -m compileall -q src tests scripts
+      - name: Build SDK-free native bridge contracts
+        run: dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj -c Release --nologo
       - name: Check CLI help
         run: |
           python -m liang_pingfa_review --help
@@ -66,5 +45,14 @@ jobs:
           python -m liang_pingfa_review apply --help
           python -m liang_pingfa_review verify --help
           python -m liang_pingfa_review local-regression --help
-      - name: Check forbidden tracked artifacts
-        run: python scripts/validate_skill.py --tracked
+          python -m liang_pingfa_review native-session --help
+          python -m liang_pingfa_review native-doctor --help
+          python -m liang_pingfa_review native-audit --help
+          python -m liang_pingfa_review native-plan --help
+          python -m liang_pingfa_review native-review-plan --help
+          python -m liang_pingfa_review native-apply --help
+          python -m liang_pingfa_review native-verify --help
+      - name: Check CLI doctors
+        run: |
+          python -m liang_pingfa_review doctor
+          python -m liang_pingfa_review native-doctor
