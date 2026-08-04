@@ -26,7 +26,6 @@ from liang_pingfa_review.apply import apply_dwg
 from tests.support.owned_files import (
     TestOwnedPath,
     TestOwnershipBackend,
-    install_non_windows_test_ownership,
 )
 from tests.support.synthetic_dxf import (
     FakeOdaConverter,
@@ -37,17 +36,10 @@ from tests.support.synthetic_dxf import (
 )
 
 
-def _install_portable_backend(test_case: unittest.TestCase) -> None:
-    """Inject the test-only backend on Ubuntu while preserving Windows probes."""
-
-    install_non_windows_test_ownership(test_case)
-
-
 class OdaDiscoveryAndPrivateRootsTests(unittest.TestCase):
     """Require random exact filters and two separate DACL-protected roots."""
 
     def setUp(self) -> None:
-        _install_portable_backend(self)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.program_root = self.root / "programs"
@@ -156,7 +148,6 @@ class OdaInventoryAndFailureTests(unittest.TestCase):
     """Exercise accidental/stale/path/subprocess failure gates."""
 
     def setUp(self) -> None:
-        _install_portable_backend(self)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.executable = self.root / "ODAFileConverter.exe"
@@ -419,7 +410,6 @@ class OdaDualProofTests(unittest.TestCase):
     """Dual agreement is necessary but never sufficient for expected state."""
 
     def setUp(self) -> None:
-        _install_portable_backend(self)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
 
@@ -623,7 +613,6 @@ class CliDoctorAndWorkflowTests(unittest.TestCase):
     """Doctor emits only redacted capability states and CLI remains DWG-only."""
 
     def setUp(self) -> None:
-        _install_portable_backend(self)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
 

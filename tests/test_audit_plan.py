@@ -32,7 +32,6 @@ from tests.support.synthetic_dxf import (
     create_fake_dwg,
     create_synthetic_dxf,
 )
-from tests.support.owned_files import install_non_windows_test_ownership
 
 
 def _raw_newline(raw: bytes) -> bytes:
@@ -181,7 +180,6 @@ class AuditAndPlanTests(unittest.TestCase):
     """Exercise all fixed finding statuses without committed CAD fixtures."""
 
     def setUp(self) -> None:
-        install_non_windows_test_ownership(self)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.source = self.root / "source.dwg"
