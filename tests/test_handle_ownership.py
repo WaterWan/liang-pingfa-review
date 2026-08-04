@@ -6,16 +6,19 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
+import ctypes
 
 from liang_pingfa_review.atomic_output import (
     acquire_new_output_target_leases,
     acquire_staged_output_lease,
     publish_new_artifacts,
     publish_no_replace,
+    stage_publication_transaction,
 )
 from liang_pingfa_review.canonical import write_new_text
 from liang_pingfa_review.errors import ErrorCode, PipelineError
@@ -23,16 +26,22 @@ from liang_pingfa_review.ownership import (
     DestinationExistsError,
     FileIdentity,
     OwnedPathBinding,
+    OwnershipCleanupError,
     OwnershipLostError,
     WindowsFileOwnershipBackend,
     WindowsOwnedPath,
+    create_private_directory,
+    create_private_workspace_directory,
+    private_input_trusted_owner_sids,
     secure_private_staging_directory,
+    verify_private_staging_file,
+    validate_private_input_owner,
 )
+import liang_pingfa_review.ownership as ownership
 from liang_pingfa_review.temporary import (
     PrivateWorkspace,
     recover_publication_temporary,
 )
-from tests.support.owned_files import install_non_windows_test_ownership
 
 
 def _synthetic_windows_path(name: str) -> Path:
@@ -40,6 +49,90 @@ def _synthetic_windows_path(name: str) -> Path:
 
     separator = chr(92)
     return Path("C" + chr(58) + separator + "generated" + separator + name)
+
+
+class PrivateInputOwnerTests(unittest.TestCase):
+    """Exercise owner policy and retained-handle drift with generated SIDs."""
+
+    _user = "S-1-5-21-100"
+    _system = "S-1-5-18"
+
+    def test_private_input_owner_set_is_only_current_user_and_system(self) -> None:
+        self.assertEqual(
+            private_input_trusted_owner_sids(self._user),
+            frozenset({self._user, self._system}),
+        )
+        for owner in (
+            "S-1-5-32-545",  # Builtin Users
+            "S-1-1-0",  # Everyone
+            "S-1-5-11",  # Authenticated Users
+            "S-1-5-32-544",  # Administrators
+            "S-1-5-80-123-456-789-1011-1213",  # arbitrary service
+            "S-1-5-21-999",
+        ):
+            with self.subTest(owner=owner), self.assertRaises(OwnershipCleanupError):
+                validate_private_input_owner(owner, user_sid=self._user)
+        validate_private_input_owner(self._user, user_sid=self._user)
+        validate_private_input_owner(self._system, user_sid=self._user)
+
+    def test_administrators_owner_requires_the_token_default_owner_policy(self) -> None:
+        administrators = "S-1-5-32-544"
+        with mock.patch.object(
+            ownership,
+            "_current_token_owner_sid",
+            return_value=administrators,
+        ):
+            self.assertIn(
+                administrators,
+                private_input_trusted_owner_sids(
+                    self._user,
+                    allow_administrators_if_token_owner=True,
+                ),
+            )
+        with self.assertRaises(OwnershipCleanupError):
+            validate_private_input_owner(administrators, user_sid=self._user)
+
+    def test_safe_dacl_cannot_rescue_untrusted_or_drifting_handle_owner(self) -> None:
+        dacl = "D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-100)"
+        with (
+            mock.patch.object(
+                ownership,
+                "_dacl_sddl_for_handle",
+                return_value=dacl,
+            ),
+            mock.patch.object(
+                ownership,
+                "_expected_private_dacl_principal",
+                return_value=self._user,
+            ),
+            mock.patch.object(
+                ownership,
+                "_owner_sid_for_handle",
+                return_value="S-1-5-32-545",
+            ),
+            self.assertRaises(OwnershipCleanupError),
+        ):
+            ownership._verify_private_staging_dacl_on_handle(7, self._user)
+
+        with (
+            mock.patch.object(
+                ownership,
+                "_dacl_sddl_for_handle",
+                return_value=dacl,
+            ),
+            mock.patch.object(
+                ownership,
+                "_expected_private_dacl_principal",
+                return_value=self._user,
+            ),
+            mock.patch.object(
+                ownership,
+                "_owner_sid_for_handle",
+                side_effect=(self._user, self._system),
+            ),
+            self.assertRaises(OwnershipCleanupError),
+        ):
+            ownership._verify_private_staging_dacl_on_handle(7, self._user)
 
 
 class _RecordingKernelApi:
@@ -97,6 +190,59 @@ class _RecordingKernelApi:
 
     def last_error(self) -> int:
         return self.rename_error
+
+
+class _RecordingPrivateDirectoryApi:
+    """Mock CreateDirectoryW boundary that exposes security attributes."""
+
+    def __init__(
+        self,
+        *,
+        created: bool = True,
+        error_number: int = 0,
+        after_create: object | None = None,
+    ) -> None:
+        self.created = created
+        self.error_number = error_number
+        self.after_create = after_create
+        self.calls: list[tuple[str, object]] = []
+
+    def create_directory(self, path: str, attributes: object) -> bool:
+        self.calls.append((path, attributes))
+        if self.created and callable(self.after_create):
+            self.after_create(attributes)
+        return self.created
+
+    def last_error(self) -> int:
+        return self.error_number
+
+
+class _AtomicDirectoryOwnedPath:
+    """Generated retained directory handle used by atomic-create tests."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._binding = OwnedPathBinding(
+            path=path,
+            identity=FileIdentity("generated-directory", 19, 23, 29),
+            byte_size=None,
+            sha256=None,
+            is_directory=True,
+        )
+        self.delete_requested = False
+        self.closed = False
+
+    def capture_binding(self) -> OwnedPathBinding:
+        return self._binding
+
+    def final_path(self) -> Path:
+        return self.path
+
+    def request_delete(self) -> None:
+        self.delete_requested = True
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class WindowsApiShapeTests(unittest.TestCase):
@@ -177,6 +323,183 @@ class WindowsApiShapeTests(unittest.TestCase):
         )
 
 
+class WindowsAtomicPrivateDirectoryTests(unittest.TestCase):
+    """Exercise the CreateDirectoryW security-attribute boundary off Windows."""
+
+    _user = "S-1-5-21-100"
+    _other_user = "S-1-5-21-200"
+
+    @staticmethod
+    def _attributes() -> object:
+        attributes = ownership._SecurityAttributes()
+        attributes.nLength = ctypes.sizeof(ownership._SecurityAttributes)
+        attributes.lpSecurityDescriptor = ctypes.c_void_p(123)
+        attributes.bInheritHandle = 0
+        return attributes
+
+    def _backend(
+        self,
+        api: _RecordingPrivateDirectoryApi,
+        opened: _AtomicDirectoryOwnedPath,
+    ) -> WindowsFileOwnershipBackend:
+        backend = WindowsFileOwnershipBackend(api=api)  # type: ignore[arg-type]
+        backend.open_existing_directory = mock.Mock(return_value=opened)  # type: ignore[method-assign]
+        return backend
+
+    def test_create_directory_supplies_private_security_before_exposure_callback(self) -> None:
+        """An observer at creation sees a descriptor, never a bare directory."""
+
+        exposure_without_dacl: list[object] = []
+
+        def exposure_callback(attributes: object) -> None:
+            if (
+                not isinstance(attributes, ownership._SecurityAttributes)
+                or attributes.nLength != ctypes.sizeof(ownership._SecurityAttributes)
+                or not attributes.lpSecurityDescriptor
+                or attributes.bInheritHandle
+            ):
+                exposure_without_dacl.append(attributes)
+
+        path = _synthetic_windows_path("atomic-private")
+        api = _RecordingPrivateDirectoryApi(after_create=exposure_callback)
+        opened = _AtomicDirectoryOwnedPath(path)
+        backend = self._backend(api, opened)
+        with (
+            mock.patch.object(ownership, "_current_user_sid", return_value=self._user),
+            mock.patch.object(
+                ownership,
+                "_private_directory_security_attributes",
+                return_value=(self._attributes(), ctypes.c_void_p(123)),
+            ),
+            mock.patch.object(ownership, "_free_private_directory_security_descriptor"),
+            mock.patch.object(
+                ownership,
+                "verify_private_staging_file",
+                return_value=self._user,
+            ),
+        ):
+            creation = create_private_directory(path, backend)
+        try:
+            self.assertEqual([call_path for call_path, _ in api.calls], [str(path)])
+            self.assertEqual(exposure_without_dacl, [])
+            self.assertFalse(opened.closed)
+        finally:
+            creation.dispose(backend)
+        self.assertTrue(opened.delete_requested)
+        self.assertTrue(opened.closed)
+
+    def test_collision_retries_only_the_bounded_atomic_create(self) -> None:
+        marker = object()
+        with (
+            mock.patch.object(
+                ownership.secrets,
+                "token_hex",
+                side_effect=("a" * 32, "b" * 32),
+            ),
+            mock.patch.object(
+                ownership,
+                "create_private_directory",
+                side_effect=(DestinationExistsError("collision"), marker),
+            ) as created,
+        ):
+            result = create_private_workspace_directory(
+                _synthetic_windows_path("generated"),
+                "workspace-",
+                mock.Mock(),
+            )
+        self.assertIs(result, marker)
+        self.assertEqual(created.call_count, 2)
+        self.assertTrue(str(created.call_args_list[0].args[0]).endswith("workspace-" + "a" * 32))
+        self.assertTrue(str(created.call_args_list[1].args[0]).endswith("workspace-" + "b" * 32))
+
+    def test_descriptor_or_create_failure_never_opens_an_unprotected_directory(self) -> None:
+        path = _synthetic_windows_path("atomic-failure")
+        opened = _AtomicDirectoryOwnedPath(path)
+        descriptor_api = _RecordingPrivateDirectoryApi()
+        descriptor_backend = self._backend(descriptor_api, opened)
+        with mock.patch.object(
+            ownership,
+            "_private_directory_security_attributes",
+            side_effect=OwnershipCleanupError("synthetic descriptor failure"),
+        ):
+            with self.assertRaises(OwnershipCleanupError):
+                create_private_directory(path, descriptor_backend)
+        self.assertEqual(descriptor_api.calls, [])
+        descriptor_backend.open_existing_directory.assert_not_called()
+
+        create_api = _RecordingPrivateDirectoryApi(created=False, error_number=5)
+        create_backend = self._backend(create_api, _AtomicDirectoryOwnedPath(path))
+        with (
+            mock.patch.object(ownership, "_current_user_sid", return_value=self._user),
+            mock.patch.object(
+                ownership,
+                "_private_directory_security_attributes",
+                return_value=(self._attributes(), ctypes.c_void_p(123)),
+            ),
+            mock.patch.object(ownership, "_free_private_directory_security_descriptor"),
+        ):
+            with self.assertRaises(OwnershipCleanupError):
+                create_private_directory(path, create_backend)
+        self.assertEqual(len(create_api.calls), 1)
+        create_backend.open_existing_directory.assert_not_called()
+
+    def test_non_windows_creator_requires_an_explicit_safe_backend_capability(self) -> None:
+        """No generic mkdir fallback is available to an arbitrary backend."""
+
+        class UnsafeBackend:
+            pass
+
+        with self.assertRaises(OwnershipCleanupError):
+            create_private_directory(
+                _synthetic_windows_path("unsafe-fallback"),
+                UnsafeBackend(),  # type: ignore[arg-type]
+            )
+
+    def test_post_creation_validation_failure_deletes_the_bound_empty_directory(self) -> None:
+        path = _synthetic_windows_path("atomic-cleanup")
+        opened = _AtomicDirectoryOwnedPath(path)
+        api = _RecordingPrivateDirectoryApi()
+        backend = self._backend(api, opened)
+        with (
+            mock.patch.object(ownership, "_current_user_sid", return_value=self._user),
+            mock.patch.object(
+                ownership,
+                "_private_directory_security_attributes",
+                return_value=(self._attributes(), ctypes.c_void_p(123)),
+            ),
+            mock.patch.object(ownership, "_free_private_directory_security_descriptor"),
+            mock.patch.object(
+                ownership,
+                "verify_private_staging_file",
+                side_effect=OwnershipCleanupError("synthetic readback failure"),
+            ),
+            self.assertRaises(OwnershipCleanupError),
+        ):
+            create_private_directory(path, backend)
+        self.assertEqual(len(api.calls), 1)
+        self.assertTrue(opened.delete_requested)
+        self.assertTrue(opened.closed)
+
+    def test_policy_rejects_a_broad_temp_parent_and_second_user(self) -> None:
+        """The creation descriptor never inherits a broad parent or other SID."""
+
+        sddl = ownership._private_directory_sddl(self._user)
+        dacl = sddl[sddl.index("D:") :]
+        self.assertEqual(
+            dacl,
+            f"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;{self._user})",
+        )
+        self.assertIn(f"O:{self._user}", sddl)
+        self.assertNotIn(self._other_user, sddl)
+        self.assertTrue(ownership._private_staging_dacl_is_exact(dacl, self._user))
+        self.assertFalse(
+            ownership._private_staging_dacl_is_exact(
+                dacl + f"(A;OICI;FA;;;{self._other_user})",
+                self._user,
+            )
+        )
+
+
 class _SwapAfterCheckOwnedPath:
     """Synthetic handle that models a replacement after identity comparison."""
 
@@ -252,9 +575,6 @@ class _SwapAfterCheckBackend:
 
 class OwnershipCleanupRaceTests(unittest.TestCase):
     """Ensure cleanup never deletes a pathname replacement."""
-
-    def setUp(self) -> None:
-        install_non_windows_test_ownership(self)
 
     def test_synthetic_swap_between_check_and_cleanup_survives(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -395,6 +715,29 @@ class WindowsHandleIntegrationTests(unittest.TestCase):
                 WindowsFileOwnershipBackend(),
             )
             self.assertTrue(root.is_dir())
+
+    def test_workspace_creation_is_private_before_children_and_cleans_up(self) -> None:
+        """A broad system TEMP parent cannot weaken the atomically private child."""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            workspace_path: Path | None = None
+            with PrivateWorkspace(
+                prefix="liang-pingfa-atomic-workspace-",
+                directory=root,
+            ) as workspace:
+                workspace_path = workspace.path
+                assert workspace._workspace_root_chain is not None
+                owner = verify_private_staging_file(
+                    workspace._workspace_root_chain.owned,
+                    workspace.backend,
+                )
+                self.assertEqual(owner, ownership.current_user_sid())
+                # The verified root is still empty at this point: a child is
+                # created only after its exact private root binding exists.
+                self.assertEqual(list(workspace.path.iterdir()), [])
+            assert workspace_path is not None
+            self.assertFalse(workspace_path.exists())
 
     def test_staged_swap_before_copy_is_rejected_against_its_audited_lease(self) -> None:
         """A staged pathname replacement cannot satisfy a prior held binding."""
@@ -1043,3 +1386,102 @@ class WindowsHandleIntegrationTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, ErrorCode.ATOMIC_PUBLISH_FAILED)
             self.assertFalse(close_target.exists())
             self.assertEqual(list(root.glob(".liang-pingfa-artifact-*.tmp")), [])
+
+    def test_private_publication_temp_resists_public_parent_and_restores_readability(self) -> None:
+        """A broad parent cannot expose bytes before cleanup/commit."""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            # Use an SID rather than a localized account name.  This is a
+            # generated directory only; failure to set the probe ACL is an
+            # environment limitation, not a reason to weaken the test.
+            acl = subprocess.run(
+                [
+                    "icacls",
+                    str(root),
+                    "/grant",
+                    "*S-1-1-0:(OI)(CI)F",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if acl.returncode != 0:
+                self.skipTest("cannot create generated broad-parent ACL probe")
+
+            staged = root / "generated-source.dwg"
+            output = root / "published.dwg"
+            verification = root / "published.json"
+            replacement = root / "generated-replacement.bin"
+            staged.write_bytes(b"AC1032generated-private-publication")
+            replacement.write_bytes(b"generated-replacement")
+            targets = acquire_new_output_target_leases((output, verification))
+            transaction = None
+            try:
+                transaction = stage_publication_transaction(
+                    staged,
+                    targets.targets[0],
+                )
+                transaction.stage_artifact(
+                    targets.targets[1],
+                    b'{"passed":true,"generated":true}',
+                )
+                temporaries = [
+                    transaction.output.binding.path,
+                    transaction.artifact.binding.path,  # type: ignore[union-attr]
+                ]
+                probe = (
+                    "import os, sys\n"
+                    "path, replacement = sys.argv[1:]\n"
+                    "opened = []\n"
+                    "try:\n"
+                    "    with open(path, 'rb') as stream: stream.read(1)\n"
+                    "    opened.append('read')\n"
+                    "except OSError: pass\n"
+                    "try:\n"
+                    "    with open(path, 'r+b') as stream: stream.write(b'x')\n"
+                    "    opened.append('write')\n"
+                    "except OSError: pass\n"
+                    "try:\n"
+                    "    os.replace(replacement, path)\n"
+                    "    opened.append('replace')\n"
+                    "except OSError: pass\n"
+                    "try:\n"
+                    "    os.unlink(path)\n"
+                    "    opened.append('delete')\n"
+                    "except OSError: pass\n"
+                    "raise SystemExit(1 if opened else 0)\n"
+                )
+                for temporary in temporaries:
+                    result = subprocess.run(
+                        [sys.executable, "-c", probe, str(temporary), str(replacement)],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                    self.assertEqual(
+                        result.returncode,
+                        0,
+                        f"second process accessed private temporary {temporary.name}",
+                    )
+                transaction.commit()
+                transaction.finalize()
+                for final in (output, verification):
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import pathlib, sys; pathlib.Path(sys.argv[1]).read_bytes()",
+                            str(final),
+                        ],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 0)
+            finally:
+                if transaction is not None:
+                    transaction.abort()
+                targets.close()

@@ -11,7 +11,6 @@ import stat as stat_module
 import sys
 from typing import BinaryIO, TextIO
 import unittest
-from unittest import mock
 
 from liang_pingfa_review.ownership import (
     DestinationExistsError,
@@ -19,6 +18,7 @@ from liang_pingfa_review.ownership import (
     OwnedPathBinding,
     OwnershipCleanupError,
     OwnershipLostError,
+    PublicOutputAclPolicy,
 )
 
 
@@ -158,7 +158,7 @@ class TestOwnedPath:
         )
 
     def final_path(self) -> Path:
-        """Mirror the no-follow handle contract for the POSIX-only test double."""
+        """Return the test double's currently bound path."""
 
         return Path(os.path.abspath(os.fspath(self.path)))
 
@@ -166,10 +166,8 @@ class TestOwnedPath:
         if self._is_directory:
             raise OwnershipCleanupError("test directories cannot publish")
         if sys.platform == "win32":
-            # The test double models POSIX-style rename/unlink behavior on a
-            # Windows host during the Linux-simulation subprocess. Windows
-            # cannot rename or unlink the file while this Python descriptor is
-            # live, so release and reacquire only inside this test-only path.
+            # Windows cannot rename or unlink the file while this Python
+            # descriptor is live, so release and reacquire in this test double.
             if os.path.lexists(destination):
                 raise DestinationExistsError("destination exists")
             if self._stream is not None:
@@ -216,8 +214,14 @@ class TestOwnershipBackend:
     def __init__(self) -> None:
         self.private_ancestry_checks: list[Path] = []
         self.secured_private_directories: list[Path] = []
+        self.private_file_creates: list[Path] = []
+        self.secured_private_files: list[Path] = []
+        self.verified_private_files: list[Path] = []
+        self.restored_public_output_files: list[Path] = []
         self.fail_private_ancestry = False
         self.fail_private_dacl = False
+        self.fail_private_file_dacl = False
+        self.fail_public_output_dacl = False
 
     def create_new_file(self, path: Path) -> TestOwnedPath:
         return TestOwnedPath(
@@ -226,6 +230,17 @@ class TestOwnershipBackend:
             is_directory=False,
             backend=self,
         )
+
+    def create_private_file(self, path: Path) -> TestOwnedPath:
+        """Mirror the exclusive production creation API in generated tests."""
+
+        self.private_file_creates.append(path)
+        return self.create_new_file(path)
+
+    def create_private_directory(self, path: Path) -> None:
+        """Create a 0700 test-only private root without Windows ACL fallback."""
+
+        path.mkdir(mode=0o700)
 
     def open_existing_file(self, path: Path, *, for_delete: bool) -> TestOwnedPath:
         del for_delete
@@ -280,11 +295,11 @@ class TestOwnershipBackend:
             opened.close()
 
     def validate_private_staging_ancestry(self, path: Path) -> None:
-        """Model the explicitly injected portable NTFS qualification."""
+        """Model the explicitly injected private-staging qualification."""
 
         self.private_ancestry_checks.append(path)
         if self.fail_private_ancestry:
-            raise OwnershipCleanupError("synthetic non-NTFS workspace")
+            raise OwnershipCleanupError("synthetic private workspace failure")
 
     def secure_private_staging_directory(self, path: Path) -> None:
         """Model verified current-user/SYSTEM DACL application in pure tests."""
@@ -293,25 +308,31 @@ class TestOwnershipBackend:
         if self.fail_private_dacl:
             raise OwnershipCleanupError("synthetic private DACL failure")
 
+    def secure_private_staging_file(self, path: Path) -> None:
+        self.secured_private_files.append(path)
+        if self.fail_private_file_dacl:
+            raise OwnershipCleanupError("synthetic private file DACL failure")
 
-def install_non_windows_test_ownership(test_case: unittest.TestCase) -> None:
-    """Patch private ownership factories only inside a non-Windows test case.
+    def verify_private_staging_file(self, path: Path) -> None:
+        """Model retained-handle readback without rewriting a final DACL."""
 
-    Production code remains Windows-only.  Ubuntu's pure synthetic suite uses
-    these test-local doubles for every internal boundary that otherwise
-    constructs the native ownership backend, including ODA and DXF snapshots.
-    """
+        self.verified_private_files.append(path)
+        if self.fail_private_file_dacl:
+            raise OwnershipCleanupError("synthetic private file DACL failure")
 
-    if os.name == "nt":
-        return
-    backend = TestOwnershipBackend()
-    for target in (
-        "liang_pingfa_review.temporary.platform_backend",
-        "liang_pingfa_review.canonical.platform_backend",
-        "liang_pingfa_review.atomic_output.platform_backend",
-        "liang_pingfa_review.oda._converter_backend",
-        "liang_pingfa_review.snapshots._snapshot_backend",
-    ):
-        patcher = mock.patch(target, return_value=backend)
-        patcher.start()
-        test_case.addCleanup(patcher.stop)
+    def capture_public_output_acl_policy(
+        self,
+        _opened: TestOwnedPath,
+    ) -> PublicOutputAclPolicy:
+        """Represent the parent-derived readable policy without an OS ACL."""
+
+        return PublicOutputAclPolicy(dacl_sddl="D:AI(test-public-output)")
+
+    def apply_public_output_acl_policy(
+        self,
+        opened: TestOwnedPath,
+        _policy: PublicOutputAclPolicy,
+    ) -> None:
+        self.restored_public_output_files.append(opened.path)
+        if self.fail_public_output_dacl:
+            raise OwnershipCleanupError("synthetic public output DACL failure")

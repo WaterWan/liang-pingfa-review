@@ -60,7 +60,6 @@ from tests.support.synthetic_dxf import (
     delete_audited_text_in_synthetic_dxf,
     save_document_to_existing_default_stream,
 )
-from tests.support.owned_files import install_non_windows_test_ownership
 
 
 class CorruptRoundtripConverter(FakeOdaConverter):
@@ -436,7 +435,6 @@ class PureAuditPlanStateTests(unittest.TestCase):
     """Exercise audit-bound state verification without a public DWG mutation."""
 
     def setUp(self) -> None:
-        install_non_windows_test_ownership(self)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.dxf = self.root / "synthetic-before.dxf"
