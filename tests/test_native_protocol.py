@@ -1170,6 +1170,34 @@ class NativeProtocolTests(unittest.TestCase):
         self.assertGreater(len(checks), len(entity_checks))
         self.assertLess(len(checks), len(records) * 16)
 
+    def test_geometry_deadline_checkpoint_bounds_cover_minimum_and_cap(self) -> None:
+        """Every geometry size is interruptible without per-field clock probes."""
+
+        def checkpoint_count(record_count: int) -> int:
+            records = [
+                entity(f"{index + 1:04X}", sequence_index=index)
+                for index in range(record_count)
+            ]
+            export = geometry(records)
+            checks: list[str] = []
+            native_contracts_module.validate_native_contract(
+                "geometry",
+                export,
+                deadline_check=checks.append,
+            )
+            return len(checks)
+
+        minimum_checks = checkpoint_count(1)
+        maximum_records = native_contracts_module.MAX_NATIVE_GEOMETRY_ENTITIES
+        maximum_checks = checkpoint_count(maximum_records)
+
+        # Major stages make a one-record export observable, while the full
+        # geometry cap remains comfortably below the existing linear ceiling.
+        self.assertGreaterEqual(minimum_checks, 16)
+        self.assertLess(minimum_checks, 128)
+        self.assertGreaterEqual(maximum_checks, maximum_records)
+        self.assertLess(maximum_checks, maximum_records * 16)
+
     def test_fake_clock_interrupts_every_large_validation_stage(self) -> None:
         """Valid large values must observe the original deadline mid-traversal."""
 
