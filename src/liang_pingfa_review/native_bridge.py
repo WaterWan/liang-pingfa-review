@@ -37,6 +37,9 @@ from .canonical import (
 from .errors import ErrorCode, PipelineError
 from .native_contracts import (
     MAX_NATIVE_SESSION_LIFETIME,
+    MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS,
+    MAX_NATIVE_SESSION_UPTIME_MILLISECONDS,
+    NATIVE_SESSION_MONOTONIC_CLOCK,
     _embedded_geometry,
     _embedded_inventory,
     load_native_config,
@@ -45,6 +48,7 @@ from .native_contracts import (
     require_geometry_export_matches_session,
     strict_native_json,
     validate_native_contract,
+    validate_native_session_monotonic_bounds,
     validate_native_session_temporal_bounds,
 )
 from .native_protocol import (
@@ -115,6 +119,7 @@ _ERROR_PIPE_NOT_CONNECTED = 233
 _WAIT_OBJECT_0 = 0
 _WAIT_TIMEOUT = 258
 _WAIT_FAILED = 0xFFFFFFFF
+_SYSTEM_BOOT_ENVIRONMENT_INFORMATION = 90
 # Cancellation is normally immediate for a local named pipe.  A bounded
 # foreground wait keeps a wedged kernel call from holding the RPC owner after
 # its deadline; a retained cleanup waiter owns any still-pending event/buffer.
@@ -190,6 +195,12 @@ _TRUSTED_INSTALLER_SID = (
 _CLAIMED_SESSION_NAME = re.compile(
     r"^\.liang-pingfa-native-session-claimed-[a-f0-9]{64}\.json$"
 )
+_BOOT_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
+# Native bridge operations are unsupported off Windows.  This per-process
+# value exists solely so source-free cross-platform unit tests can exercise the
+# strict descriptor parser without accidentally accepting a descriptor in a
+# second process.  Windows production paths always use the boot GUID below.
+_NONWINDOWS_BOOT_ID = secrets.token_hex(16)
 
 
 def _is_claimed_session_basename(name: str) -> bool:
@@ -241,6 +252,134 @@ class ProcessIdentity:
 
 
 @dataclass(frozen=True)
+class NativeSessionClockReading:
+    """One comparable same-boot uptime reading for a private descriptor."""
+
+    clock: str
+    boot_id: str
+    uptime_milliseconds: int
+
+
+NativeSessionClock = Callable[[], NativeSessionClockReading]
+
+
+def _validated_native_session_clock_reading(
+    reading: Any,
+) -> NativeSessionClockReading:
+    """Reject an unavailable, reset, or malformed local clock source."""
+
+    if (
+        not isinstance(reading, NativeSessionClockReading)
+        or reading.clock != NATIVE_SESSION_MONOTONIC_CLOCK
+        or not isinstance(reading.boot_id, str)
+        or _BOOT_ID_PATTERN.fullmatch(reading.boot_id) is None
+        or not isinstance(reading.uptime_milliseconds, int)
+        or isinstance(reading.uptime_milliseconds, bool)
+        or reading.uptime_milliseconds < 0
+        or reading.uptime_milliseconds > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic clock is unavailable",
+        )
+    return reading
+
+
+def _windows_native_session_clock_reading() -> NativeSessionClockReading:
+    """Read the documented Windows uptime plus NTDLL's stable boot GUID.
+
+    ``GetTickCount64`` is comparable across CLI processes on one boot.  Uptime
+    alone is insufficient after a reboot, so the boot environment GUID is
+    carried as a private clock-domain identifier and compared before an
+    issued tick can be reused.
+    """
+
+    _require_windows()
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+        get_tick_count64 = kernel32.GetTickCount64
+        get_tick_count64.argtypes = []
+        get_tick_count64.restype = ctypes.c_ulonglong
+        query_boot_environment = ntdll.NtQuerySystemInformation
+        query_boot_environment.argtypes = [
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.ULONG,
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        query_boot_environment.restype = ctypes.c_long
+        boot_environment = _SystemBootEnvironmentInformation()
+        returned = wintypes.ULONG()
+        status = int(
+            query_boot_environment(
+                _SYSTEM_BOOT_ENVIRONMENT_INFORMATION,
+                ctypes.byref(boot_environment),
+                ctypes.sizeof(boot_environment),
+                ctypes.byref(returned),
+            )
+        )
+        if status != 0 or returned.value < ctypes.sizeof(_Guid):
+            raise OSError("boot environment identifier unavailable")
+        boot = boot_environment.BootIdentifier
+        boot_id = (
+            f"{int(boot.Data1):08x}{int(boot.Data2):04x}{int(boot.Data3):04x}"
+            + "".join(f"{int(part):02x}" for part in boot.Data4)
+        )
+        if boot_id == "0" * 32:
+            raise OSError("boot environment identifier is empty")
+        return _validated_native_session_clock_reading(
+            NativeSessionClockReading(
+                clock=NATIVE_SESSION_MONOTONIC_CLOCK,
+                boot_id=boot_id,
+                uptime_milliseconds=int(get_tick_count64()),
+            )
+        )
+    except (AttributeError, OSError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic clock is unavailable",
+        ) from error
+
+
+def read_native_session_clock() -> NativeSessionClockReading:
+    """Read the only production cross-process session clock on Windows.
+
+    The non-Windows branch is deliberately process-bound and exists only for
+    cross-platform generated tests; native session preparation itself rejects
+    those platforms before a descriptor can be issued.
+    """
+
+    if os.name == "nt":
+        return _windows_native_session_clock_reading()
+    return _validated_native_session_clock_reading(
+        NativeSessionClockReading(
+            clock=NATIVE_SESSION_MONOTONIC_CLOCK,
+            boot_id=_NONWINDOWS_BOOT_ID,
+            uptime_milliseconds=time.monotonic_ns() // 1_000_000,
+        )
+    )
+
+
+def _read_native_session_clock(
+    session_clock: NativeSessionClock | None,
+) -> NativeSessionClockReading:
+    """Read an injectable clock and normalize every source failure."""
+
+    try:
+        return _validated_native_session_clock_reading(
+            (session_clock or read_native_session_clock)()
+        )
+    except PipelineError:
+        raise
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic clock is unavailable",
+        ) from error
+
+
+@dataclass(frozen=True)
 class RequestTiming:
     """One immutable RPC timing budget shared by every response stage."""
 
@@ -273,6 +412,27 @@ class _Overlapped(ctypes.Structure):
         ("Offset", wintypes.DWORD),
         ("OffsetHigh", wintypes.DWORD),
         ("hEvent", wintypes.HANDLE),
+    ]
+
+
+class _Guid(ctypes.Structure):
+    """Windows GUID layout used by SystemBootEnvironmentInformation."""
+
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _SystemBootEnvironmentInformation(ctypes.Structure):
+    """Native boot environment payload returned by NtQuerySystemInformation."""
+
+    _fields_ = [
+        ("BootIdentifier", _Guid),
+        ("FirmwareType", ctypes.c_int),
+        ("BootFlags", ctypes.c_ulonglong),
     ]
 
 
@@ -1459,6 +1619,96 @@ def _document_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool
     return dict(left) == dict(right)
 
 
+def _remaining_native_session_monotonic_milliseconds(
+    *,
+    monotonic_clock: Any,
+    monotonic_boot_id: Any,
+    monotonic_issued: Any,
+    monotonic_expires: Any,
+    session_clock: NativeSessionClock | None,
+) -> int:
+    """Return the signed remaining same-boot lifetime or fail closed.
+
+    A current uptime below issuance is a reset/reboot signal, not a fresh
+    session.  A matching boot GUID is required as well, because a reboot can
+    otherwise produce a numerically plausible uptime inside an old interval.
+    """
+
+    try:
+        issued, expires = validate_native_session_monotonic_bounds(
+            monotonic_clock,
+            monotonic_boot_id,
+            monotonic_issued,
+            monotonic_expires,
+        )
+    except (TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic lifetime is invalid",
+        ) from error
+    reading = _read_native_session_clock(session_clock)
+    if (
+        reading.clock != monotonic_clock
+        or reading.boot_id != monotonic_boot_id
+        or reading.uptime_milliseconds < issued
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic clock domain changed",
+        )
+    if reading.uptime_milliseconds >= expires:
+        raise PipelineError(ErrorCode.NATIVE_SESSION_EXPIRED, "native session expired")
+    return expires - reading.uptime_milliseconds
+
+
+def _require_live_persisted_native_session(
+    session: Mapping[str, Any],
+    *,
+    session_clock: NativeSessionClock | None,
+) -> int:
+    """Require both strict UTC and signed same-boot descriptor lifetimes."""
+
+    wall_now = utc_now()
+    try:
+        created, expires = validate_native_session_temporal_bounds(
+            session["created_at"],
+            session["expires_at"],
+            now=wall_now,
+        )
+    except (CanonicalJsonError, KeyError, TypeError, ValueError) as error:
+        if isinstance(session.get("expires_at"), str):
+            try:
+                if wall_now >= parse_utc(cast(str, session["expires_at"])):
+                    raise PipelineError(
+                        ErrorCode.NATIVE_SESSION_EXPIRED,
+                        "native session expired",
+                    ) from error
+            except PipelineError:
+                raise
+            except (CanonicalJsonError, TypeError, ValueError):
+                pass
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session temporal bounds are invalid",
+        ) from error
+    # Keep names bound in this narrow scope for type/logic clarity: the
+    # validator has already rejected a future creation time and wall expiry.
+    del created, expires
+    try:
+        return _remaining_native_session_monotonic_milliseconds(
+            monotonic_clock=session["monotonic_clock"],
+            monotonic_boot_id=session["monotonic_boot_id"],
+            monotonic_issued=session["monotonic_issued"],
+            monotonic_expires=session["monotonic_expires"],
+            session_clock=session_clock,
+        )
+    except (KeyError, RecursionError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic lifetime is invalid",
+        ) from error
+
+
 class NativeBridgeClient:
     """One non-reconnectable, thread-safe session with one in-flight RPC.
 
@@ -1475,9 +1725,11 @@ class NativeBridgeClient:
         *,
         config: Mapping[str, Any],
         transport: PipeTransport | None = None,
+        session_clock: NativeSessionClock | None = None,
     ) -> None:
         wall_now = utc_now()
         self._session = validate_native_contract("session", session, now=wall_now)
+        self._session_clock = session_clock
         try:
             created, expires = validate_native_session_temporal_bounds(
                 self._session["created_at"],
@@ -1489,11 +1741,20 @@ class NativeBridgeClient:
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "native session temporal bounds are invalid",
             ) from error
-        # This deadline is established exactly once after successful wall-clock
-        # validation.  Wall-clock rollback cannot mint additional session life.
+        # This local I/O deadline is derived once from the descriptor's
+        # persisted *remaining* cross-process uptime, never from its UTC
+        # duration.  It is only an I/O projection; every liveness check also
+        # rereads the signed Windows uptime/boot domain.
         self._session_created_at = created
         self._session_expires_at = expires
-        self._session_deadline = time.monotonic() + (expires - wall_now).total_seconds()
+        # Capture the process-local projection origin before consulting the
+        # external uptime source. Any source-call latency can only shorten the
+        # I/O budget; it can never extend the persisted deadline.
+        monotonic_projection_origin = time.monotonic()
+        remaining_monotonic = self._monotonic_remaining_milliseconds()
+        self._session_deadline = (
+            monotonic_projection_origin + remaining_monotonic / 1000
+        )
         self._config = validate_native_contract("config", config)
         # Reject a hand-supplied descriptor that is valid in isolation but is
         # incompatible with the exact configured native host before a pipe can
@@ -1549,12 +1810,28 @@ class NativeBridgeClient:
             )
         return value / 1000 if milliseconds else float(value)
 
-    def _connect_timeout_seconds(self) -> float:
+    def _configured_connect_timeout_seconds(self) -> float:
         return self._bounded_timeout_seconds(
             self._config["timeouts"]["pipe_connect_ms"],
             maximum_seconds=CONNECT_TIMEOUT_SECONDS,
             milliseconds=True,
         )
+
+    def _connect_timeout_seconds(self) -> float:
+        """Cap connection time by the same signed lifetime as an RPC."""
+
+        self._require_temporally_live_session()
+        monotonic_now = time.monotonic()
+        wall_remaining = (self._session_expiry() - utc_now()).total_seconds()
+        monotonic_remaining = self._monotonic_remaining_milliseconds() / 1000
+        remaining = min(
+            self._session_deadline - monotonic_now,
+            wall_remaining,
+            monotonic_remaining,
+        )
+        if not math.isfinite(remaining) or remaining <= 0:
+            self._expire_locked()
+        return min(self._configured_connect_timeout_seconds(), remaining)
 
     def _method_timeout_seconds(self, method: str) -> float:
         try:
@@ -1676,6 +1953,25 @@ class NativeBridgeClient:
                 "native session expiry invalid",
             ) from error
 
+    def _monotonic_remaining_milliseconds(self) -> int:
+        """Read the descriptor's original same-boot deadline without renewal."""
+
+        try:
+            return _remaining_native_session_monotonic_milliseconds(
+                monotonic_clock=self._session["monotonic_clock"],
+                monotonic_boot_id=self._session["monotonic_boot_id"],
+                monotonic_issued=self._session["monotonic_issued"],
+                monotonic_expires=self._session["monotonic_expires"],
+                session_clock=self._session_clock,
+            )
+        except PipelineError:
+            raise
+        except (KeyError, RecursionError, TypeError, ValueError) as error:
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native session monotonic lifetime is invalid",
+            ) from error
+
     def _expire_locked(self) -> None:
         """Retire the transport and report the one stable expiry outcome."""
 
@@ -1692,6 +1988,12 @@ class NativeBridgeClient:
         deadline = self._session_deadline if session_deadline is None else session_deadline
         if time.monotonic() >= deadline:
             return True
+        try:
+            self._monotonic_remaining_milliseconds()
+        except PipelineError as error:
+            if error.code == ErrorCode.NATIVE_SESSION_EXPIRED:
+                return True
+            raise
         return utc_now() >= self._session_expiry()
 
     def _require_temporally_live_session(self) -> None:
@@ -1715,6 +2017,11 @@ class NativeBridgeClient:
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "native session wall clock is invalid",
             ) from error
+        try:
+            self._monotonic_remaining_milliseconds()
+        except PipelineError:
+            self._invalidate_locked()
+            raise
         if time.monotonic() >= self._session_deadline:
             self._expire_locked()
 
@@ -1727,10 +2034,19 @@ class NativeBridgeClient:
         monotonic_now = time.monotonic()
         if wall_now >= expires:
             self._expire_locked()
-        remaining = (expires - wall_now).total_seconds()
-        if not math.isfinite(remaining) or remaining <= 0:
+        wall_remaining = (expires - wall_now).total_seconds()
+        if not math.isfinite(wall_remaining) or wall_remaining <= 0:
             self._expire_locked()
-        session_deadline = min(self._session_deadline, monotonic_now + remaining)
+        monotonic_remaining = self._monotonic_remaining_milliseconds() / 1000
+        if not math.isfinite(monotonic_remaining) or monotonic_remaining <= 0:
+            self._expire_locked()
+        # Every RPC shares the earliest configured method deadline, strict UTC
+        # expiry, and the immutable descriptor's persisted uptime expiry.
+        session_deadline = min(
+            self._session_deadline,
+            monotonic_now + wall_remaining,
+            monotonic_now + monotonic_remaining,
+        )
         method_deadline = monotonic_now + self._method_timeout_seconds(method)
         deadline = min(method_deadline, session_deadline)
         if deadline <= monotonic_now:
@@ -2358,6 +2674,10 @@ class NativeBridgeHandshakeContext:
     challenge: str
     mode: str
     created_at: datetime
+    monotonic_clock: str
+    monotonic_boot_id: str
+    monotonic_issued: str
+    monotonic_expires: str
 
 
 class NativeBridgeHandshakeClient(NativeBridgeClient):
@@ -2378,8 +2698,10 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
         *,
         config: Mapping[str, Any],
         transport: PipeTransport | None = None,
+        session_clock: NativeSessionClock | None = None,
     ) -> None:
         self._context = context
+        self._session_clock = session_clock
         self._config = validate_native_contract("config", config)
         self._validate_context()
         self._transport = transport
@@ -2438,6 +2760,19 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 context.created_at + MAX_NATIVE_SESSION_LIFETIME,
                 now=utc_now(),
             )
+            validate_native_session_monotonic_bounds(
+                context.monotonic_clock,
+                context.monotonic_boot_id,
+                context.monotonic_issued,
+                context.monotonic_expires,
+            )
+            _remaining_native_session_monotonic_milliseconds(
+                monotonic_clock=context.monotonic_clock,
+                monotonic_boot_id=context.monotonic_boot_id,
+                monotonic_issued=context.monotonic_issued,
+                monotonic_expires=context.monotonic_expires,
+                session_clock=self._session_clock,
+            )
             derive_challenge_response(
                 context.client_nonce,
                 context.challenge,
@@ -2454,6 +2789,25 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
     def _process_matches(self, current: ProcessIdentity) -> bool:
         return self._same_process_instance(self._context.prepared_process, current)
 
+    def _connect_timeout_seconds(self) -> float:
+        """Never let pipe connection consume more than the original budget."""
+
+        self._require_temporally_live_context()
+        wall_remaining = (
+            self._context.created_at + MAX_NATIVE_SESSION_LIFETIME - utc_now()
+        ).total_seconds()
+        monotonic_remaining = (
+            self._context_monotonic_remaining_milliseconds() / 1000
+        )
+        remaining = min(wall_remaining, monotonic_remaining)
+        if not math.isfinite(remaining) or remaining <= 0:
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_EXPIRED,
+                "native handshake expired",
+            )
+        return min(self._configured_connect_timeout_seconds(), remaining)
+
     def _session_has_expired(
         self,
         *,
@@ -2461,7 +2815,24 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
     ) -> bool:
         if session_deadline is not None and time.monotonic() >= session_deadline:
             return True
+        try:
+            self._context_monotonic_remaining_milliseconds()
+        except PipelineError as error:
+            if error.code == ErrorCode.NATIVE_SESSION_EXPIRED:
+                return True
+            raise
         return utc_now() >= self._context.created_at + MAX_NATIVE_SESSION_LIFETIME
+
+    def _context_monotonic_remaining_milliseconds(self) -> int:
+        """Read the preparation-time deadline without issuing a replacement."""
+
+        return _remaining_native_session_monotonic_milliseconds(
+            monotonic_clock=self._context.monotonic_clock,
+            monotonic_boot_id=self._context.monotonic_boot_id,
+            monotonic_issued=self._context.monotonic_issued,
+            monotonic_expires=self._context.monotonic_expires,
+            session_clock=self._session_clock,
+        )
 
     def _require_temporally_live_context(self) -> None:
         """Reject future/expired preparation before connecting or writing."""
@@ -2484,6 +2855,11 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "native handshake preparation is invalid",
             ) from error
+        try:
+            self._context_monotonic_remaining_milliseconds()
+        except PipelineError:
+            self._invalidate_locked()
+            raise
 
     def _rpc_deadline(self, method: str) -> RequestTiming:
         if method not in self._HANDSHAKE_METHODS:
@@ -2491,15 +2867,34 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 ErrorCode.NATIVE_PROTOCOL_INVALID,
                 "native pre-handshake method is not allowlisted",
             )
+        self._require_temporally_live_context()
         monotonic_now = time.monotonic()
+        wall_remaining = (
+            self._context.created_at + MAX_NATIVE_SESSION_LIFETIME - utc_now()
+        ).total_seconds()
+        monotonic_remaining = (
+            self._context_monotonic_remaining_milliseconds() / 1000
+        )
+        if (
+            not math.isfinite(wall_remaining)
+            or wall_remaining <= 0
+            or not math.isfinite(monotonic_remaining)
+            or monotonic_remaining <= 0
+        ):
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_EXPIRED,
+                "native handshake expired",
+            )
         method_deadline = monotonic_now + self._method_timeout_seconds(method)
+        session_deadline = min(
+            monotonic_now + wall_remaining,
+            monotonic_now + monotonic_remaining,
+        )
         return RequestTiming(
-            deadline=method_deadline,
+            deadline=min(method_deadline, session_deadline),
             method_deadline=method_deadline,
-            # ``require_request_deadline`` distinguishes session expiry from
-            # a method deadline.  Infinity keeps pre-session failures in the
-            # latter stable category without inventing a persisted expiry.
-            session_deadline=math.inf,
+            session_deadline=session_deadline,
         )
 
     def _require_live_session(
@@ -2516,8 +2911,8 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
         if self._session_has_expired(session_deadline=session_deadline):
             self._invalidate_locked()
             raise PipelineError(
-                ErrorCode.NATIVE_PROTOCOL_INVALID,
-                "native handshake timed out",
+                ErrorCode.NATIVE_SESSION_EXPIRED,
+                "native handshake expired",
             )
         current = inspect_process(self._context.prepared_process.pid)
         if (
@@ -2751,11 +3146,19 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                     else ErrorCode.NATIVE_SESSION_INVALID,
                     "native handshake expired before descriptor publication",
                 ) from error
+            # Recheck the original same-boot deadline at publication itself.
+            # The ordered RPCs may have completed just before expiry while
+            # descriptor sealing was still in progress.
+            self._context_monotonic_remaining_milliseconds()
             artifact = {
                 "schema_version": "liang-pingfa/native-bridge-session/v1",
                 "session_id": self._context.session_id,
                 "created_at": format_utc(self._context.created_at),
                 "expires_at": format_utc(expires_at),
+                "monotonic_clock": self._context.monotonic_clock,
+                "monotonic_boot_id": self._context.monotonic_boot_id,
+                "monotonic_issued": self._context.monotonic_issued,
+                "monotonic_expires": self._context.monotonic_expires,
                 "mode": self._context.mode,
                 "pid": connected.pid,
                 "windows_session_id": connected.windows_session_id,
@@ -2784,6 +3187,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
             # descriptor is complete; no incomplete artifact can reach the
             # strict persisted-session client.
             native_host_binding(completed, self._config)
+            self._require_live_session()
             return completed
         except PipelineError:
             self._invalidate_locked()
@@ -2797,6 +3201,7 @@ def prepare_native_session(
     pid: int,
     pipe_name: str,
     config: Mapping[str, Any],
+    session_clock: NativeSessionClock | None = None,
 ) -> dict[str, Any]:
     """Attach once to an explicit read-only bridge and return a sealed session.
 
@@ -2806,6 +3211,25 @@ def prepare_native_session(
     """
 
     _require_windows()
+    # Capture both clocks before any configuration, installation, process, or
+    # pipe work. A slow pre-handshake path consumes this one fixed budget; it
+    # can never receive a new five-minute window at descriptor publication.
+    created_at = utc_now()
+    clock_reading = _read_native_session_clock(session_clock)
+    if (
+        clock_reading.uptime_milliseconds
+        > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
+        - MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native session monotonic deadline cannot be represented",
+        )
+    monotonic_issued = str(clock_reading.uptime_milliseconds)
+    monotonic_expires = str(
+        clock_reading.uptime_milliseconds
+        + MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+    )
     validate_pipe_name(pipe_name)
     checked_config = validate_native_contract("config", config)
     validate_native_installation(checked_config)
@@ -2818,9 +3242,17 @@ def prepare_native_session(
         client_nonce=new_nonce(),
         challenge=new_nonce(),
         mode="read_only",
-        created_at=utc_now(),
+        created_at=created_at,
+        monotonic_clock=clock_reading.clock,
+        monotonic_boot_id=clock_reading.boot_id,
+        monotonic_issued=monotonic_issued,
+        monotonic_expires=monotonic_expires,
     )
-    client = NativeBridgeHandshakeClient(context, config=checked_config)
+    client = NativeBridgeHandshakeClient(
+        context,
+        config=checked_config,
+        session_clock=session_clock,
+    )
     try:
         return client.complete_session_descriptor()
     finally:
@@ -2834,6 +3266,7 @@ def write_private_native_session_descriptor(
     backend: FileOwnershipBackend | None = None,
     acl_reader: Callable[[OwnedPath], ComponentDacl] | None = None,
     trusted_parent_sids: frozenset[str] | None = None,
+    session_clock: NativeSessionClock | None = None,
 ) -> Path:
     """Create one secret-bearing descriptor under a verified private parent.
 
@@ -2844,7 +3277,11 @@ def write_private_native_session_descriptor(
     """
 
     _require_windows()
-    checked_session = validate_native_contract("session", session)
+    checked_session = validate_native_contract("session", session, now=utc_now())
+    _require_live_persisted_native_session(
+        checked_session,
+        session_clock=session_clock,
+    )
     try:
         lexical = lexical_absolute_path(path)
     except (OSError, OwnershipError) as error:
@@ -2931,6 +3368,12 @@ def write_private_native_session_descriptor(
             != os.path.normcase(os.path.normpath(os.fspath(final_path)))
         ):
             raise OwnershipLostError("private session descriptor binding drifted")
+        # Do not publish a private descriptor if its original preparation
+        # budget elapsed while DACL validation or serialization was running.
+        _require_live_persisted_native_session(
+            checked_session,
+            session_clock=session_clock,
+        )
         published = True
         return final_path
     except PipelineError:
@@ -3020,7 +3463,11 @@ def native_doctor_status(config_path: Path | None) -> dict[str, str]:
 
 
 @contextmanager
-def consume_native_session(path: Path) -> Any:
+def consume_native_session(
+    path: Path,
+    *,
+    session_clock: NativeSessionClock | None = None,
+) -> Any:
     """Atomically claim, hold, and destroy a private one-use session file.
 
     A same-directory no-replace rename happens before any descriptor bytes are
@@ -3131,6 +3578,7 @@ def consume_native_session(path: Path) -> Any:
             session = validate_native_contract(
                 "session",
                 strict_native_json(payload.decode("utf-8", errors="strict")),
+                now=utc_now(),
             )
         except (UnicodeDecodeError, CanonicalJsonError, PipelineError, RecursionError) as error:
             raise PipelineError(
@@ -3142,6 +3590,13 @@ def consume_native_session(path: Path) -> Any:
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "claimed session descriptor is not canonical",
             )
+        # Claiming occurs before bytes are parsed, but consumption still must
+        # use the descriptor's remaining original same-boot budget rather
+        # than creating one at this new process boundary.
+        _require_live_persisted_native_session(
+            session,
+            session_clock=session_clock,
+        )
         owner_after_validation = verify_private_staging_file(opened, backend)
         if (
             not opened.capture_binding().same_identity_and_content(claimed_binding)

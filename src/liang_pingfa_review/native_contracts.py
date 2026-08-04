@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import struct
 from typing import Any, Final, Literal, TypeVar, cast
 from jsonschema import Draft202012Validator, validators
@@ -86,6 +87,16 @@ NativeSchemaKind = Literal[
 _PrivateReadResult = TypeVar("_PrivateReadResult")
 _DeadlineCheck = Callable[[str], None]
 MAX_NATIVE_SESSION_LIFETIME: Final[timedelta] = timedelta(minutes=5)
+# A private descriptor records Windows' cross-process GetTickCount64 value in
+# milliseconds, serialized as strict decimal text so it remains exact in every
+# JSON implementation (including those without unsigned 64-bit numbers).
+NATIVE_SESSION_MONOTONIC_CLOCK: Final = "windows-gettickcount64-ms/v1"
+MAX_NATIVE_SESSION_UPTIME_MILLISECONDS: Final = (1 << 64) - 1
+MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS: Final = int(
+    MAX_NATIVE_SESSION_LIFETIME.total_seconds() * 1000
+)
+_NATIVE_SESSION_UPTIME_PATTERN: Final = re.compile(r"^(?:0|[1-9][0-9]{0,19})$")
+_NATIVE_SESSION_BOOT_ID_PATTERN: Final = re.compile(r"^[a-f0-9]{32}$")
 
 _SCHEMA_FILES: dict[NativeSchemaKind, str] = {
     "config": "native-adapter-config-v1.schema.json",
@@ -1565,6 +1576,55 @@ def validate_native_session_temporal_bounds(
     return created, expires
 
 
+def validate_native_session_monotonic_bounds(
+    monotonic_clock: Any,
+    monotonic_boot_id: Any,
+    monotonic_issued: Any,
+    monotonic_expires: Any,
+) -> tuple[int, int]:
+    """Validate the signed same-boot uptime interval in a session descriptor.
+
+    ``GetTickCount64`` is a cross-process Windows uptime source.  Its values
+    are persisted as decimal strings rather than JSON numbers so an adapter
+    cannot silently lose a high unsigned 64-bit tick through a floating-point
+    JSON implementation.  The fixed interval is deliberately exact: a
+    descriptor has one five-minute budget that begins at preparation, never a
+    new budget at handshake completion or client construction.
+    """
+
+    if (
+        monotonic_clock != NATIVE_SESSION_MONOTONIC_CLOCK
+        or not isinstance(monotonic_boot_id, str)
+        or _NATIVE_SESSION_BOOT_ID_PATTERN.fullmatch(monotonic_boot_id) is None
+    ):
+        raise ValueError("native session monotonic clock domain is invalid")
+
+    def uptime(value: Any) -> int:
+        if (
+            not isinstance(value, str)
+            or _NATIVE_SESSION_UPTIME_PATTERN.fullmatch(value) is None
+        ):
+            raise ValueError("native session uptime is not strict decimal")
+        parsed = int(value)
+        if parsed > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS:
+            raise ValueError("native session uptime exceeds GetTickCount64")
+        return parsed
+
+    issued = uptime(monotonic_issued)
+    expires = uptime(monotonic_expires)
+    if expires <= issued:
+        raise ValueError("native session monotonic lifetime is not positive")
+    if (
+        issued
+        > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
+        - MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+    ):
+        raise ValueError("native session monotonic deadline wraps")
+    if expires - issued != MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS:
+        raise ValueError("native session monotonic lifetime is not fixed")
+    return issued, expires
+
+
 def _validate_session_semantics(
     artifact: dict[str, Any],
     *,
@@ -1574,6 +1634,12 @@ def _validate_session_semantics(
         cast(str, artifact["created_at"]),
         cast(str, artifact["expires_at"]),
         now=now,
+    )
+    validate_native_session_monotonic_bounds(
+        artifact["monotonic_clock"],
+        artifact["monotonic_boot_id"],
+        artifact["monotonic_issued"],
+        artifact["monotonic_expires"],
     )
     if artifact["mode"] != "read_only":
         raise ValueError("native session is not read-only")
