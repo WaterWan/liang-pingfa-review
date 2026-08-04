@@ -10,6 +10,7 @@ from liang_pingfa_review.canonical import attach_integrity, canonical_sha256, fo
 from liang_pingfa_review.native_contracts import (
     bits_from_float,
     geometry_document_binding_digest,
+    MAX_NATIVE_GEOMETRY_JSON_BYTES,
     native_geometry_host_binding_digest,
     native_session_binding_digest,
     validate_native_contract,
@@ -98,7 +99,7 @@ def config() -> dict[str, Any]:
         "geometry_limits": {
             "max_entities": 2000,
             "max_segments": 10000,
-            "max_geometry_json_bytes": 16 * 1024 * 1024,
+            "max_geometry_json_bytes": MAX_NATIVE_GEOMETRY_JSON_BYTES,
             "max_inventory_json_bytes": 64 * 1024,
         },
         "write_revision_transition": "save_reopen_changes_revision",

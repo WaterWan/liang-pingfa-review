@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import ctypes
 from ctypes import wintypes
+from hashlib import sha256
 import os
 import struct
 import sys
@@ -15,6 +16,7 @@ from liang_pingfa_review.native_protocol import (
     PIPE_IO_CHUNK_BYTES,
     PROTOCOL_VERSION,
     decode_frame,
+    derive_challenge_response,
     encode_frame,
     response_limit_for_method,
 )
@@ -107,6 +109,85 @@ def health_response(request: dict[str, Any]) -> dict[str, Any]:
             },
             "capabilities": ["read.inventory/v1", "read.exact_geometry/v1"],
         },
+    }
+
+
+def _handshake_document() -> dict[str, Any]:
+    """Return a generated saved-document identity matching synthetic config."""
+
+    digest = lambda seed: sha256(seed.encode("utf-8")).hexdigest()
+    return {
+        "saved": True,
+        "path_fingerprint": digest("path"),
+        "file_identity_fingerprint": digest("identity"),
+        "sha256": digest("source"),
+        "byte_size": 128,
+        "dwg_header_signature": "AC1032",
+        "database_instance_fingerprint": digest("database"),
+        "revision_fingerprint": digest("revision"),
+    }
+
+
+def _handshake_identity() -> dict[str, Any]:
+    return {
+        "adapter": {
+            "id": "test-adapter",
+            "profile": "test-profile",
+            "version": "1.0.0",
+        },
+        "plugin": {
+            "id": "test-plugin",
+            "version": "1.0.0",
+            "fingerprint": sha256(b"readback-plugin").hexdigest(),
+        },
+        "host": {
+            "product": "external-host",
+            "release": "1.0",
+            "runtime": "test-runtime",
+            "mode": "full_host",
+        },
+        "capabilities": ["read.inventory/v1", "read.exact_geometry/v1"],
+    }
+
+
+def _handshake_response(request: dict[str, Any]) -> dict[str, Any]:
+    """Generate only the fixed read-only pre/session methods for tests."""
+
+    identity = _handshake_identity()
+    method = request["method"]
+    if method == "health":
+        result: dict[str, Any] = {
+            "kind": "health",
+            "protocol_major": 1,
+            "protocol_minor": 0,
+            **identity,
+        }
+    elif method == "get_session":
+        parameters = request["params"]
+        bridge_nonce = "c" * 43
+        result = {
+            "kind": "session",
+            "bridge_nonce": bridge_nonce,
+            "challenge_response": derive_challenge_response(
+                parameters["client_nonce"],
+                parameters["challenge"],
+                bridge_nonce,
+                session_id=parameters["session_id"],
+            ),
+            **identity,
+            "current_document": _handshake_document(),
+        }
+    elif method == "get_current_document":
+        result = {
+            "kind": "document",
+            "current_document": _handshake_document(),
+        }
+    else:
+        raise ValueError("generated handshake server received an unallowlisted method")
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "id": request["id"],
+        "result": result,
     }
 
 
@@ -320,9 +401,62 @@ def serve_transport_scenario(
         _close_server(kernel32, handle)
 
 
+def _serve_handshake_connection(
+    pipe_name: str,
+    methods: tuple[str, ...],
+    *,
+    announce_ready: bool = False,
+) -> None:
+    """Serve one generated connection with an exact method sequence."""
+
+    kernel32, handle = _create_named_pipe(pipe_name)
+    try:
+        if announce_ready:
+            print("READY", flush=True)
+        _connect_server(kernel32, handle)
+        for method in methods:
+            header = _read_exact(handle, 4)
+            length = struct.unpack(">I", header)[0]
+            request = decode_frame(
+                header + _read_exact(handle, length),
+                maximum=64 * 1024,
+            )
+            if request["method"] != method:
+                raise ValueError("generated handshake method order differs")
+            response = _handshake_response(request)
+            _write_all(
+                handle,
+                encode_frame(
+                    response,
+                    maximum=response_limit_for_method(method),
+                ),
+            )
+            if not kernel32.FlushFileBuffers(wintypes.HANDLE(handle)):
+                raise OSError("mock handshake pipe flush failed")
+    finally:
+        _close_server(kernel32, handle)
+
+
+def serve_handshake_sequence(pipe_name: str) -> None:
+    """Serve prepare then one consumed descriptor on generated local pipes."""
+
+    _serve_handshake_connection(
+        pipe_name,
+        ("health", "get_session"),
+        announce_ready=True,
+    )
+    _serve_handshake_connection(pipe_name, ("health", "get_current_document"))
+    # Keep the actual server process alive through the client's post-response
+    # PID-instance recheck; production bridges remain resident after a
+    # response rather than exiting at the frame boundary.
+    time.sleep(0.5)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 2:
         serve_once(sys.argv[1])
+    elif len(sys.argv) == 3 and sys.argv[2] == "handshake-sequence":
+        serve_handshake_sequence(sys.argv[1])
     elif len(sys.argv) in {3, 4}:
         serve_transport_scenario(
             sys.argv[1],
