@@ -107,3 +107,12 @@ NTFS volume; no hostile same-account/admin process**。控制用于防止意外�
 第二阶段仍会重新审计基础源文件并忽略 topology 作为授权依据。
 
 运行 `apply --dry-run` 会执行完整的暂存修改、往返转换和重新审计，但不会发布任何 DWG 或验证工件。
+
+## 可选原生通道不改变本流程
+
+可选原生 CAD Bridge 不是 ODA 的 backend、替代品或失败回退。它有独立的
+`native-*` 命令、独立 schema 和独立私有工件；ODA audit/plan/apply/verify
+不会读取它们，原生命令也不会调用 ODA。需要外部宿主/插件保持专有状态时，只能
+由操作人员按[可选原生 CAD Bridge](native-cad-bridge.md)明确选择 PID、局部
+管道和许可组件。原生写入也必须 copy-only、固定命令、保存后重新打开精确读回；
+其公开 mock 不扩大本 ODA profile 的支持声明。

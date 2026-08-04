@@ -40,3 +40,10 @@ profile 不能设置容差、正则、实体类型、回退规则、修改行为
 任何外部提供、手工编辑或不受信任的 audit/v2 在依赖结论前，必须针对其绑定的源文件和 profile 重新运行全新的 `audit --topology-profile`。`validate_artifact` 只验证工件模式、规范自完整性和内部关联；没有源文件时，它不证明几何事实。第二阶段已经重新审计基础源文件，且 topology 始终不参与编辑授权。
 
 每条公开 trace 必须以 handle、identity fingerprint 和 content fingerprint 唯一解析到公开 entity manifest 中同一条**直接** Modelspace 记录；该记录还必须同时为实体可见、图层可显示、实体透明度为默认/不透明且图层透明度为不透明。paperspace、块定义、隐藏、关闭/冻结图层和透明实体均不能作为 trace 证据。链注册表只暴露 opaque chain ID 及其拥有的 opaque support/span ID；所有 ID 都必须唯一且属于引用的链。角色元组固定：梁边/编号只能带可选 chain；支座几何仅可带同属的 chain+support；支座上部注写必须恰为 chain+support；跨中下部注写必须恰为 chain+span；leader 或 ambiguity 可为空但不得同时带 support 和 span。未建立精确注写目标的记录以 `ambiguity` 表示，不能伪装为已绑定注写。
+
+## 可选原生 Bridge 隔离
+
+拓扑 trace、chain、support 和 span 永远不进入原生 Bridge 的 intent、plan 或
+manifest，也不授权原生操作。原生通道仅有其自己的直接 Modelspace DBTEXT
+allowlist 和独立精确读回；它不会把 topology finding 映射成目标或回退到 ODA。
+见[可选原生 CAD Bridge](native-cad-bridge.md)。
