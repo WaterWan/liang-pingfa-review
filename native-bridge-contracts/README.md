@@ -28,6 +28,13 @@ depth of **128** (`NativeBridgeProtocolV1.MaxJsonNestingDepth`). Conforming
 adapters must configure their JSON readers and writers to reject deeper input
 before recursive processing; all shipped schemas remain below this limit.
 
+Native session timestamps are whole-second RFC 3339 UTC values. A session is
+valid only for `created_at <= current UTC < expires_at`, with a positive
+lifetime no greater than the fixed five-minute
+`NativeBridgeProtocolV1.MaxSessionLifetimeSeconds` bound. Conforming clients
+allow no future-clock skew and retain a monotonic deadline after validation,
+so wall-clock rollback cannot extend a connected session.
+
 Private `geometry_json` repeats an exact `NativeGeometryExportBindingV1`:
 protocol, session ID, full process identity, host, adapter/plugin, exact
 capabilities, and session/document binding digests must all match the issuing

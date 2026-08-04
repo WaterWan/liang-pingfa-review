@@ -21,6 +21,13 @@ public static class NativeBridgeProtocolV1
         "liang-pingfa/native-bridge/challenge-response/v1";
     public const int Major = 1;
     public const int Minor = 0;
+    /// <summary>
+    /// A native session is valid only when its RFC 3339 UTC
+    /// <c>created_at &lt;= current UTC &lt; expires_at</c> interval is no longer
+    /// than this fixed bound. Conforming clients allow no future-clock skew
+    /// and must retain a monotonic deadline after validation.
+    /// </summary>
+    public const int MaxSessionLifetimeSeconds = 5 * 60;
     public const int MaxControlResponseBytes = 256 * 1024;
     /// <summary>Outer framed limit for the fixed two-digest inventory result.</summary>
     public const int MaxInventoryResponseBytes = 256 * 1024;
