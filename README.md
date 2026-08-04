@@ -253,7 +253,7 @@ python -m liang_pingfa_review verify `
 
 `apply --dry-run` 仍执行完整的重新验证、临时删除、DWG 往返和重新审计，但不会发布 DWG、审计或验证工件。
 
-真实 DWG 的 `apply` 和 `verify` 仅支持 Windows。它们依赖保留的 Windows 文件句柄：发布临时文件从复制/`fsync` 一直持有到不替换最终重命名，验证输出在读取租约期间禁止写入和删除。非 Windows 只能通过显式注入的合成测试后端执行内部测试路径，不能提供公开的真实 DWG 修改或验证。
+本项目的受支持执行和 CI 平台是 Windows。真实 DWG 的 `apply` 和 `verify` 依赖保留的 Windows 文件句柄：发布临时文件从复制/`fsync` 一直持有到不替换最终重命名，验证输出在读取租约期间禁止写入和删除。其他平台未测试且不受支持。
 
 `verification.json` 是有时间界限的证据，不是敌对替换防护或编辑授权。其 `output_binding`
 被工件完整性散列覆盖，绑定经验证输出的 SHA-256、字节数、已解析路径散列、文件身份指纹、
@@ -288,6 +288,7 @@ python scripts\validate_skill.py
 python scripts\validate_skill.py --tracked
 python -m unittest discover -s tests -p "test_*.py" -v
 python -m compileall -q src tests scripts
+dotnet build native-bridge-contracts\LiangPingfa.NativeBridge.Contracts.csproj -c Release --nologo
 python -m liang_pingfa_review --help
 ```
 
@@ -305,6 +306,56 @@ Remove-Item Env:\LIANG_PINGFA_RUN_GENERATED_ODA
 该生成式真实 ODA 工作流只证明 `R2018/AC1032 DXF-exposable` 初始 profile 的能力，并不证明
 每一份 DWG 都可转换、审计或修改。
 
+## 可选原生 Bridge 通道
+
+除现有 ODA 流程外，仓库提供一个**完全独立、默认只读**的可选原生 CAD Bridge
+通道。它是项目侧协议/客户端/编排交付物，不是厂商插件实现，也不改变
+`doctor`、`audit`、`plan`、`review-plan`、`apply`、`verify` 或
+`local-regression` 的 ODA 行为。
+
+操作人员必须显式选择外部适配器、PID 和其公布的本地随机命名管道；工具绝不
+枚举第一个进程、扫描 PATH/注册表、选择窗口或在 ODA/原生之间自动回退。协议
+仅允许固定的只读 health/session/document/inventory/精确几何导出请求，绑定
+进程创建时间、Windows 会话、服务器 PID、nonce/challenge、文档、插件、协议
+和能力。未知方法、额外帧、文档漂移或会话过期都会失败关闭。
+每份精确几何还必须与**同一**会话的 ID、完整进程/宿主、适配器/插件版本和指纹、
+完全相等的能力集合、保存源（含头、散列、大小、路径/文件身份）、数据库实例及
+revision 相符，并携带会话/文档 binding digest；只比较源字节绝不充分。v1 的固定
+上限为 2,000 个实体和总计 10,000 条线段，原始 geometry JSON 最多 16 MiB，外层
+几何响应最多 32 MiB；inventory 是独立的双摘要响应，原始 JSON 最多 64 KiB。
+
+原生计划只允许经审计的 DBTEXT XY 平移、精确辅助覆盖文字删除，以及默认关闭且
+需配置/能力/既有图层样式共同准入的 review marker。没有自由命令、LISP、脚本
+正文、层批量删除、图层/样式创建、块/尺寸/配筋编辑或 GUI 自动化。
+
+原生会话描述符、机器可读 `native-audit`/intent/`native-plan`、manifest、Core
+Console result/export、`native-verification` 和任何恢复日志均为私有文件：最终文件
+必须保留仅当前用户和 `SYSTEM` 的受保护 DACL，且读取这些输入时会重新验证该 DACL。
+这些工件会枚举 opaque 记录或操作，因此本地数量可见，并以
+`record_cardinality: explicit_private` 如实声明；其中部分工件可包含原始私有字段；其分类与公开报告不同，见下文。`native-audit` 和 `native-plan` 以成对事务发布：JSON 保持私有，
+相应的红删 Markdown 才继承明确的公共父目录读取策略。Markdown 报告、CLI 摘要和
+稳定错误事件不披露数量。marker policy 的 version、
+profile/enable/capability、layer/style token 与 fingerprint、height/rotation、文本派生
+版本和几何默认值从 audit 到 plan/manifest 必须完全相等，任何后续漂移均失败关闭。
+
+写入始终从保留的源文件句柄复制到私有 NTFS/DACL 工作区，这是严格的 copy-only
+边界。外部 Core Console
+只能处理该副本，并只接收固定 `NETLOAD` 与固定项目命令；manifest 经私有环境
+变量传递，绝不出现在脚本中。保存后必须启动新的读回进程，逐项比较
+`before → manifest 允许差异 → after`；仅在实体、顺序、表、布局、块、文档和
+受保护状态均无未计划变化时，才无替换发布公共 DWG 和私有证据型 verification。
+配置组件及其全部词法祖先在使用期间均须通过限制性 DACL、无跟随租约和重复
+身份/散列检查；会话描述符先原子 claim 再使用。新 apply 会话可以更换 PID，
+但必须证明相同的稳定宿主/插件/能力/profile 绑定和新鲜文档 revision。Windows
+Core Console 必须在启动前进入 kill-on-close Job Object，超时或异常只终止并等待
+整个进程树；不会采用直接进程 kill 的成功回退。
+
+外部插件的事务/回滚字段是未经项目内部证明的 conformance claim；项目只能验证
+其结果的精确读回状态。原生 verification 是有时限的证据，绝不授权后续编辑。
+外部宿主许可、对象启用器和专有组件由操作人员负责；仓库不捆绑、下载或分发。
+公共 CI 只运行生成 mock，不声称已在本机验证任何真实外部集成。详见
+[可选原生 CAD Bridge](.github/skills/liang-pingfa-tuzhi-shencha/references/native-cad-bridge.md)。
+
 ## 贡献规则
 
 - 保持 `.github\skills\liang-pingfa-tuzhi-shencha\SKILL.md` 为唯一规范入口，并让目录名与 front matter 的 `name` 一致。
@@ -312,6 +363,22 @@ Remove-Item Env:\LIANG_PINGFA_RUN_GENERATED_ODA
 - 保持固定运行时依赖、离线处理和 ODA 外部安装边界；不添加网络调用、转换器二进制或来源材料。
 - 不提交 PDF、DWG、DXF、图像、OCR 转储、来源内容、派生材料或本地夹具。
 - 对非平凡改动补充标准库单元测试，并运行全部本地验证命令。
+
+## Private artifact privacy
+
+PRIVATE-ARTIFACT-PRIVACY: sensitive local raw artifacts; retained no-follow
+handle owner/DACL validation is required; never commit or upload.
+Administrators is accepted only when it is the current process token's default
+file owner, which is the supported elevated-token private-file creation case.
+Session descriptors contain pipe, nonce/challenge, and process/document bindings.
+Exact geometry and console exports contain raw text, coordinates, layers, paths,
+handles, and geometry. Manifests contain raw preconditions/geometry and plugin,
+Core Console, and source-copy bindings. Intent can contain requested deltas and
+marker geometry. Console results/logs are sensitive and bounded. Native
+audit/plan/verification/recovery JSON is private redacted-or-opaque machine data
+with explicit local cardinality where applicable, not a public redaction claim.
+Only public Markdown reports, CLI error events, and CI logs are redacted and
+cardinality-independent; they contain no raw private fields.
 
 ## 许可证
 

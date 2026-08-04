@@ -36,6 +36,7 @@ compatibility: GitHub Copilot
 5. [两阶段 DWG 审计与受控修改](references/dwg-two-stage-workflow.md) - 任何 DWG 修改请求的强制审计优先流程。
 6. [多标注簇重叠门](references/multi-annotation-overlap.md) - 当密集或疑似重叠注写可见时必须读取，并在语义解析前执行。
 7. [可选梁图拓扑与原位注写审计](references/beam-topology-audit.md) - 使用本地 DWG topology profile 时的固定只读证据门。
+8. [可选原生 CAD Bridge](references/native-cad-bridge.md) - 只有用户明确选择外部原生适配器、PID 和本地命名管道时读取；不替代 ODA 流程。
 
 不要复述、重建或索取来源文件中的表格、图例、数值样例或版式。输出中的来源只能写页题主题，不能伪造条文、页内坐标或不可见原文。
 
@@ -136,7 +137,7 @@ ODA File Converter 不是原生数据库编辑，不能使每份 DWG 获得资�
 enablers；本项目不捆绑或推断这些 SDK 的访问权。生成式真实 ODA 测试只证明该 profile 的能力，
 私有资格夹具不会发布，不能据此宣称通用 DWG 兼容性。
 
-真实 DWG 的第二阶段 `apply` 和 `verify` 只在 Windows 上运行：它们依赖保留的文件句柄来禁止发布临时文件或已验证输出被写入、删除或替换。非 Windows 只可用显式注入的合成后端运行内部测试，不得把该路径当作真实 DWG 的安全修改能力。
+本 Skill 的受支持执行和 CI 平台是 Windows。真实 DWG 的第二阶段 `apply` 和 `verify` 依赖保留的文件句柄来禁止发布临时文件或已验证输出被写入、删除或替换。其他平台未测试且不受支持。
 
 ODA 转换必须在受验证 NTFS 与限制性 DACL 的两个独立随机私有根中执行。输出目录先为空，
 只允许一个随机源文件和精确过滤器；运行后只接受恰好一个新的普通非重解析候选，并须先用
@@ -147,3 +148,52 @@ ODA 转换必须在受验证 NTFS 与限制性 DACL 的两个独立随机私有�
 [两阶段 DWG 审计与受控修改](references/dwg-two-stage-workflow.md)。
 
 验证 JSON 仅是有时间界限的证据，不是敌对替换防护或任何编辑授权。其 `output_binding` 会绑定当前输出 DWG 的 SHA-256、字节数、路径散列、文件身份、DWG 头/版本和验证时间，并被 JSON 完整性覆盖；使用者必须对当前 DWG 重新计算匹配，文件被替换或移动后旧 JSON 不再证明它。
+
+## 可选原生 CAD Bridge
+
+原生 Bridge 是与上述 ODA 两阶段工作流分离的可选通道。仅当操作人员明确选择
+外部适配器、PID 和已公布的本地随机命名管道时，才读取
+[可选原生 CAD Bridge](references/native-cad-bridge.md)。默认只读；不扫描进程、
+注册表或 PATH，不选择窗口，不使用 GUI、鼠标、键盘、焦点或自动化，也绝不在
+原生失败时回退到 ODA（反之亦然）。
+
+任何原生写入必须从保留的源句柄复制到私有副本，以固定 `NETLOAD` 与固定命令在
+外部 Core Console 上运行；源和最终公共路径绝不交给该进程。保存后必须启动新的
+读回进程并验证精确允许差异，成功后才无替换发布。外部插件的单事务/回滚声明是
+conformance claim，不是本项目可证明的内部事实；公开 CI 的生成 mock 也不构成
+外部宿主集成声明。外部许可、对象启用器和专有组件由操作人员负责，仓库不分发。
+
+原生会话描述符、机器可读 audit/intent/plan/manifest/Core Console result/export/
+verification（以及任何恢复日志）均为私有最终文件：它们只允许当前用户和 `SYSTEM`，
+并在作为原生输入时重新验证该受保护 DACL。它们会枚举 opaque 记录或操作，因此本地
+数量可见并明确标记为 `record_cardinality: explicit_private`；其中部分工件可包含原始私有字段；其分类与公开报告不同，见下文。原生 audit/plan 的 JSON 与红删 Markdown
+成对无替换发布，但只有 Markdown 继承明确的公共父目录读取策略。Markdown 报告、CLI
+摘要和稳定错误事件不报告数量。marker policy 的 version、profile/
+enable/capability、layer/style token 和 fingerprint、height/rotation、文本派生版本及
+几何默认值必须从 audit 到 plan/manifest 完全相等；任何后续漂移都失败关闭。
+
+
+### 原生私有工件的准确隐私分类
+
+PRIVATE-ARTIFACT-PRIVACY: sensitive local raw artifacts; retained no-follow
+handle owner/DACL validation is required; never commit or upload.
+Administrators is accepted only when it is the current process token's default
+file owner, which is the supported elevated-token private-file creation case.
+Session
+descriptors contain pipe, nonce/challenge, and process/document bindings. Exact
+geometry and console exports contain raw text, coordinates, layers, paths,
+handles, and geometry. Manifests contain raw preconditions/geometry and plugin,
+Core Console, and source-copy bindings. Intent can contain requested deltas and
+marker geometry. Console results/logs are sensitive and bounded. Native
+audit/plan/verification/recovery JSON is private redacted-or-opaque machine data
+with explicit local cardinality where applicable, not a public redaction claim.
+Only public Markdown reports, CLI error events, and CI logs are redacted and
+cardinality-independent; they contain no raw private fields.
+
+所有原生机器工件均为**敏感私有工件**，必须存放在受保护的本地 NTFS 存储中，使用仅当前用户和 `SYSTEM` 的有效 DACL；读取前必须通过同一保留的无跟随文件句柄验证所有者和 DACL，并在有界读取、JSON 重复键/模式/完整性验证期间保持该句柄。默认受信所有者仅为当前用户或 `SYSTEM`；只有 Windows 报告当前进程 token 的默认文件所有者正是 `Administrators` 时，才允许该精确 SID，以支持提升 token 的正常私有文件创建。Builtin Users、Everyone、Authenticated Users、任意服务 SID 或其他帐户永不受信。私有工件绝不提交、上传或写入公共 CI 日志。
+
+- 会话描述符是敏感私有数据，含管道、nonce/challenge、进程和文档绑定。
+- 精确 geometry export 与 Core Console export 是敏感私有原始文本，可能含坐标、图层、路径、句柄和几何；Core Console result/log 同样敏感且有固定字节上限。
+- native manifest 是敏感私有原始前置条件/几何工件，含插件、Core Console 与源副本绑定；intent 也可能含请求的增量或 marker 几何。
+- native audit、plan、verification 与恢复日志是私有的 redacted/opaque 机器 JSON；可明确列出本地记录/操作数量（`record_cardinality: explicit_private`），但绝非公开脱敏接口。
+- 只有公开 Markdown 报告、CLI 错误事件和 CI 日志是脱敏且与数量无关的输出；它们不得包含原始字段、私有路径、坐标、图层、句柄、管道或几何。
