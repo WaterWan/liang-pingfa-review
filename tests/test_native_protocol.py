@@ -23,16 +23,20 @@ import liang_pingfa_review.native_bridge as native_bridge_module
 import liang_pingfa_review.native_contracts as native_contracts_module
 import liang_pingfa_review.native_protocol as native_protocol_module
 from liang_pingfa_review.errors import ErrorCode, PipelineError
+from liang_pingfa_review.native_contracts import validate_native_contract
 from liang_pingfa_review.native_bridge import (
     ComponentDacl,
     ComponentDaclAce,
     NativeInstallationLeases,
     NativeBridgeClient,
+    NativeBridgeHandshakeClient,
+    NativeBridgeHandshakeContext,
     NativePipeClosed,
     ProcessIdentity,
     WindowsNamedPipe,
     _read_component_dacl,
     consume_native_session,
+    prepare_native_session,
     validate_component_dacl,
     validate_pipe_name,
     write_private_native_session_descriptor,
@@ -770,6 +774,40 @@ class NativeProtocolTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_CAPABILITY_MISMATCH)
         self.assertTrue(other_client.invalid)
         self.assertTrue(other_pipe.closed)
+
+    def test_geometry_response_enforces_multibyte_byte_cap_before_inner_parse(self) -> None:
+        descriptor = session()
+        raw_geometry = "中" * (
+            native_contracts_module.MAX_NATIVE_GEOMETRY_JSON_BYTES
+            // len("中".encode("utf-8"))
+            + 1
+        )
+
+        def response(request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "protocol_version": PROTOCOL_VERSION,
+                "id": request["id"],
+                "result": {
+                    "kind": "geometry",
+                    "geometry_json": raw_geometry,
+                },
+            }
+
+        pipe = _GeneratedReusablePipe(response, server_pid=descriptor["pid"])
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_bridge.inspect_process",
+                return_value=self._process_for(descriptor),
+            ),
+            mock.patch("liang_pingfa_review.native_bridge.strict_native_json") as parser,
+        ):
+            client = NativeBridgeClient(descriptor, config=config(), transport=pipe)
+            with self.assertRaises(PipelineError) as raised:
+                client.export_exact_geometry()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+        parser.assert_not_called()
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
 
     def test_deep_raw_response_is_a_terminal_protocol_error_and_releases_lock(self) -> None:
         """A 1500-level peer response cannot escape as RecursionError."""
@@ -1647,6 +1685,285 @@ class NativeProtocolTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_CONFIG_INVALID)
 
 
+class NativeBridgeHandshakeTests(unittest.TestCase):
+    """Exercise the separate non-persisted health/session preparation path."""
+
+    @staticmethod
+    def _process(descriptor: dict[str, Any]) -> ProcessIdentity:
+        return ProcessIdentity(
+            pid=descriptor["pid"],
+            windows_session_id=descriptor["windows_session_id"],
+            creation_time_100ns=int(descriptor["process"]["creation_time_100ns"]),
+            instance_fingerprint=descriptor["process"]["instance_fingerprint"],
+            executable_fingerprint=descriptor["process"]["executable_fingerprint"],
+        )
+
+    def _context(
+        self,
+        descriptor: dict[str, Any],
+        *,
+        created_at: datetime | None = None,
+        mode: str = "read_only",
+    ) -> NativeBridgeHandshakeContext:
+        return NativeBridgeHandshakeContext(
+            prepared_process=self._process(descriptor),
+            pipe_name=descriptor["pipe_name"],
+            protocol_version=PROTOCOL_VERSION,
+            session_id=descriptor["session_id"],
+            client_nonce=descriptor["client_nonce"],
+            challenge=descriptor["challenge"],
+            mode=mode,
+            created_at=created_at or datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _bridge_result(
+        request: dict[str, Any],
+        descriptor: dict[str, Any],
+        *,
+        session_capabilities: list[str] | None = None,
+        omit_bridge_nonce: bool = False,
+        invalid_challenge: bool = False,
+    ) -> dict[str, Any]:
+        if request["method"] == "health":
+            result: dict[str, Any] = {
+                "kind": "health",
+                "protocol_major": 1,
+                "protocol_minor": 0,
+                "adapter": descriptor["adapter"],
+                "plugin": descriptor["plugin"],
+                "host": descriptor["host"],
+                "capabilities": descriptor["capabilities"],
+            }
+        elif request["method"] == "get_session":
+            parameters = request["params"]
+            bridge_nonce = descriptor["bridge_nonce"]
+            result = {
+                "kind": "session",
+                "bridge_nonce": bridge_nonce,
+                "challenge_response": (
+                    "0" * 64
+                    if invalid_challenge
+                    else derive_challenge_response(
+                        parameters["client_nonce"],
+                        parameters["challenge"],
+                        bridge_nonce,
+                        session_id=parameters["session_id"],
+                    )
+                ),
+                "adapter": descriptor["adapter"],
+                "plugin": descriptor["plugin"],
+                "host": descriptor["host"],
+                "capabilities": session_capabilities
+                or descriptor["capabilities"],
+                "current_document": descriptor["current_document"],
+            }
+            if omit_bridge_nonce:
+                result.pop("bridge_nonce")
+        else:
+            raise AssertionError(f"unexpected pre-handshake method: {request['method']}")
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "id": request["id"],
+            "result": result,
+        }
+
+    def _client(
+        self,
+        *,
+        descriptor: dict[str, Any] | None = None,
+        server_pid: int | None = None,
+        created_at: datetime | None = None,
+        mode: str = "read_only",
+        session_capabilities: list[str] | None = None,
+        omit_bridge_nonce: bool = False,
+        invalid_challenge: bool = False,
+    ) -> tuple[NativeBridgeHandshakeClient, _GeneratedReusablePipe, list[str], dict[str, Any]]:
+        selected = descriptor or session()
+        methods: list[str] = []
+
+        def handler(request: dict[str, Any]) -> dict[str, Any]:
+            methods.append(request["method"])
+            return self._bridge_result(
+                request,
+                selected,
+                session_capabilities=session_capabilities,
+                omit_bridge_nonce=omit_bridge_nonce,
+                invalid_challenge=invalid_challenge,
+            )
+
+        pipe = _GeneratedReusablePipe(
+            handler,
+            server_pid=server_pid if server_pid is not None else selected["pid"],
+        )
+        return (
+            NativeBridgeHandshakeClient(
+                self._context(selected, created_at=created_at, mode=mode),
+                config=config(),
+                transport=pipe,
+            ),
+            pipe,
+            methods,
+            selected,
+        )
+
+    def test_constructs_a_complete_valid_descriptor_after_ordered_handshake(self) -> None:
+        client, pipe, methods, descriptor = self._client()
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process(descriptor),
+        ):
+            completed = client.complete_session_descriptor()
+        self.assertEqual(methods, ["health", "get_session"])
+        self.assertEqual(completed["schema_version"], "liang-pingfa/native-bridge-session/v1")
+        self.assertEqual(completed["mode"], "read_only")
+        self.assertEqual(completed["current_document"], descriptor["current_document"])
+        self.assertEqual(validate_native_contract("session", completed), completed)
+        self.assertFalse(client.invalid)
+        self.assertFalse(pipe.closed)
+
+    def test_reordered_or_early_methods_write_no_frame(self) -> None:
+        for label, invoke in (
+            ("session-first", lambda client: client.get_session()),
+            (
+                "generic-session-first",
+                lambda client: client.request("get_session", {}),
+            ),
+            ("early-document", lambda client: client.get_current_document()),
+            ("early-inventory", lambda client: client.export_inventory()),
+            ("early-geometry", lambda client: client.export_exact_geometry()),
+        ):
+            with self.subTest(case=label):
+                client, pipe, methods, _descriptor = self._client()
+                with self.assertRaises(PipelineError) as raised:
+                    invoke(client)
+                self.assertEqual(raised.exception.code, ErrorCode.NATIVE_PROTOCOL_INVALID)
+                self.assertEqual(methods, [])
+                self.assertEqual(pipe.frame_count, 0)
+                self.assertTrue(client.invalid)
+                self.assertTrue(pipe.closed)
+
+    def test_session_response_before_health_is_a_terminal_order_error(self) -> None:
+        descriptor = session()
+        methods: list[str] = []
+
+        def session_first(request: dict[str, Any]) -> dict[str, Any]:
+            methods.append(request["method"])
+            return self._bridge_result(
+                {
+                    **request,
+                    "method": "get_session",
+                    "params": {
+                        "session_id": descriptor["session_id"],
+                        "client_nonce": descriptor["client_nonce"],
+                        "challenge": descriptor["challenge"],
+                    },
+                },
+                descriptor,
+            )
+
+        pipe = _GeneratedReusablePipe(session_first, server_pid=descriptor["pid"])
+        client = NativeBridgeHandshakeClient(
+            self._context(descriptor),
+            config=config(),
+            transport=pipe,
+        )
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process(descriptor),
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                client.complete_session_descriptor()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_PROTOCOL_INVALID)
+        self.assertEqual(methods, ["health"])
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
+
+    def test_handshake_uses_configured_health_and_session_deadlines(self) -> None:
+        descriptor = session()
+        configured = config()
+        configured["timeouts"].update({"health_ms": 1100, "session_ms": 1200})
+        methods: list[str] = []
+
+        def handler(request: dict[str, Any]) -> dict[str, Any]:
+            methods.append(request["method"])
+            return self._bridge_result(request, descriptor)
+
+        pipe = _GeneratedReusablePipe(handler, server_pid=descriptor["pid"])
+        client = NativeBridgeHandshakeClient(
+            self._context(descriptor),
+            config=configured,
+            transport=pipe,
+        )
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process(descriptor),
+        ):
+            client.complete_session_descriptor()
+        self.assertEqual(methods, ["health", "get_session"])
+        self.assertEqual(len(pipe.write_timeouts), 2)
+        self.assertLessEqual(pipe.write_timeouts[0], 1.1)
+        self.assertLessEqual(pipe.write_timeouts[1], 1.2)
+        self.assertGreater(pipe.read_timeouts[0], 0)
+        self.assertGreater(pipe.read_timeouts[1], 0)
+
+    def test_invalid_transcript_missing_nonce_pid_expiry_and_capability_drift_fail_closed(self) -> None:
+        cases = (
+            (
+                "invalid-challenge",
+                {"invalid_challenge": True},
+                ErrorCode.NATIVE_SESSION_INVALID,
+            ),
+            (
+                "missing-bridge-nonce",
+                {"omit_bridge_nonce": True},
+                ErrorCode.NATIVE_PROTOCOL_INVALID,
+            ),
+            (
+                "wrong-pid",
+                {"server_pid": 4321},
+                ErrorCode.NATIVE_PIPE_INVALID,
+            ),
+            (
+                "expired-preparation",
+                {"created_at": datetime.now(UTC) - timedelta(minutes=5)},
+                ErrorCode.NATIVE_SESSION_EXPIRED,
+            ),
+            (
+                "capability-drift",
+                {
+                    "session_capabilities": [
+                        "read.inventory/v1",
+                        "read.exact_geometry/v1",
+                        "read.metadata/v1",
+                    ]
+                },
+                ErrorCode.NATIVE_CAPABILITY_MISMATCH,
+            ),
+        )
+        for label, options, expected_code in cases:
+            with self.subTest(case=label):
+                client, pipe, _methods, descriptor = self._client(**options)
+                with mock.patch(
+                    "liang_pingfa_review.native_bridge.inspect_process",
+                    return_value=self._process(descriptor),
+                ):
+                    with self.assertRaises(PipelineError) as raised:
+                        client.complete_session_descriptor()
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertTrue(client.invalid)
+                self.assertTrue(pipe.closed)
+
+    def test_rejects_non_read_only_preparation_before_connecting(self) -> None:
+        descriptor = session()
+        with self.assertRaises(PipelineError) as raised:
+            NativeBridgeHandshakeClient(
+                self._context(descriptor, mode="read_write"),
+                config=config(),
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+
+
 class NativeComponentAclTests(unittest.TestCase):
     """Exercise interpreted component ACL gates without reading local installs."""
 
@@ -2325,6 +2642,52 @@ class WindowsNamedPipeTests(unittest.TestCase):
             # Generous CI bound: this verifies that normal overlapped framing
             # does not inherit a cancellation or polling delay.
             self.assertLess(time.monotonic() - started, 3.0)
+        finally:
+            self._assert_server_clean(process)
+
+    def test_prepare_real_generated_pipe_then_consume_descriptor(self) -> None:
+        """Exercise actual prepare, descriptor DACL/claim, and post-claim RPCs."""
+
+        pipe_name = self._pipe_name()
+        process = self._start_server(pipe_name, "handshake-sequence")
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                descriptor_path = Path(temporary) / "prepared-native-session.json"
+                # The generated pipe is a real process and actual Windows
+                # named pipe. Component installation is deliberately outside
+                # this source-free protocol test and is independently tested
+                # by the retained-installation/DACL suite.
+                with mock.patch(
+                    "liang_pingfa_review.native_bridge.validate_native_installation"
+                ):
+                    descriptor = prepare_native_session(
+                        pid=process.pid,
+                        pipe_name=pipe_name,
+                        config=config(),
+                    )
+                self.assertEqual(
+                    descriptor["pid"],
+                    process.pid,
+                )
+                self.assertEqual(
+                    descriptor["current_document"]["saved"],
+                    True,
+                )
+                write_private_native_session_descriptor(descriptor_path, descriptor)
+                # The generated server creates its second pipe instance after
+                # the preparation client closes the first one.
+                time.sleep(0.1)
+                with consume_native_session(descriptor_path) as consumed:
+                    client = NativeBridgeClient(consumed, config=config())
+                    try:
+                        self.assertEqual(client.health()["kind"], "health")
+                        self.assertEqual(
+                            client.get_current_document()["current_document"],
+                            consumed["current_document"],
+                        )
+                    finally:
+                        client.close()
+                self.assertFalse(descriptor_path.exists())
         finally:
             self._assert_server_clean(process)
 
