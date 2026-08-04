@@ -110,7 +110,7 @@
       "properties": {
         "max_entities": {"const": 2000},
         "max_segments": {"const": 10000},
-        "max_geometry_json_bytes": {"const": 16777216},
+        "max_geometry_json_bytes": {"const": 16777216, "description": "Fixed maximum raw canonical geometry JSON UTF-8 byte length."},
         "max_inventory_json_bytes": {"const": 65536}
       }
     },

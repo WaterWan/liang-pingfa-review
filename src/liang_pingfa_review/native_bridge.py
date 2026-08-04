@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from hashlib import sha256
 from hmac import compare_digest
 import ctypes
@@ -36,8 +36,10 @@ from .canonical import (
 )
 from .errors import ErrorCode, PipelineError
 from .native_contracts import (
+    geometry_text_matches_canonical_bytes,
     load_native_config,
     native_host_binding,
+    require_geometry_json_utf8_bytes,
     require_geometry_export_matches_session,
     strict_native_json,
     validate_native_contract,
@@ -49,6 +51,7 @@ from .native_protocol import (
     PIPE_IO_CHUNK_BYTES,
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
+    PROTOCOL_VERSION,
     RpcRequest,
     NativeProtocolError,
     derive_challenge_response,
@@ -1874,6 +1877,18 @@ class NativeBridgeClient:
                 deadline=timing.deadline,
                 deadline_check=self._deadline_checker(timing),
             )
+            # ``geometry_json`` is an embedded raw JSON document.  Enforce
+            # its UTF-8 byte ceiling before generic schema normalization and
+            # well before the inner geometry parser makes another copy.
+            if method == "export_exact_geometry" and isinstance(
+                response.get("result"),
+                Mapping,
+            ):
+                require_geometry_json_utf8_bytes(
+                    response["result"].get("geometry_json"),
+                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+                    deadline_check=self._deadline_checker(timing),
+                )
             self._require_request_deadline(timing, "generic response schema validation")
             response = validate_native_contract(
                 "response",
@@ -2103,14 +2118,20 @@ class NativeBridgeClient:
                 )
             try:
                 self._require_request_deadline(timing, "geometry JSON decoding")
-                raw_geometry = cast(str, result["geometry_json"])
+                raw_geometry = require_geometry_json_utf8_bytes(
+                    result.get("geometry_json"),
+                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+                    deadline_check=self._deadline_checker(timing),
+                )
                 decoded_geometry = strict_native_json(
                     raw_geometry,
                     deadline_check=self._deadline_checker(timing),
                 )
                 self._require_request_deadline(timing, "geometry canonical validation")
-                if raw_geometry.encode("utf-8") != canonical_json_bytes(
+                if not geometry_text_matches_canonical_bytes(
+                    raw_geometry,
                     decoded_geometry,
+                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
                     deadline_check=self._deadline_checker(timing),
                 ):
                     raise ValueError("bridge geometry JSON is not canonical")
@@ -2169,17 +2190,21 @@ class NativeBridgeClient:
             self._lifecycle_lock.release()
 
 
-def _require_bridge_identity(
-    health: Mapping[str, Any],
-    handshake: Mapping[str, Any],
+def _require_configured_bridge_identity(
+    result: Mapping[str, Any],
     config: Mapping[str, Any],
-    session_id: str,
-    client_nonce: str,
-    challenge: str,
+    *,
+    kind: str,
+    require_protocol_version: bool,
 ) -> None:
-    if health.get("kind") != "health" or handshake.get("kind") != "session":
+    """Validate one response's configured read-only bridge identity."""
+
+    if result.get("kind") != kind:
         raise PipelineError(ErrorCode.NATIVE_PROTOCOL_INVALID, "native handshake result kind")
-    if health.get("protocol_major") != PROTOCOL_MAJOR or health.get("protocol_minor") != PROTOCOL_MINOR:
+    if require_protocol_version and (
+        result.get("protocol_major") != PROTOCOL_MAJOR
+        or result.get("protocol_minor") != PROTOCOL_MINOR
+    ):
         raise PipelineError(ErrorCode.NATIVE_PROTOCOL_INVALID, "native protocol version drift")
     adapter = config["adapter"]
     plugin = config["plugins"]["readback"]
@@ -2191,16 +2216,50 @@ def _require_bridge_identity(
         "mode": host_compatibility["audit_host_mode"],
     }
     required = set(config["required_capabilities"])
-    for result in (health, handshake):
-        if (
-            result.get("adapter") != adapter
-            or result.get("plugin", {}).get("id") != plugin["id"]
-            or result.get("plugin", {}).get("version") != plugin["version"]
-            or result.get("plugin", {}).get("fingerprint") != plugin["sha256"]
-            or result.get("host") != host
-            or not required.issubset(set(result.get("capabilities", [])))
-        ):
-            raise PipelineError(ErrorCode.NATIVE_CAPABILITY_MISMATCH, "native bridge identity drift")
+    if (
+        result.get("adapter") != adapter
+        or result.get("plugin", {}).get("id") != plugin["id"]
+        or result.get("plugin", {}).get("version") != plugin["version"]
+        or result.get("plugin", {}).get("fingerprint") != plugin["sha256"]
+        or result.get("host") != host
+        or not required.issubset(set(result.get("capabilities", [])))
+    ):
+        raise PipelineError(ErrorCode.NATIVE_CAPABILITY_MISMATCH, "native bridge identity drift")
+
+
+def _require_bridge_identity(
+    health: Mapping[str, Any],
+    handshake: Mapping[str, Any],
+    config: Mapping[str, Any],
+    session_id: str,
+    client_nonce: str,
+    challenge: str,
+) -> None:
+    _require_configured_bridge_identity(
+        health,
+        config,
+        kind="health",
+        require_protocol_version=True,
+    )
+    _require_configured_bridge_identity(
+        handshake,
+        config,
+        kind="session",
+        require_protocol_version=False,
+    )
+    # A configured capability requirement is deliberately a subset gate: an
+    # adapter may expose an additional read-only capability.  It must not,
+    # however, drift between the two pre-session responses.  The completed
+    # descriptor freezes this exact list and every later geometry response
+    # must repeat it byte-for-byte as part of its session binding.
+    if any(
+        health.get(field) != handshake.get(field)
+        for field in ("adapter", "plugin", "host", "capabilities")
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_CAPABILITY_MISMATCH,
+            "native handshake identity drift",
+        )
     bridge_nonce = handshake.get("bridge_nonce")
     response = handshake.get("challenge_response")
     try:
@@ -2217,6 +2276,417 @@ def _require_bridge_identity(
         ) from None
     if not isinstance(response, str) or not compare_digest(response, expected_response):
         raise PipelineError(ErrorCode.NATIVE_SESSION_INVALID, "native bridge challenge mismatch")
+
+
+@dataclass(frozen=True)
+class NativeBridgeHandshakeContext:
+    """Explicit non-persisted state used only to establish a new session.
+
+    This deliberately has no descriptor-shaped placeholder: bridge nonce,
+    challenge response, adapter/plugin attestation, capabilities, and the
+    saved document are unavailable until the ordered handshake completes.
+    """
+
+    prepared_process: ProcessIdentity
+    pipe_name: str
+    protocol_version: str
+    session_id: str
+    client_nonce: str
+    challenge: str
+    mode: str
+    created_at: datetime
+
+
+class NativeBridgeHandshakeClient(NativeBridgeClient):
+    """Fail-closed pre-session client restricted to ``health`` then session.
+
+    The regular :class:`NativeBridgeClient` intentionally accepts only a
+    fully persisted and integrity-checked descriptor.  This separate client
+    shares its single-flight framing, pipe identity, and deadline machinery,
+    but never calls that constructor and never creates a fake descriptor to
+    get through it.  Its only state is the explicit local preparation context.
+    """
+
+    _HANDSHAKE_METHODS = ("health", "get_session")
+
+    def __init__(
+        self,
+        context: NativeBridgeHandshakeContext,
+        *,
+        config: Mapping[str, Any],
+        transport: PipeTransport | None = None,
+    ) -> None:
+        self._context = context
+        self._config = validate_native_contract("config", config)
+        self._validate_context()
+        self._transport = transport
+        # These fields are the existing protocol client's transport state.
+        # There is intentionally no ``_session`` attribute in this class.
+        self._lifecycle_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._invalid = False
+        self._request_ids: set[str] = set()
+        self._connected_process: ProcessIdentity | None = None
+        self._transport_bound = False
+        self._last_response_timing: RequestTiming | None = None
+        self._next_handshake_method = 0
+        self._health_result: dict[str, Any] | None = None
+
+    def _validate_context(self) -> None:
+        """Reject malformed local preparation state before a pipe is opened."""
+
+        context = self._context
+        if (
+            context.protocol_version != PROTOCOL_VERSION
+            or context.mode != "read_only"
+            or not isinstance(context.created_at, datetime)
+            or context.created_at.tzinfo is None
+            or context.created_at.utcoffset() != timedelta(0)
+            or not isinstance(context.prepared_process, ProcessIdentity)
+            or not isinstance(context.prepared_process.pid, int)
+            or isinstance(context.prepared_process.pid, bool)
+            or context.prepared_process.pid <= 0
+            or not isinstance(context.prepared_process.windows_session_id, int)
+            or isinstance(context.prepared_process.windows_session_id, bool)
+            or context.prepared_process.windows_session_id < 0
+            or not isinstance(context.prepared_process.creation_time_100ns, int)
+            or isinstance(context.prepared_process.creation_time_100ns, bool)
+            or context.prepared_process.creation_time_100ns < 0
+            or _SHA256_PATTERN.fullmatch(
+                context.prepared_process.instance_fingerprint
+            )
+            is None
+            or (
+                context.prepared_process.executable_fingerprint != "unavailable"
+                and _SHA256_PATTERN.fullmatch(
+                    context.prepared_process.executable_fingerprint
+                )
+                is None
+            )
+        ):
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native handshake preparation is invalid",
+            )
+        validate_pipe_name(context.pipe_name)
+        try:
+            derive_challenge_response(
+                context.client_nonce,
+                context.challenge,
+                "x" * 43,
+                session_id=context.session_id,
+                protocol_version=context.protocol_version,
+            )
+        except (NativeProtocolError, TypeError):
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native handshake preparation is invalid",
+            ) from None
+
+    def _process_matches(self, current: ProcessIdentity) -> bool:
+        return self._same_process_instance(self._context.prepared_process, current)
+
+    def _session_has_expired(
+        self,
+        *,
+        session_deadline: float | None = None,
+    ) -> bool:
+        # A pre-session context has no bridge-issued expiry.  Its two bounded
+        # RPCs use their configured deadlines; a signed expiry begins only
+        # when a complete descriptor is constructed below.
+        return session_deadline is not None and time.monotonic() >= session_deadline
+
+    def _rpc_deadline(self, method: str) -> RequestTiming:
+        if method not in self._HANDSHAKE_METHODS:
+            raise PipelineError(
+                ErrorCode.NATIVE_PROTOCOL_INVALID,
+                "native pre-handshake method is not allowlisted",
+            )
+        monotonic_now = time.monotonic()
+        method_deadline = monotonic_now + self._method_timeout_seconds(method)
+        return RequestTiming(
+            deadline=method_deadline,
+            method_deadline=method_deadline,
+            # ``require_request_deadline`` distinguishes session expiry from
+            # a method deadline.  Infinity keeps pre-session failures in the
+            # latter stable category without inventing a persisted expiry.
+            session_deadline=math.inf,
+        )
+
+    def _require_live_session(
+        self,
+        *,
+        session_deadline: float | None = None,
+    ) -> None:
+        if self._is_invalid():
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native handshake was invalidated",
+            )
+        if self._session_has_expired(session_deadline=session_deadline):
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_PROTOCOL_INVALID,
+                "native handshake timed out",
+            )
+        current = inspect_process(self._context.prepared_process.pid)
+        if (
+            not self._process_matches(current)
+            or (
+                self._connected_process is not None
+                and not self._same_process_instance(
+                    self._connected_process,
+                    current,
+                )
+            )
+        ):
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native process instance changed",
+            )
+
+    def _connect_locked(self) -> None:
+        """Bind the prepared instance without a persisted descriptor."""
+
+        if self._is_invalid():
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native handshake was invalidated",
+            )
+        if self._transport is not None and self._transport_bound:
+            return
+        expected = self._context.prepared_process
+        current = inspect_process(expected.pid)
+        if not self._same_process_instance(expected, current):
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "selected process changed",
+            )
+        pipe = self._transport
+        if pipe is None:
+            pipe = WindowsNamedPipe.connect(
+                self._context.pipe_name,
+                timeout_seconds=self._connect_timeout_seconds(),
+            )
+            self._transport = pipe
+        try:
+            server_pid = pipe.server_pid
+            if (
+                not isinstance(server_pid, int)
+                or isinstance(server_pid, bool)
+                or server_pid != expected.pid
+            ):
+                raise PipelineError(
+                    ErrorCode.NATIVE_PIPE_INVALID,
+                    "pipe server PID differs",
+                )
+            connected = inspect_process(server_pid)
+            if not self._same_process_instance(expected, connected):
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_INVALID,
+                    "pipe server process instance differs",
+                )
+            self._connected_process = connected
+            self._transport_bound = True
+        except PipelineError:
+            self._invalidate_locked()
+            raise
+        except (AttributeError, TypeError, ValueError) as error:
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_PIPE_INVALID,
+                "pipe server identity is unavailable",
+            ) from error
+
+    def _expected_handshake_params(self, method: str) -> dict[str, str]:
+        if method == "health":
+            return {"session_id": self._context.session_id}
+        if method == "get_session":
+            return {
+                "session_id": self._context.session_id,
+                "client_nonce": self._context.client_nonce,
+                "challenge": self._context.challenge,
+            }
+        raise PipelineError(
+            ErrorCode.NATIVE_PROTOCOL_INVALID,
+            "native pre-handshake method is not allowlisted",
+        )
+
+    def _request_ordered(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        validate_result: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Issue the exact next internal pre-session RPC under one flight lock."""
+
+        if not self._lifecycle_lock.acquire(blocking=False):
+            self._reject_concurrent_rpc()
+        try:
+            expected_method = (
+                self._HANDSHAKE_METHODS[self._next_handshake_method]
+                if self._next_handshake_method < len(self._HANDSHAKE_METHODS)
+                else None
+            )
+            if (
+                method != expected_method
+                or method not in self._HANDSHAKE_METHODS
+                or dict(params) != self._expected_handshake_params(method)
+            ):
+                self._invalidate_locked()
+                raise PipelineError(
+                    ErrorCode.NATIVE_PROTOCOL_INVALID,
+                    "native pre-handshake method order is invalid",
+                )
+            result = self._request_locked(method, params)
+            if validate_result is not None:
+                validate_result(result)
+            self._next_handshake_method += 1
+            return result
+        except PipelineError:
+            # Method-specific health/session validation remains inside the
+            # same single-flight critical section as framing. A competing
+            # caller can therefore never turn a rejected handshake response
+            # into a successful return.
+            self._invalidate_locked()
+            raise
+        finally:
+            self._lifecycle_lock.release()
+
+    def request(self, _method: str, _params: Mapping[str, Any]) -> dict[str, Any]:
+        """Deny a generic RPC surface until a full descriptor exists."""
+
+        self._reject_prehandshake_method()
+
+    def health(self) -> dict[str, Any]:
+        def validate_health(result: dict[str, Any]) -> None:
+            _require_configured_bridge_identity(
+                result,
+                self._config,
+                kind="health",
+                require_protocol_version=True,
+            )
+            self._health_result = result
+
+        return self._request_ordered(
+            "health",
+            self._expected_handshake_params("health"),
+            validate_result=validate_health,
+        )
+
+    def get_session(self) -> dict[str, Any]:
+        if self._health_result is None:
+            self._reject_prehandshake_order()
+
+        def validate_session(result: dict[str, Any]) -> None:
+            assert self._health_result is not None
+            _require_bridge_identity(
+                self._health_result,
+                result,
+                self._config,
+                self._context.session_id,
+                self._context.client_nonce,
+                self._context.challenge,
+            )
+
+        return self._request_ordered(
+            "get_session",
+            self._expected_handshake_params("get_session"),
+            validate_result=validate_session,
+        )
+
+    def _reject_prehandshake_order(self) -> None:
+        if not self._lifecycle_lock.acquire(blocking=False):
+            self._reject_concurrent_rpc()
+        try:
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_PROTOCOL_INVALID,
+                "native pre-handshake method order is invalid",
+            )
+        finally:
+            self._lifecycle_lock.release()
+
+    def _reject_prehandshake_method(self) -> None:
+        if not self._lifecycle_lock.acquire(blocking=False):
+            self._reject_concurrent_rpc()
+        try:
+            self._invalidate_locked()
+            raise PipelineError(
+                ErrorCode.NATIVE_PROTOCOL_INVALID,
+                "native pre-handshake method is not allowlisted",
+            )
+        finally:
+            self._lifecycle_lock.release()
+
+    def get_current_document(self) -> dict[str, Any]:
+        self._reject_prehandshake_method()
+
+    def export_inventory(self) -> dict[str, Any]:
+        self._reject_prehandshake_method()
+
+    def export_exact_geometry(self) -> dict[str, Any]:
+        self._reject_prehandshake_method()
+
+    def complete_session_descriptor(self) -> dict[str, Any]:
+        """Perform the two-message handshake and seal one full descriptor."""
+
+        self.health()
+        handshake = self.get_session()
+        if not self._lifecycle_lock.acquire(blocking=False):
+            self._reject_concurrent_rpc()
+        try:
+            self._require_live_session()
+            if self._connected_process is None or not self._transport_bound:
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_INVALID,
+                    "native pipe process was not bound",
+                )
+            connected = self._connected_process
+            expires_at = self._context.created_at + timedelta(minutes=5)
+            if utc_now() >= expires_at:
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_EXPIRED,
+                    "native handshake expired before descriptor publication",
+                )
+            artifact = {
+                "schema_version": "liang-pingfa/native-bridge-session/v1",
+                "session_id": self._context.session_id,
+                "created_at": format_utc(self._context.created_at),
+                "expires_at": format_utc(expires_at),
+                "mode": self._context.mode,
+                "pid": connected.pid,
+                "windows_session_id": connected.windows_session_id,
+                "process": {
+                    "instance_fingerprint": connected.instance_fingerprint,
+                    "creation_time_100ns": str(connected.creation_time_100ns),
+                    "executable_fingerprint": connected.executable_fingerprint,
+                },
+                "pipe_name": self._context.pipe_name,
+                "client_nonce": self._context.client_nonce,
+                "challenge": self._context.challenge,
+                "bridge_nonce": handshake["bridge_nonce"],
+                "challenge_response": handshake["challenge_response"],
+                "adapter": handshake["adapter"],
+                "plugin": handshake["plugin"],
+                "host": handshake["host"],
+                "current_document": handshake["current_document"],
+                "capabilities": handshake["capabilities"],
+            }
+            completed = validate_native_contract("session", attach_integrity(artifact))
+            # Re-run the full configured compatibility gate only after the
+            # descriptor is complete; no incomplete artifact can reach the
+            # strict persisted-session client.
+            native_host_binding(completed, self._config)
+            return completed
+        except PipelineError:
+            self._invalidate_locked()
+            raise
+        finally:
+            self._lifecycle_lock.release()
 
 
 def prepare_native_session(
@@ -2237,94 +2707,19 @@ def prepare_native_session(
     checked_config = validate_native_contract("config", config)
     validate_native_installation(checked_config)
     identity = inspect_process(pid)
-    now = utc_now()
-    provisional: dict[str, Any] = {
-        "session_id": "native-session-" + secrets.token_hex(16),
-        "pid": pid,
-        "windows_session_id": identity.windows_session_id,
-        "process": {
-            "instance_fingerprint": identity.instance_fingerprint,
-            "creation_time_100ns": str(identity.creation_time_100ns),
-            "executable_fingerprint": identity.executable_fingerprint,
-        },
-        "pipe_name": pipe_name,
-        "client_nonce": new_nonce(),
-        "challenge": new_nonce(),
-        "expires_at": format_utc(now + timedelta(minutes=5)),
-        # Required by client methods during the handshake; replaced by the
-        # bridge-proven values before the returned session is sealed.
-        "current_document": {
-            "saved": True,
-            "path_fingerprint": "0" * 64,
-            "file_identity_fingerprint": "0" * 64,
-            "sha256": "0" * 64,
-            "byte_size": 0,
-            "dwg_header_signature": "AC0000",
-            "database_instance_fingerprint": "0" * 64,
-            "revision_fingerprint": "0" * 64,
-        },
-        "adapter": checked_config["adapter"],
-        "plugin": {
-            "id": checked_config["plugins"]["readback"]["id"],
-            "version": checked_config["plugins"]["readback"]["version"],
-            "fingerprint": checked_config["plugins"]["readback"]["sha256"],
-        },
-        "host": {
-            "product": checked_config["host_compatibility"]["host_product"],
-            "release": checked_config["host_compatibility"]["host_release"],
-            "runtime": checked_config["host_compatibility"]["host_runtime"],
-            "mode": checked_config["host_compatibility"]["audit_host_mode"],
-        },
-        "capabilities": checked_config["required_capabilities"],
-    }
-    client = NativeBridgeClient(provisional, config=checked_config)
+    context = NativeBridgeHandshakeContext(
+        prepared_process=identity,
+        pipe_name=pipe_name,
+        protocol_version=PROTOCOL_VERSION,
+        session_id="native-session-" + secrets.token_hex(16),
+        client_nonce=new_nonce(),
+        challenge=new_nonce(),
+        mode="read_only",
+        created_at=utc_now(),
+    )
+    client = NativeBridgeHandshakeClient(context, config=checked_config)
     try:
-        client.connect()
-        connected_identity = client.bound_process_identity()
-        health = client.health()
-        handshake = client.get_session()
-        _require_bridge_identity(
-            health,
-            handshake,
-            checked_config,
-            provisional["session_id"],
-            provisional["client_nonce"],
-            provisional["challenge"],
-        )
-        document_result = client.get_current_document()
-        if document_result.get("kind") != "document":
-            raise PipelineError(ErrorCode.NATIVE_PROTOCOL_INVALID, "native document response")
-        document = document_result["current_document"]
-        if document != handshake["current_document"]:
-            raise PipelineError(ErrorCode.NATIVE_DOCUMENT_CHANGED, "document changed during handshake")
-        # The descriptor fields are emitted from the post-connect binding,
-        # not merely the pre-connect inspection used to begin the attach.
-        connected_identity = client.bound_process_identity()
-        artifact = {
-            "schema_version": "liang-pingfa/native-bridge-session/v1",
-            "session_id": provisional["session_id"],
-            "created_at": format_utc(now),
-            "expires_at": provisional["expires_at"],
-            "mode": "read_only",
-            "pid": pid,
-            "windows_session_id": connected_identity.windows_session_id,
-            "process": {
-                "instance_fingerprint": connected_identity.instance_fingerprint,
-                "creation_time_100ns": str(connected_identity.creation_time_100ns),
-                "executable_fingerprint": connected_identity.executable_fingerprint,
-            },
-            "pipe_name": pipe_name,
-            "client_nonce": provisional["client_nonce"],
-            "challenge": provisional["challenge"],
-            "bridge_nonce": handshake["bridge_nonce"],
-            "challenge_response": handshake["challenge_response"],
-            "adapter": handshake["adapter"],
-            "plugin": handshake["plugin"],
-            "host": handshake["host"],
-            "current_document": document,
-            "capabilities": handshake["capabilities"],
-        }
-        return validate_native_contract("session", attach_integrity(artifact))
+        return client.complete_session_descriptor()
     finally:
         client.close()
 

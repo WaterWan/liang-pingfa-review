@@ -106,7 +106,7 @@
       "required": ["kind", "geometry_json"],
       "properties": {
         "kind": {"const": "geometry"},
-        "geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216}
+        "geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216, "description": "Secondary Unicode code-point bound; conforming clients and adapters also reject raw UTF-8 byte length above 16777216 before parsing geometry."}
       }
     },
     "success": {
