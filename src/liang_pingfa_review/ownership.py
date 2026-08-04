@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import ntpath
 import re
+import secrets
 import tempfile
 from typing import BinaryIO, Protocol, TextIO
 
@@ -19,6 +20,8 @@ from typing import BinaryIO, Protocol, TextIO
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
 _DELETE = 0x00010000
+_READ_CONTROL = 0x00020000
+_WRITE_DAC = 0x00040000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
@@ -33,6 +36,7 @@ _FILE_RENAME_INFO = 3
 _FILE_DISPOSITION_INFO = 4
 _ERROR_FILE_EXISTS = 80
 _ERROR_ALREADY_EXISTS = 183
+_PRIVATE_DIRECTORY_CREATE_ATTEMPTS = 8
 _WINDOWS_RESERVED_NAMES = frozenset(
     {
         "aux",
@@ -198,6 +202,9 @@ class FileOwnershipBackend(Protocol):
 
     def create_new_file(self, path: Path) -> OwnedPath:
         """Create a regular file once and retain its ownership handle."""
+
+    def create_private_file(self, path: Path) -> OwnedPath:
+        """Create a secret-bearing file with no sharing before its DACL is set."""
 
     def open_existing_file(self, path: Path, *, for_delete: bool) -> OwnedPath:
         """Open an existing regular file while optionally denying replacement."""
@@ -800,6 +807,16 @@ class _FileDispositionInformation(ctypes.Structure):
     _fields_ = [("DeleteFile", ctypes.c_ubyte)]
 
 
+class _SecurityAttributes(ctypes.Structure):
+    """Win32 SECURITY_ATTRIBUTES retained through CreateDirectoryW."""
+
+    _fields_ = [
+        ("nLength", ctypes.c_uint32),
+        ("lpSecurityDescriptor", ctypes.c_void_p),
+        ("bInheritHandle", ctypes.c_int),
+    ]
+
+
 _FILE_RENAME_NAME_OFFSET = _FileRenameInformation.FileName.offset
 
 
@@ -835,6 +852,13 @@ def _rename_information_buffer(
 
 class WindowsKernelApi(Protocol):
     """Small mockable kernel32 boundary for platform-neutral API tests."""
+
+    def create_directory(
+        self,
+        path: str,
+        security_attributes: _SecurityAttributes,
+    ) -> bool:
+        """Create a directory once with its final security descriptor."""
 
     def create_file(
         self,
@@ -890,6 +914,12 @@ class NativeWindowsKernelApi:
             ctypes.c_void_p,
         ]
         self._create_file.restype = ctypes.c_void_p
+        self._create_directory = kernel32.CreateDirectoryW
+        self._create_directory.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.POINTER(_SecurityAttributes),
+        ]
+        self._create_directory.restype = ctypes.c_int
         self._close_handle = kernel32.CloseHandle
         self._close_handle.argtypes = [ctypes.c_void_p]
         self._close_handle.restype = ctypes.c_int
@@ -937,6 +967,20 @@ class NativeWindowsKernelApi:
             None,
         )
         return int(handle) if handle else 0
+
+    def create_directory(
+        self,
+        path: str,
+        security_attributes: _SecurityAttributes,
+    ) -> bool:
+        """Use CreateDirectoryW with a descriptor already attached."""
+
+        return bool(
+            self._create_directory(
+                path,
+                ctypes.byref(security_attributes),
+            )
+        )
 
     def close_handle(self, handle: int) -> bool:
         return bool(self._close_handle(ctypes.c_void_p(handle)))
@@ -1246,6 +1290,24 @@ class WindowsFileOwnershipBackend:
             writable_stream=True,
         )
 
+    def create_private_file(self, path: Path) -> WindowsOwnedPath:
+        """Create a descriptor with no reader/writer sharing window."""
+
+        return self._open(
+            path,
+            desired_access=(
+                _GENERIC_READ
+                | _GENERIC_WRITE
+                | _DELETE
+                | _READ_CONTROL
+                | _WRITE_DAC
+            ),
+            share_mode=0,
+            creation_disposition=_CREATE_NEW,
+            is_directory=False,
+            writable_stream=True,
+        )
+
     def open_existing_file(
         self, path: Path, *, for_delete: bool
     ) -> WindowsOwnedPath:
@@ -1366,8 +1428,15 @@ class WindowsFileOwnershipBackend:
 
 
 _DACL_SECURITY_INFORMATION = 0x00000004
+_OWNER_SECURITY_INFORMATION = 0x00000001
+_SE_FILE_OBJECT = 1
+_PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+_UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER_INFORMATION_CLASS = 1
+_TOKEN_OWNER_INFORMATION_CLASS = 4
+_SYSTEM_SID = "S-1-5-18"
+_ADMINISTRATORS_SID = "S-1-5-32-544"
 
 
 class _SidAndAttributes(ctypes.Structure):
@@ -1379,6 +1448,10 @@ class _SidAndAttributes(ctypes.Structure):
 
 class _TokenUser(ctypes.Structure):
     _fields_ = [("User", _SidAndAttributes)]
+
+
+class _TokenOwner(ctypes.Structure):
+    _fields_ = [("Owner", ctypes.c_void_p)]
 
 
 @dataclass(frozen=True)
@@ -1394,6 +1467,54 @@ class PrivateStagingCapability:
         """Return whether all public ODA staging prerequisites are available."""
 
         return self.windows and self.ntfs and self.dacl
+
+
+@dataclass(frozen=True)
+class PublicOutputAclPolicy:
+    """An opaque, handle-captured DACL policy for a future public final.
+
+    A public-parent temporary starts with this inherited policy, then receives
+    a restrictive private DACL while its exclusive creation handle is held.
+    The policy is restored through that same handle immediately before its
+    no-replace final rename.  It is intentionally process-local and never
+    appears in a report or verification artifact.
+    """
+
+    dacl_sddl: str
+
+
+@dataclass
+class PrivateDirectoryCreation:
+    """One atomically private directory held until lexical registration.
+
+    ``CreateDirectoryW`` does not return a handle, so this object retains the
+    immediate no-follow reopen used to bind and verify the exact new directory.
+    If later registration fails, ``dispose`` deletes that same identity rather
+    than resolving a pathname again.
+    """
+
+    path: Path
+    binding: OwnedPathBinding
+    opened: OwnedPath | None
+
+    def close(self) -> None:
+        """Release the initial verification handle before a compatible lease."""
+
+        if self.opened is None:
+            return
+        opened = self.opened
+        self.opened = None
+        opened.close()
+
+    def dispose(self, backend: FileOwnershipBackend) -> None:
+        """Remove the exact empty directory after a failed registration."""
+
+        if self.opened is not None:
+            opened = self.opened
+            self.opened = None
+            dispose_live_owned_path(opened, self.binding, backend)
+            return
+        dispose_owned_binding(self.binding, backend)
 
 
 def _windows_api(name: str) -> object:
@@ -1485,6 +1606,137 @@ def _current_user_sid() -> str:
             raise OwnershipCleanupError("current session token cannot be closed")
 
 
+def _current_token_owner_sid() -> str:
+    """Return the exact default owner Windows applies to files we create."""
+
+    kernel32 = _windows_api("kernel32")
+    advapi32 = _windows_api("advapi32")
+    open_process_token = advapi32.OpenProcessToken  # type: ignore[attr-defined]
+    open_process_token.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    open_process_token.restype = ctypes.c_int
+    get_current_process = kernel32.GetCurrentProcess  # type: ignore[attr-defined]
+    get_current_process.argtypes = []
+    get_current_process.restype = ctypes.c_void_p
+    get_token_information = advapi32.GetTokenInformation  # type: ignore[attr-defined]
+    get_token_information.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    get_token_information.restype = ctypes.c_int
+    convert_sid = advapi32.ConvertSidToStringSidW  # type: ignore[attr-defined]
+    convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    convert_sid.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle  # type: ignore[attr-defined]
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    token = ctypes.c_void_p()
+    if not open_process_token(get_current_process(), _TOKEN_QUERY, ctypes.byref(token)):
+        raise OwnershipCleanupError("current session token cannot be opened")
+    try:
+        size = ctypes.c_uint32()
+        get_token_information(
+            token,
+            _TOKEN_OWNER_INFORMATION_CLASS,
+            None,
+            0,
+            ctypes.byref(size),
+        )
+        if not size.value:
+            raise OwnershipCleanupError("current session default owner is unavailable")
+        buffer = ctypes.create_string_buffer(size.value)
+        if not get_token_information(
+            token,
+            _TOKEN_OWNER_INFORMATION_CLASS,
+            buffer,
+            size.value,
+            ctypes.byref(size),
+        ):
+            raise OwnershipCleanupError("current session default owner cannot be read")
+        owner = ctypes.cast(buffer, ctypes.POINTER(_TokenOwner)).contents.Owner
+        if not owner:
+            raise OwnershipCleanupError("current session default owner is empty")
+        text = ctypes.c_wchar_p()
+        if not convert_sid(owner, ctypes.byref(text)):
+            raise OwnershipCleanupError("current session default owner cannot be encoded")
+        try:
+            value = text.value
+            if value is None or re.fullmatch(r"S-\d+(?:-\d+)+", value) is None:
+                raise OwnershipCleanupError("current session default owner is malformed")
+            return value
+        finally:
+            if text:
+                local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        if token.value and not close_handle(token):
+            raise OwnershipCleanupError("current session token cannot be closed")
+
+
+def current_user_sid() -> str:
+    """Return the current trusted-session SID for narrow component ACL checks."""
+
+    return _current_user_sid()
+
+
+def private_input_trusted_owner_sids(
+    user_sid: str | None = None,
+    *,
+    allow_administrators_if_token_owner: bool = False,
+) -> frozenset[str]:
+    """Return the deliberately small owner set for persisted private bytes.
+
+    Private files are created by the current interactive session.  SYSTEM is
+    retained for supported local service creation.  Administrators is allowed
+    only when Windows reports it as this process token's default file owner,
+    which is the documented elevated-token creation behavior.  This excludes
+    Builtin Users, Everyone, Authenticated Users, arbitrary service SIDs, and
+    every unrelated account even when a forged DACL looks restrictive.
+    """
+
+    current = user_sid or _current_user_sid()
+    if re.fullmatch(r"S-\d+(?:-\d+)+", current) is None:
+        raise OwnershipCleanupError("trusted private input owner SID is malformed")
+    trusted = {current, _SYSTEM_SID}
+    if (
+        allow_administrators_if_token_owner
+        and _current_token_owner_sid() == _ADMINISTRATORS_SID
+    ):
+        trusted.add(_ADMINISTRATORS_SID)
+    return frozenset(trusted)
+
+
+def validate_private_input_owner(
+    owner_sid: str,
+    *,
+    user_sid: str | None = None,
+    allow_administrators_if_token_owner: bool = False,
+) -> None:
+    """Reject a private input whose retained-handle owner is not trusted."""
+
+    if (
+        not isinstance(owner_sid, str)
+        or re.fullmatch(r"S-\d+(?:-\d+)+", owner_sid) is None
+        or owner_sid
+        not in private_input_trusted_owner_sids(
+            user_sid,
+            allow_administrators_if_token_owner=allow_administrators_if_token_owner,
+        )
+    ):
+        raise OwnershipCleanupError(
+            "private input owner is outside the current-user/SYSTEM trust set"
+        )
+
+
 def _is_ntfs_volume(path: Path) -> bool:
     """Require a normal local NTFS volume for private converter staging."""
 
@@ -1533,6 +1785,60 @@ def _private_staging_sddl(user_sid: str) -> str:
     # SYSTEM. Protected inheritance prevents an ambient users/everyone ACE
     # from silently reaching the converter-private children.
     return f"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;{user_sid})"
+
+
+def _private_directory_sddl(user_sid: str) -> str:
+    """Build the complete owner and protected-DACL policy for new directories."""
+
+    if not re.fullmatch(r"S-\d+(?:-\d+)+", user_sid):
+        raise OwnershipCleanupError("trusted session SID is malformed")
+    # Setting the owner in the creation descriptor avoids a later SetSecurity
+    # call and keeps a broadly writable parent from determining the child
+    # owner. The DACL remains inherited by descendants only from this private
+    # root, never from its ambient parent.
+    return f"O:{user_sid}{_private_staging_sddl(user_sid)}"
+
+
+def _private_directory_security_attributes(
+    user_sid: str,
+) -> tuple[_SecurityAttributes, ctypes.c_void_p]:
+    """Allocate the descriptor that CreateDirectoryW consumes synchronously."""
+
+    advapi32 = _windows_api("advapi32")
+    convert_descriptor = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW  # type: ignore[attr-defined]
+    convert_descriptor.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    convert_descriptor.restype = ctypes.c_int
+    descriptor = ctypes.c_void_p()
+    descriptor_size = ctypes.c_uint32()
+    if not convert_descriptor(
+        _private_directory_sddl(user_sid),
+        1,
+        ctypes.byref(descriptor),
+        ctypes.byref(descriptor_size),
+    ) or not descriptor.value:
+        raise OwnershipCleanupError("private directory security descriptor cannot be created")
+    attributes = _SecurityAttributes()
+    attributes.nLength = ctypes.sizeof(_SecurityAttributes)
+    attributes.lpSecurityDescriptor = descriptor
+    attributes.bInheritHandle = 0
+    return attributes, descriptor
+
+
+def _free_private_directory_security_descriptor(descriptor: ctypes.c_void_p) -> None:
+    """Release one LocalAlloc descriptor after CreateDirectoryW has returned."""
+
+    if not descriptor.value:
+        return
+    kernel32 = _windows_api("kernel32")
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    local_free(descriptor)
 
 
 def _dacl_sddl(path: Path) -> str:
@@ -1599,6 +1905,72 @@ def _dacl_sddl(path: Path) -> str:
     finally:
         if text:
             local_free(ctypes.cast(text, ctypes.c_void_p))
+
+
+def _dacl_sddl_for_handle(handle: int) -> str:
+    """Read a DACL through a retained Windows handle, never by reopening path."""
+
+    advapi32 = _windows_api("advapi32")
+    kernel32 = _windows_api("kernel32")
+    get_security_info = advapi32.GetSecurityInfo  # type: ignore[attr-defined]
+    get_security_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security_info.restype = ctypes.c_uint32
+    convert_descriptor = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW  # type: ignore[attr-defined]
+    convert_descriptor.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_wchar_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    convert_descriptor.restype = ctypes.c_int
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    status = get_security_info(
+        ctypes.c_void_p(handle),
+        _SE_FILE_OBJECT,
+        _DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0 or not dacl.value or not descriptor.value:
+        raise OwnershipCleanupError("private session file DACL cannot be read")
+    try:
+        text = ctypes.c_wchar_p()
+        text_size = ctypes.c_uint32()
+        if not convert_descriptor(
+            descriptor,
+            1,
+            _DACL_SECURITY_INFORMATION,
+            ctypes.byref(text),
+            ctypes.byref(text_size),
+        ):
+            raise OwnershipCleanupError("private session file DACL cannot be encoded")
+        try:
+            value = text.value
+            if value is None:
+                raise OwnershipCleanupError("private session file DACL is empty")
+            return value
+        finally:
+            if text:
+                local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        local_free(descriptor)
 
 
 def _canonical_private_dacl_principal(descriptor: ctypes.c_void_p) -> str:
@@ -1690,10 +2062,234 @@ def _apply_private_staging_dacl(path: Path, user_sid: str) -> None:
         raise OwnershipCleanupError("private staging DACL cannot be verified")
 
 
-def _private_staging_dacl_is_exact(actual: str, expected_user_principal: str) -> bool:
+def _apply_private_staging_dacl_to_handle(handle: int, user_sid: str) -> None:
+    """Apply/read back the restrictive DACL through an exclusive file handle."""
+
+    if not isinstance(handle, int) or handle <= 0:
+        raise OwnershipCleanupError("private session file handle is unavailable")
+    advapi32 = _windows_api("advapi32")
+    kernel32 = _windows_api("kernel32")
+    convert_descriptor = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW  # type: ignore[attr-defined]
+    convert_descriptor.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    convert_descriptor.restype = ctypes.c_int
+    get_dacl = advapi32.GetSecurityDescriptorDacl  # type: ignore[attr-defined]
+    get_dacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    get_dacl.restype = ctypes.c_int
+    set_security_info = advapi32.SetSecurityInfo  # type: ignore[attr-defined]
+    set_security_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    set_security_info.restype = ctypes.c_uint32
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    descriptor_size = ctypes.c_uint32()
+    if not convert_descriptor(
+        _private_staging_sddl(user_sid),
+        1,
+        ctypes.byref(descriptor),
+        ctypes.byref(descriptor_size),
+    ):
+        raise OwnershipCleanupError("private session file DACL cannot be created")
+    try:
+        expected_user_principal = _canonical_private_dacl_principal(descriptor)
+        present = ctypes.c_int()
+        dacl = ctypes.c_void_p()
+        defaulted = ctypes.c_int()
+        if (
+            not get_dacl(
+                descriptor,
+                ctypes.byref(present),
+                ctypes.byref(dacl),
+                ctypes.byref(defaulted),
+            )
+            or not present.value
+            or not dacl.value
+        ):
+            raise OwnershipCleanupError("private session file DACL cannot be extracted")
+        if (
+            set_security_info(
+                ctypes.c_void_p(handle),
+                _SE_FILE_OBJECT,
+                # Passing only the raw ACL loses the ``D:P`` protection bit
+                # encoded in the descriptor and lets broad parent ACEs be
+                # inherited again.  The file is private until finalization.
+                _DACL_SECURITY_INFORMATION
+                | _PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                dacl,
+                None,
+            )
+            != 0
+        ):
+            raise OwnershipCleanupError("private session file DACL cannot be applied")
+    finally:
+        if descriptor.value:
+            local_free(descriptor)
+    actual = _dacl_sddl_for_handle(handle)
+    if not _private_staging_dacl_is_exact(
+        actual,
+        expected_user_principal,
+        require_inheritance=False,
+    ):
+        raise OwnershipCleanupError("private session file DACL cannot be verified")
+
+
+def _expected_private_dacl_principal(user_sid: str) -> str:
+    """Canonicalize the current user's SID through the private DACL shape."""
+
+    advapi32 = _windows_api("advapi32")
+    kernel32 = _windows_api("kernel32")
+    convert_descriptor = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW  # type: ignore[attr-defined]
+    convert_descriptor.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    convert_descriptor.restype = ctypes.c_int
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    descriptor_size = ctypes.c_uint32()
+    if not convert_descriptor(
+        _private_staging_sddl(user_sid),
+        1,
+        ctypes.byref(descriptor),
+        ctypes.byref(descriptor_size),
+    ):
+        raise OwnershipCleanupError("private session file DACL cannot be created")
+    try:
+        return _canonical_private_dacl_principal(descriptor)
+    finally:
+        if descriptor.value:
+            local_free(descriptor)
+
+
+def _owner_sid_for_handle(handle: int) -> str:
+    """Read a file owner through one already-retained Windows file handle."""
+
+    if not isinstance(handle, int) or handle <= 0:
+        raise OwnershipCleanupError("private session file handle is unavailable")
+    advapi32 = _windows_api("advapi32")
+    kernel32 = _windows_api("kernel32")
+    get_security_info = advapi32.GetSecurityInfo  # type: ignore[attr-defined]
+    get_security_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security_info.restype = ctypes.c_uint32
+    convert_sid = advapi32.ConvertSidToStringSidW  # type: ignore[attr-defined]
+    convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    convert_sid.restype = ctypes.c_int
+    is_valid_sid = advapi32.IsValidSid  # type: ignore[attr-defined]
+    is_valid_sid.argtypes = [ctypes.c_void_p]
+    is_valid_sid.restype = ctypes.c_int
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    owner = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    status = get_security_info(
+        ctypes.c_void_p(handle),
+        _SE_FILE_OBJECT,
+        _OWNER_SECURITY_INFORMATION,
+        ctypes.byref(owner),
+        None,
+        None,
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0 or not owner.value or not descriptor.value or not is_valid_sid(owner):
+        raise OwnershipCleanupError("private input owner cannot be read")
+    try:
+        text = ctypes.c_wchar_p()
+        if not convert_sid(owner, ctypes.byref(text)):
+            raise OwnershipCleanupError("private input owner cannot be encoded")
+        try:
+            value = text.value
+            if value is None or re.fullmatch(r"S-\d+(?:-\d+)+", value) is None:
+                raise OwnershipCleanupError("private input owner is malformed")
+            return value
+        finally:
+            if text:
+                local_free(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        local_free(descriptor)
+
+
+def _verify_private_staging_dacl_on_handle(
+    handle: int,
+    user_sid: str,
+    *,
+    require_protected: bool = True,
+) -> None:
+    """Read DACL and owner twice through one handle, rejecting owner drift."""
+
+    if not isinstance(handle, int) or handle <= 0:
+        raise OwnershipCleanupError("private session file handle is unavailable")
+    owner_before = _owner_sid_for_handle(handle)
+    validate_private_input_owner(
+        owner_before,
+        user_sid=user_sid,
+        allow_administrators_if_token_owner=True,
+    )
+    actual = _dacl_sddl_for_handle(handle)
+    if not _private_staging_dacl_is_exact(
+        actual,
+        _expected_private_dacl_principal(user_sid),
+        require_inheritance=False,
+        require_protected=require_protected,
+    ):
+        raise OwnershipCleanupError("private session file DACL cannot be verified")
+    owner_after = _owner_sid_for_handle(handle)
+    validate_private_input_owner(
+        owner_after,
+        user_sid=user_sid,
+        allow_administrators_if_token_owner=True,
+    )
+    if owner_after != owner_before:
+        raise OwnershipCleanupError("private input owner changed during validation")
+
+
+def _private_staging_dacl_is_exact(
+    actual: str,
+    expected_user_principal: str,
+    *,
+    require_inheritance: bool = True,
+    require_protected: bool = True,
+) -> bool:
     """Reject inherited, broad, or weakened ACEs after the DACL readback."""
 
-    if not actual.startswith("D:P"):
+    if require_protected and not actual.startswith("D:P"):
+        return False
+    if not require_protected and not actual.startswith("D:"):
         return False
     aces = re.findall(r"\(([^()]*)\)", actual)
     saw_system = False
@@ -1705,9 +2301,12 @@ def _private_staging_dacl_is_exact(actual: str, expected_user_principal: str) ->
         if len(parts) != 6:
             return False
         ace_type, flags, rights, object_guid, inherit_guid, principal = parts
+        allowed_flags = (
+            {"OICI"} if require_inheritance else {"", "ID", "OICI"}
+        )
         if (
             ace_type != "A"
-            or flags != "OICI"
+            or flags not in allowed_flags
             or rights != "FA"
             or object_guid
             or inherit_guid
@@ -1760,22 +2359,380 @@ def secure_private_staging_directory(
     raise OwnershipCleanupError("private staging DACL capability is unavailable")
 
 
+def create_private_directory(
+    path: Path,
+    backend: FileOwnershipBackend,
+) -> PrivateDirectoryCreation:
+    """Create one empty directory with privacy attached before it exists.
+
+    Production Windows calls ``CreateDirectoryW`` exactly once with a
+    protected current-user/SYSTEM-only security descriptor. There is no
+    ``mkdir``/``SetFileSecurity`` interval. Any non-Windows path requires an
+    explicitly injected private-directory creator; production never falls
+    back to a generic directory create on Windows.
+    """
+
+    if (
+        not path.is_absolute()
+        or not path.name
+        or path.name in {".", ".."}
+        or "\x00" in os.fspath(path)
+    ):
+        raise OwnershipCleanupError("private directory path is invalid")
+
+    opened: OwnedPath | None = None
+    binding: OwnedPathBinding | None = None
+    try:
+        if isinstance(backend, WindowsFileOwnershipBackend):
+            user_sid = _current_user_sid()
+            attributes, descriptor = _private_directory_security_attributes(user_sid)
+            try:
+                if not backend.api.create_directory(str(path), attributes):
+                    error_number = backend.api.last_error()
+                    if error_number in {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}:
+                        raise DestinationExistsError("private directory already exists")
+                    raise OwnershipCleanupError("private directory cannot be created")
+            finally:
+                _free_private_directory_security_descriptor(descriptor)
+        else:
+            creator = getattr(backend, "create_private_directory", None)
+            if not callable(creator):
+                raise OwnershipCleanupError(
+                    "private directory creation capability is unavailable"
+                )
+            try:
+                creator(path)
+            except FileExistsError as error:
+                raise DestinationExistsError("private directory already exists") from error
+
+        # Open no-follow before a caller can create a child. The deletion
+        # capability lets failure cleanup target this exact retained identity.
+        opened = backend.open_existing_directory(path, for_delete=True)
+        binding = opened.capture_binding()
+        final_path = opened.final_path()
+        if (
+            not binding.is_directory
+            or _lexical_path_key(final_path) != _lexical_path_key(path)
+        ):
+            raise OwnershipLostError("private directory did not retain its creation identity")
+
+        if isinstance(backend, WindowsFileOwnershipBackend):
+            owner = verify_private_staging_file(opened, backend)
+            # The creation descriptor explicitly requested the interactive
+            # user's SID as owner. Accepting a substituted owner would turn a
+            # successfully protected DACL into an ambiguous private binding.
+            if owner != user_sid:
+                raise OwnershipCleanupError("private directory owner cannot be verified")
+        else:
+            secure_private_staging_directory(final_path, backend)
+        return PrivateDirectoryCreation(
+            path=final_path,
+            binding=binding,
+            opened=opened,
+        )
+    except BaseException as error:
+        cleanup_error: BaseException | None = None
+        if opened is not None:
+            try:
+                if binding is not None:
+                    dispose_live_owned_path(opened, binding, backend)
+                    opened = None
+                else:
+                    opened.close()
+                    opened = None
+            except (OSError, OwnershipError) as cleanup:
+                cleanup_error = cleanup
+        if cleanup_error is not None:
+            raise OwnershipCleanupError(
+                "private directory cleanup after failed validation did not complete"
+            ) from error
+        raise
+
+
+def create_private_workspace_directory(
+    parent: Path,
+    prefix: str,
+    backend: FileOwnershipBackend,
+) -> PrivateDirectoryCreation:
+    """Create one cryptographically named private workspace below ``parent``.
+
+    Retrying is permitted only for the bounded set of collision outcomes from
+    the atomic directory create. Every other error remains terminal.
+    """
+
+    if (
+        not isinstance(prefix, str)
+        or not prefix
+        or "\x00" in prefix
+        or "/" in prefix
+        or "\\" in prefix
+    ):
+        raise OwnershipCleanupError("private workspace prefix is invalid")
+    for _attempt in range(_PRIVATE_DIRECTORY_CREATE_ATTEMPTS):
+        candidate = parent / f"{prefix}{secrets.token_hex(16)}"
+        try:
+            return create_private_directory(candidate, backend)
+        except DestinationExistsError:
+            continue
+    raise OwnershipCleanupError("private workspace name collision limit reached")
+
+
+def secure_private_staging_file(
+    opened: OwnedPath,
+    backend: FileOwnershipBackend,
+) -> None:
+    """Apply and verify the current-user/SYSTEM-only DACL on a held file.
+
+    Callers retain the file's exclusive creation handle while invoking this
+    helper. Production uses that same handle for DACL application and
+    readback, so no pathname reopen or inherited ACL window exists.
+    """
+
+    if isinstance(backend, WindowsFileOwnershipBackend):
+        path = opened.final_path()
+        if not _is_ntfs_volume(path):
+            raise OwnershipCleanupError("private session file requires local NTFS")
+        handle = getattr(opened, "handle", None)
+        _apply_private_staging_dacl_to_handle(handle, _current_user_sid())
+        _verify_private_staging_dacl_on_handle(handle, _current_user_sid())
+        return
+    probe = getattr(backend, "secure_private_staging_file", None)
+    if callable(probe):
+        probe(opened.final_path())
+        return
+    raise OwnershipCleanupError("private session file DACL capability is unavailable")
+
+
+def verify_private_staging_file(
+    opened: OwnedPath,
+    backend: FileOwnershipBackend,
+    *,
+    require_protected: bool = True,
+) -> str | None:
+    """Require a held file to retain a trusted owner and private-only DACL.
+
+    This is intentionally verification-only.  Native machine-readable
+    artifacts use it after their no-replace rename and before accepting a
+    persisted input, so a broad parent DACL is never restored or silently
+    accepted merely because creation initially used a private temporary.  A
+    private-workspace child can retain safe inherited ACEs, but only callers
+    explicitly requesting ``require_protected=False`` may use that form.
+    """
+
+    if isinstance(backend, WindowsFileOwnershipBackend):
+        path = opened.final_path()
+        if not _is_ntfs_volume(path):
+            raise OwnershipCleanupError("private session file requires local NTFS")
+        handle = getattr(opened, "handle", None)
+        _verify_private_staging_dacl_on_handle(
+            handle,
+            _current_user_sid(),
+            require_protected=require_protected,
+        )
+        return _owner_sid_for_handle(handle)
+    probe = getattr(backend, "verify_private_staging_file", None)
+    if callable(probe):
+        probe(opened.final_path())
+        return None
+    raise OwnershipCleanupError("private session file DACL capability is unavailable")
+
+
+def capture_public_output_acl_policy(
+    opened: OwnedPath,
+    backend: FileOwnershipBackend,
+) -> PublicOutputAclPolicy:
+    """Capture the new file's inherited public DACL through its open handle.
+
+    The capture happens before private staging replaces the DACL.  No public
+    pathname is reopened, so even a broadly readable output parent cannot
+    expose staged bytes while the exclusive handle is retained.
+    """
+
+    if isinstance(backend, WindowsFileOwnershipBackend):
+        handle = getattr(opened, "handle", None)
+        if not isinstance(handle, int) or handle <= 0:
+            raise OwnershipCleanupError("public output file handle is unavailable")
+        value = _dacl_sddl_for_handle(handle)
+        if not value.startswith("D:") or "\x00" in value:
+            raise OwnershipCleanupError("public output DACL policy is invalid")
+        return PublicOutputAclPolicy(dacl_sddl=value)
+    capture = getattr(backend, "capture_public_output_acl_policy", None)
+    if callable(capture):
+        policy = capture(opened)
+        if isinstance(policy, PublicOutputAclPolicy):
+            return policy
+    raise OwnershipCleanupError("public output DACL policy capability is unavailable")
+
+
+def _restore_public_output_dacl_to_handle(handle: int, policy: PublicOutputAclPolicy) -> None:
+    """Restore a captured public DACL through one still-exclusive handle."""
+
+    if not isinstance(handle, int) or handle <= 0:
+        raise OwnershipCleanupError("public output file handle is unavailable")
+    value = policy.dacl_sddl
+    if not isinstance(value, str) or not value.startswith("D:") or "\x00" in value:
+        raise OwnershipCleanupError("public output DACL policy is invalid")
+    advapi32 = _windows_api("advapi32")
+    kernel32 = _windows_api("kernel32")
+    convert_descriptor = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW  # type: ignore[attr-defined]
+    convert_descriptor.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    convert_descriptor.restype = ctypes.c_int
+    get_dacl = advapi32.GetSecurityDescriptorDacl  # type: ignore[attr-defined]
+    get_dacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    get_dacl.restype = ctypes.c_int
+    set_security_info = advapi32.SetSecurityInfo  # type: ignore[attr-defined]
+    set_security_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    set_security_info.restype = ctypes.c_uint32
+    local_free = kernel32.LocalFree  # type: ignore[attr-defined]
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    descriptor = ctypes.c_void_p()
+    descriptor_size = ctypes.c_uint32()
+    if not convert_descriptor(
+        value,
+        1,
+        ctypes.byref(descriptor),
+        ctypes.byref(descriptor_size),
+    ):
+        raise OwnershipCleanupError("public output DACL cannot be created")
+    try:
+        present = ctypes.c_int()
+        dacl = ctypes.c_void_p()
+        defaulted = ctypes.c_int()
+        if (
+            not get_dacl(
+                descriptor,
+                ctypes.byref(present),
+                ctypes.byref(dacl),
+                ctypes.byref(defaulted),
+            )
+            or not present.value
+            or not dacl.value
+        ):
+            raise OwnershipCleanupError("public output DACL cannot be extracted")
+        protection = (
+            _PROTECTED_DACL_SECURITY_INFORMATION
+            if value.startswith("D:P")
+            else _UNPROTECTED_DACL_SECURITY_INFORMATION
+        )
+        if (
+            set_security_info(
+                ctypes.c_void_p(handle),
+                _SE_FILE_OBJECT,
+                _DACL_SECURITY_INFORMATION | protection,
+                None,
+                None,
+                dacl,
+                None,
+            )
+            != 0
+        ):
+            raise OwnershipCleanupError("public output DACL cannot be applied")
+    finally:
+        if descriptor.value:
+            local_free(descriptor)
+    if not _public_output_dacl_matches(value, _dacl_sddl_for_handle(handle)):
+        raise OwnershipCleanupError("public output DACL cannot be verified")
+
+
+def _public_output_dacl_matches(expected: str, actual: str) -> bool:
+    """Compare a captured DACL while tolerating Windows' auto-inherit marker.
+
+    ``SetSecurityInfo(...UNPROTECTED_DACL...)`` may add ``AI`` to an otherwise
+    identical inherited DACL.  The ACE list and protected-state bit remain
+    authoritative; accepting only this marker avoids rejecting normal public
+    output after a safe policy restoration.
+    """
+
+    def normalized(value: str) -> str | None:
+        match = re.fullmatch(r"D:([A-Z]*)(\(.*\))?", value)
+        if match is None:
+            return None
+        flags = match.group(1).replace("AI", "")
+        aces = match.group(2) or ""
+        return "D:" + flags + aces
+
+    expected_normalized = normalized(expected)
+    actual_normalized = normalized(actual)
+    return (
+        expected_normalized is not None
+        and expected_normalized == actual_normalized
+    )
+
+
+def apply_public_output_acl_policy(
+    opened: OwnedPath,
+    policy: PublicOutputAclPolicy,
+    backend: FileOwnershipBackend,
+) -> None:
+    """Restore and read back the intended final DACL while the handle is held."""
+
+    if isinstance(backend, WindowsFileOwnershipBackend):
+        handle = getattr(opened, "handle", None)
+        _restore_public_output_dacl_to_handle(handle, policy)
+        return
+    apply = getattr(backend, "apply_public_output_acl_policy", None)
+    if callable(apply):
+        apply(opened, policy)
+        return
+    raise OwnershipCleanupError("public output DACL policy capability is unavailable")
+
+
 def private_staging_capability() -> PrivateStagingCapability:
     """Probe only Windows/NTFS/DACL readiness without exposing local details."""
 
     if os.name != "nt":
         return PrivateStagingCapability(windows=False, ntfs=False, dacl=False)
+    chain: LexicalDirectoryChainLease | None = None
+    creation: PrivateDirectoryCreation | None = None
     try:
         backend = WindowsFileOwnershipBackend()
-        with tempfile.TemporaryDirectory(prefix="liang-pingfa-staging-") as root:
-            candidate = Path(root)
-            ntfs = _is_ntfs_volume(candidate)
-            if not ntfs:
-                return PrivateStagingCapability(windows=True, ntfs=False, dacl=False)
-            _apply_private_staging_dacl(candidate, _current_user_sid())
-            return PrivateStagingCapability(windows=True, ntfs=True, dacl=True)
+        chain = acquire_lexical_directory_chain(
+            Path(tempfile.gettempdir()),
+            backend,
+        )
+        if not _is_ntfs_volume(chain.path):
+            return PrivateStagingCapability(windows=True, ntfs=False, dacl=False)
+        creation = create_private_workspace_directory(
+            chain.path,
+            "liang-pingfa-staging-",
+            backend,
+        )
+        creation.dispose(backend)
+        creation = None
+        return PrivateStagingCapability(windows=True, ntfs=True, dacl=True)
     except (OSError, OwnershipError, OwnershipCleanupError):
         return PrivateStagingCapability(windows=True, ntfs=False, dacl=False)
+    finally:
+        if creation is not None:
+            try:
+                creation.dispose(backend)
+            except (OSError, OwnershipError):
+                pass
+        if chain is not None:
+            try:
+                chain.close()
+            except (OSError, OwnershipError):
+                pass
 
 
 def platform_backend(*, require_windows: bool) -> FileOwnershipBackend:
@@ -1861,13 +2818,26 @@ def dispose_live_owned_path(
     binding: OwnedPathBinding,
     backend: FileOwnershipBackend,
 ) -> None:
-    """Dispose a still-open owned object after proving its named binding."""
+    """Dispose a still-open owned object after proving its handle binding.
+
+    An exclusive private publication handle intentionally denies every
+    pathname reopen.  Its own final path is therefore the authority here;
+    reopening via ``path_matches_binding`` would both fail on Windows and
+    defeat the private-stage no-reopen rule.
+    """
 
     try:
         current = opened.capture_binding()
+        expected_path = os.path.normcase(
+            os.path.normpath(os.fspath(binding.path))
+        )
+        handle_paths = (
+            os.path.normcase(os.path.normpath(os.fspath(opened.final_path()))),
+            os.path.normcase(os.path.normpath(os.fspath(opened.path))),
+        )
         if (
             not current.same_identity_and_content(binding)
-            or not backend.path_matches_binding(opened.path, binding)
+            or expected_path not in handle_paths
         ):
             raise OwnershipLostError("open owned path lost its name")
         opened.request_delete()

@@ -16,17 +16,20 @@ from .ownership import (
     LexicalDirectoryChainLease,
     OwnedPath,
     OwnedPathBinding,
+    PrivateDirectoryCreation,
     OwnershipCleanupError,
     OwnershipError,
     OwnershipLostError,
     bind_existing_path,
     binding_matches_path,
     acquire_lexical_directory_chain,
+    create_private_directory,
+    create_private_workspace_directory,
     dispose_live_owned_path,
     dispose_owned_binding,
     is_reparse_point,
     platform_backend,
-    secure_private_staging_directory,
+    verify_private_staging_file,
     validate_private_staging_ancestry,
 )
 
@@ -185,6 +188,7 @@ class PrivateWorkspace:
     def __enter__(self) -> "PrivateWorkspace":
         """Create a private root beneath a retained lexical work-root chain."""
 
+        creation: PrivateDirectoryCreation | None = None
         try:
             work_root = (
                 Path(os.fspath(self._directory))
@@ -201,17 +205,24 @@ class PrivateWorkspace:
                 self._work_root_chain.path,
                 self._backend,
             )
-            created = Path(
-                tempfile.mkdtemp(
-                    prefix=self._prefix,
-                    dir=os.fspath(self._work_root_chain.path),
-                )
+            # Windows receives a protected owner/DACL in CreateDirectoryW,
+            # before a directory entry exists. The returned handle is bound
+            # and validated before this method can create any child.
+            creation = create_private_workspace_directory(
+                self._work_root_chain.path,
+                self._prefix,
+                self._backend,
             )
+            created = creation.path
             if (
                 created.parent != self._work_root_chain.path
                 or not created.name.startswith(self._prefix)
             ):
                 raise OwnershipLostError("private workspace path is not a direct child")
+            # The initial DELETE-capable handle intentionally denies child
+            # writers. Release it only after validation so the regular lexical
+            # workspace lease can retain compatible ancestor protection.
+            creation.close()
             # The root itself is another retained lexical chain. Its canonical
             # path comes only from its final no-follow handle, never resolve().
             self._workspace_root_chain = acquire_lexical_directory_chain(
@@ -220,17 +231,30 @@ class PrivateWorkspace:
             )
             self._path = self._workspace_root_chain.path
             self._root_binding = self._workspace_root_chain.binding
-            # Every converter-private child inherits this protected ACL. Each
-            # independently random ODA root is also applied/read back again
-            # before a subprocess receives any path beneath it.
-            secure_private_staging_directory(self._path, self._backend)
+            if not self._root_binding.same_identity_and_content(creation.binding):
+                raise OwnershipLostError("private workspace registration changed identity")
             self._workspace_root_chain.require_binding()
+            # Ownership is now represented by the retained lexical chain;
+            # normal context recovery handles the registered root.
+            creation = None
         except (OSError, OwnershipError) as error:
+            cleanup_error: BaseException | None = None
+            if creation is not None:
+                try:
+                    # A lexical workspace lease blocks DELETE sharing, so
+                    # release only that local chain while retaining the
+                    # work-root ancestry for exact-handle cleanup.
+                    if self._workspace_root_chain is not None:
+                        self._workspace_root_chain.close()
+                        self._workspace_root_chain = None
+                    creation.dispose(self._backend)
+                except (OSError, OwnershipError) as cleanup:
+                    cleanup_error = cleanup
             self._close_workspace_chains_safely()
             raise PipelineError(
                 ErrorCode.CONVERSION_FAILURE,
                 "private staging workspace cannot be created",
-            ) from error
+            ) from (cleanup_error or error)
         return self
 
     def __exit__(
@@ -339,8 +363,136 @@ class PrivateWorkspace:
             )
         return normalized
 
+    def _require_live_workspace_chains(self) -> None:
+        """Keep the retained no-follow workspace ancestry authoritative."""
+
+        if (
+            self._work_root_chain is None
+            or self._workspace_root_chain is None
+            or self._root_binding is None
+        ):
+            raise OwnershipLostError("workspace chains are unavailable")
+        self._work_root_chain.require_binding()
+        self._workspace_root_chain.require_binding()
+
+    def _validate_opened_private_file(
+        self,
+        normalized: Path,
+        opened: OwnedPath,
+        *,
+        expected_binding: OwnedPathBinding | None = None,
+    ) -> OwnedPathBinding:
+        """Validate one externally reachable private file through its lease.
+
+        The caller holds both the workspace ancestry and this no-write/no-
+        delete file handle.  We deliberately validate owner/DACL before and
+        after capturing the content binding, so an external Core Console save
+        cannot be adopted merely because a filename happened to remain.
+        """
+
+        self._require_live_workspace_chains()
+        before = opened.capture_binding()
+        final_path = opened.final_path()
+        if (
+            before.is_directory
+            or before.sha256 is None
+            or before.byte_size is None
+            or final_path.name.casefold() != normalized.name.casefold()
+            or not self._backend.path_matches_binding(normalized, before)
+        ):
+            raise OwnershipLostError("external workspace file escaped binding")
+        owner_before = verify_private_staging_file(
+            opened,
+            self._backend,
+            require_protected=False,
+        )
+        after = opened.capture_binding()
+        owner_after = verify_private_staging_file(
+            opened,
+            self._backend,
+            require_protected=False,
+        )
+        if (
+            not after.same_identity_and_content(before)
+            or (
+                owner_before is not None
+                and owner_after is not None
+                and owner_before != owner_after
+            )
+            or (
+                expected_binding is not None
+                and not after.same_identity_and_content(expected_binding)
+            )
+            or not self._backend.path_matches_binding(normalized, after)
+        ):
+            raise OwnershipLostError("external workspace file changed during validation")
+        return after
+
+    def open_validated_external_file_read_lease(
+        self,
+        path: Path,
+        *,
+        allow_replacement: bool,
+    ) -> OwnedPath:
+        """Lease a known external-save target only after private validation.
+
+        A write-mode Core Console is the sole caller allowed to replace its
+        pre-registered DWG.  Readback callers must retain the same exact
+        identity; both paths receive a read-only sharing lease before any
+        bytes, header, result, or publication path can inspect the file.
+        """
+
+        normalized = self._normalize_child(path)
+        previous = self._children.get(normalized)
+        if previous is None or previous.is_directory:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "external workspace file was not pre-registered",
+            )
+        opened: OwnedPath | None = None
+        try:
+            opened = self._backend.open_existing_file_read_lease(normalized)
+            binding = self._validate_opened_private_file(normalized, opened)
+            if (
+                not allow_replacement
+                and not binding.same_identity_and_content(previous)
+            ):
+                raise OwnershipLostError("external workspace file replacement is not allowed")
+            return opened
+        except (OSError, OwnershipError) as error:
+            if opened is not None:
+                try:
+                    opened.close()
+                except (OSError, OwnershipError):
+                    pass
+            raise _cleanup_pipeline_error(error) from error
+
+    def validate_retained_private_file(
+        self,
+        path: Path,
+        opened: OwnedPath,
+        *,
+        expected_binding: OwnedPathBinding | None = None,
+    ) -> OwnedPathBinding:
+        """Revalidate a caller-retained private read lease before use."""
+
+        normalized = self._normalize_child(path)
+        if normalized not in self._children:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "workspace private file was not registered",
+            )
+        try:
+            return self._validate_opened_private_file(
+                normalized,
+                opened,
+                expected_binding=expected_binding,
+            )
+        except (OSError, OwnershipError) as error:
+            raise _cleanup_pipeline_error(error) from error
+
     def create_owned_directory(self, path: Path) -> Path:
-        """Create and bind one empty child directory before it is used.
+        """Atomically create and bind one private child directory before use.
 
         External tools may receive this directory only after its exact
         identity is registered.  In particular, callers must not create an
@@ -366,31 +518,48 @@ class PrivateWorkspace:
                 ErrorCode.PUBLICATION_CLEANUP_FAILURE,
                 "workspace directory already exists",
             )
+        creation: PrivateDirectoryCreation | None = None
+        registered: Path | None = None
         try:
-            candidate.mkdir()
-        except OSError as error:
-            raise _cleanup_pipeline_error(error) from error
-        return self.track_created_directory(candidate)
+            self._require_live_workspace_chains()
+            creation = create_private_directory(candidate, self._backend)
+            if (
+                creation.path.parent != self.path
+                and creation.path.parent not in self._children
+            ):
+                raise OwnershipLostError("private workspace directory escaped its parent")
+            creation.close()
+            registered = self.track_created_directory(creation.path)
+            binding = self._children[registered]
+            if not binding.same_identity_and_content(creation.binding):
+                raise OwnershipLostError(
+                    "private workspace directory registration changed identity"
+                )
+            creation = None
+            return registered
+        except (OSError, OwnershipError) as error:
+            cleanup_error: BaseException | None = None
+            if creation is not None:
+                try:
+                    if registered is not None:
+                        chain = self._child_directory_chains.pop(registered, None)
+                        if chain is not None:
+                            chain.close()
+                        self._children.pop(registered, None)
+                    creation.dispose(self._backend)
+                except (OSError, OwnershipError) as cleanup:
+                    cleanup_error = cleanup
+            raise _cleanup_pipeline_error(cleanup_error or error) from error
 
     def create_private_oda_root(self, path: Path) -> Path:
-        """Create one random ODA root and verify its restrictive DACL.
+        """Create one random ODA root with its restrictive DACL at creation.
 
         The workspace ancestry is already no-follow and NTFS-qualified. This
-        second check makes every process-specific root independently private
-        before input/output children or a converter command line exist.
+        atomic child creation makes every process-specific root independently
+        private before input/output children or a converter command line exist.
         """
 
-        created = self.create_owned_directory(path)
-        try:
-            secure_private_staging_directory(created, self._backend)
-            chain = self._child_directory_chains[created]
-            chain.require_binding()
-        except (OSError, OwnershipError) as error:
-            raise PipelineError(
-                ErrorCode.CONVERSION_FAILURE,
-                "private ODA staging controls are unavailable",
-            ) from error
-        return created
+        return self.create_owned_directory(path)
 
     def track_created_directory(self, path: Path) -> Path:
         """Record the exact identity of a just-created private directory."""
@@ -489,6 +658,178 @@ class PrivateWorkspace:
         # apply produced, never a pathname replacement.
         self._children[normalized] = expected_binding or binding
         return normalized
+
+    def track_external_file(self, path: Path) -> Path:
+        """Register an external result only after owner/DACL lease validation."""
+
+        normalized = self._normalize_child(path)
+        if normalized in self._children:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "external workspace file is already registered",
+            )
+        if normalized.parent != self.path and normalized.parent not in self._children:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "workspace file parent was not registered",
+            )
+        opened: OwnedPath | None = None
+        try:
+            opened = self._backend.open_existing_file_read_lease(normalized)
+            binding = self._validate_opened_private_file(normalized, opened)
+            self._children[normalized] = binding
+            return normalized
+        except (OSError, OwnershipError) as error:
+            raise _cleanup_pipeline_error(error) from error
+        finally:
+            if opened is not None:
+                try:
+                    opened.close()
+                except (OSError, OwnershipError) as error:
+                    raise _cleanup_pipeline_error(error) from error
+
+    def adopt_external_file(
+        self,
+        path: Path,
+        *,
+        opened: OwnedPath | None = None,
+        allow_replacement: bool = False,
+        expected_binding: OwnedPathBinding | None = None,
+    ) -> Path:
+        """Refresh one known private file after an approved external process.
+
+        Most workspace files are immutable after their creator seals them.
+        Native Core Console is the narrow exception: it is intentionally
+        allowed to save only the already registered private DWG copy. A
+        caller must opt in to replacement explicitly, and only after its
+        retained read lease has proven trusted owner, exact private DACL,
+        regular-file identity, and stable bytes. It never adopts an unknown
+        sidecar or a path outside the private root.
+        """
+
+        normalized = self._normalize_child(path)
+        previous = self._children.get(normalized)
+        if previous is None or previous.is_directory:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "external workspace file was not pre-registered",
+            )
+        owns_opened = opened is None
+        try:
+            if opened is None:
+                opened = self._backend.open_existing_file_read_lease(normalized)
+            binding = self._validate_opened_private_file(
+                normalized,
+                opened,
+                expected_binding=expected_binding,
+            )
+            if (
+                not allow_replacement
+                and not binding.same_identity_and_content(previous)
+            ):
+                raise OwnershipLostError("external workspace file replacement is not allowed")
+        except (OSError, OwnershipError) as error:
+            raise _cleanup_pipeline_error(error) from error
+        finally:
+            if owns_opened and opened is not None:
+                try:
+                    opened.close()
+                except (OSError, OwnershipError) as error:
+                    raise _cleanup_pipeline_error(error) from error
+        self._children[normalized] = binding
+        return normalized
+
+    def read_tracked_file_bytes(
+        self,
+        path: Path,
+        *,
+        maximum_bytes: int,
+        consume: Callable[[bytes], object] | None = None,
+    ) -> object:
+        """Read one registered private file through a no-write/delete lease.
+
+        External native processes may create a bounded result artifact after
+        successful exit.  The caller first registers it, then this helper
+        proves the current handle still names that registration before and
+        after reading; it never falls back to a path-only JSON read.
+        """
+
+        if maximum_bytes < 1:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "workspace read bound is invalid",
+            )
+        normalized = self._normalize_child(path)
+        expected = self._children.get(normalized)
+        if expected is None or expected.is_directory:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "workspace read file was not registered",
+            )
+        opened: OwnedPath | None = None
+        try:
+            opened = self._backend.open_existing_file_read_lease(normalized)
+            self._validate_opened_private_file(
+                normalized,
+                opened,
+                expected_binding=expected,
+            )
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in opened.read_chunks():
+                total += len(chunk)
+                if total > maximum_bytes:
+                    raise OwnershipLostError("workspace result exceeds read bound")
+                chunks.append(chunk)
+            payload = b"".join(chunks)
+            result = consume(payload) if consume is not None else payload
+            self._validate_opened_private_file(
+                normalized,
+                opened,
+                expected_binding=expected,
+            )
+            return result
+        except (OSError, OwnershipError) as error:
+            raise _cleanup_pipeline_error(error) from error
+        finally:
+            if opened is not None:
+                try:
+                    opened.close()
+                except (OSError, OwnershipError) as error:
+                    raise _cleanup_pipeline_error(error) from error
+
+    def require_tracked_file_security(self, path: Path) -> None:
+        """Recheck one registered private input through its retained read handle.
+
+        A manifest, source copy, or fixed script may be generated inside this
+        workspace, but that provenance does not waive the final ownership,
+        no-follow identity, and effective current-user/SYSTEM DACL proof
+        immediately before an external process receives its path.
+        """
+
+        normalized = self._normalize_child(path)
+        expected = self._children.get(normalized)
+        if expected is None or expected.is_directory:
+            raise PipelineError(
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+                "workspace private input was not registered",
+            )
+        opened: OwnedPath | None = None
+        try:
+            opened = self._backend.open_existing_file_read_lease(normalized)
+            self._validate_opened_private_file(
+                normalized,
+                opened,
+                expected_binding=expected,
+            )
+        except (OSError, OwnershipError) as error:
+            raise _cleanup_pipeline_error(error) from error
+        finally:
+            if opened is not None:
+                try:
+                    opened.close()
+                except (OSError, OwnershipError) as error:
+                    raise _cleanup_pipeline_error(error) from error
 
     def track_opened_file(self, opened: OwnedPath) -> Path:
         """Record a private file through its already-retained ownership handle.
@@ -730,6 +1071,42 @@ class PrivateWorkspace:
                 # this branch so cleanup never follows it recursively.
                 paths.update(self._actual_paths(entry))
         return paths
+
+    def require_exact_inventory(self) -> None:
+        """Require every private entry to be a registered, unchanged child.
+
+        This is a non-mutating pre-publication check.  It deliberately uses
+        the same no-follow traversal and identity comparison as recovery so a
+        caller can stage public *temporary* bytes only after no converter
+        sidecar, reparse point, missing child, or pathname replacement remains
+        in the workspace.  Recovery repeats the check because an external
+        process could still race the interval before context exit.
+        """
+
+        try:
+            if (
+                self._work_root_chain is None
+                or self._workspace_root_chain is None
+                or self._root_binding is None
+            ):
+                raise OwnershipLostError("workspace chains are unavailable")
+            self._work_root_chain.require_binding()
+            self._workspace_root_chain.require_binding()
+            actual = self._actual_paths(self.path)
+            expected = set(self._children)
+            if actual != expected:
+                raise OwnershipLostError("workspace inventory differs")
+            for path, binding in self._children.items():
+                if not binding_matches_path(binding, self._backend):
+                    raise OwnershipLostError("workspace child identity differs")
+                # ``binding_matches_path`` protects identity; this explicit
+                # lexical containment check makes an invalid bookkeeping entry
+                # fail before a caller can stage any public temporary.
+                self._normalize_child(path)
+        except PipelineError:
+            raise
+        except (OSError, OwnershipError) as error:
+            raise _cleanup_pipeline_error(error) from error
 
     def _recover(self) -> None:
         """Remove all independently safe owned entries before surfacing failure.
