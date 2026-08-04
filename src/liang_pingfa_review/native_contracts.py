@@ -9,7 +9,7 @@ authentication against a hostile local account.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from hmac import compare_digest
 from importlib import resources
@@ -31,9 +31,11 @@ from .canonical import (
     attach_integrity,
     canonical_json_bytes,
     canonical_sha256,
+    format_utc,
     normalize_json_value,
     parse_utc,
     strict_json_loads,
+    utc_now,
     validate_json_canonical_form,
     validate_json_nesting,
     validate_json_string_limits,
@@ -83,6 +85,7 @@ NativeSchemaKind = Literal[
 ]
 _PrivateReadResult = TypeVar("_PrivateReadResult")
 _DeadlineCheck = Callable[[str], None]
+MAX_NATIVE_SESSION_LIFETIME: Final[timedelta] = timedelta(minutes=5)
 
 _SCHEMA_FILES: dict[NativeSchemaKind, str] = {
     "config": "native-adapter-config-v1.schema.json",
@@ -1517,11 +1520,61 @@ def _validate_geometry_semantics(
         raise ValueError("native geometry binding digest mismatch")
 
 
-def _validate_session_semantics(artifact: dict[str, Any]) -> None:
-    created = parse_utc(cast(str, artifact["created_at"]))
-    expires = parse_utc(cast(str, artifact["expires_at"]))
-    if expires <= created or expires - created > timedelta(minutes=5):
-        raise ValueError("native session lifetime is invalid")
+def validate_native_session_temporal_bounds(
+    created_at: str | datetime,
+    expires_at: str | datetime,
+    *,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Validate the one strict temporal policy for native bridge sessions.
+
+    Persisted values must use the schema's whole-second RFC 3339 UTC spelling;
+    the non-persisted handshake context supplies equivalent aware UTC
+    ``datetime`` values.  There is intentionally no future-clock tolerance:
+    accepting one would permit a local clock rollback to extend a session.
+    """
+
+    def timestamp(value: str | datetime, *, persisted: bool) -> datetime:
+        if isinstance(value, str):
+            parsed = parse_utc(value)
+            if format_utc(parsed) != value:
+                raise ValueError("native session timestamp is not strict RFC3339 UTC")
+            return parsed
+        if (
+            not isinstance(value, datetime)
+            or value.tzinfo is None
+            or value.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("native session timestamp is not aware UTC")
+        if persisted:
+            raise ValueError("native persisted session timestamp is not RFC3339 UTC")
+        return value.astimezone(UTC)
+
+    persisted = isinstance(created_at, str) and isinstance(expires_at, str)
+    created = timestamp(created_at, persisted=persisted)
+    expires = timestamp(expires_at, persisted=persisted)
+    current = utc_now() if now is None else timestamp(now, persisted=False)
+    if expires <= created:
+        raise ValueError("native session lifetime is not positive")
+    if expires - created > MAX_NATIVE_SESSION_LIFETIME:
+        raise ValueError("native session lifetime exceeds fixed maximum")
+    if current < created:
+        raise ValueError("native session creation is in the future")
+    if current >= expires:
+        raise ValueError("native session has expired")
+    return created, expires
+
+
+def _validate_session_semantics(
+    artifact: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> None:
+    validate_native_session_temporal_bounds(
+        cast(str, artifact["created_at"]),
+        cast(str, artifact["expires_at"]),
+        now=now,
+    )
     if artifact["mode"] != "read_only":
         raise ValueError("native session is not read-only")
     capabilities = cast(list[str], artifact["capabilities"])
@@ -2014,6 +2067,7 @@ def validate_native_contract(
     artifact: Any,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Validate a native contract's schema, integrity, and semantic invariants."""
 
@@ -2043,7 +2097,7 @@ def validate_native_contract(
                 deadline_check=deadline_check,
             )
         elif kind == "session":
-            _validate_session_semantics(normalized)
+            _validate_session_semantics(normalized, now=now)
         elif kind == "geometry":
             _validate_geometry_semantics(normalized, deadline_check=deadline_check)
         elif kind == "audit":

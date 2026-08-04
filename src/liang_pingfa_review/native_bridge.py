@@ -36,6 +36,7 @@ from .canonical import (
 )
 from .errors import ErrorCode, PipelineError
 from .native_contracts import (
+    MAX_NATIVE_SESSION_LIFETIME,
     _embedded_geometry,
     _embedded_inventory,
     load_native_config,
@@ -44,6 +45,7 @@ from .native_contracts import (
     require_geometry_export_matches_session,
     strict_native_json,
     validate_native_contract,
+    validate_native_session_temporal_bounds,
 )
 from .native_protocol import (
     CONNECT_TIMEOUT_SECONDS,
@@ -1474,7 +1476,24 @@ class NativeBridgeClient:
         config: Mapping[str, Any],
         transport: PipeTransport | None = None,
     ) -> None:
-        self._session = validate_native_contract("session", session)
+        wall_now = utc_now()
+        self._session = validate_native_contract("session", session, now=wall_now)
+        try:
+            created, expires = validate_native_session_temporal_bounds(
+                self._session["created_at"],
+                self._session["expires_at"],
+                now=wall_now,
+            )
+        except (CanonicalJsonError, TypeError, ValueError) as error:
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native session temporal bounds are invalid",
+            ) from error
+        # This deadline is established exactly once after successful wall-clock
+        # validation.  Wall-clock rollback cannot mint additional session life.
+        self._session_created_at = created
+        self._session_expires_at = expires
+        self._session_deadline = time.monotonic() + (expires - wall_now).total_seconds()
         self._config = validate_native_contract("config", config)
         # Reject a hand-supplied descriptor that is valid in isolation but is
         # incompatible with the exact configured native host before a pipe can
@@ -1643,7 +1662,7 @@ class NativeBridgeClient:
         """Read the signed session expiry once for a timing or liveness check."""
 
         try:
-            return parse_utc(self._session["expires_at"])
+            return self._session_expires_at
         except (
             CanonicalJsonError,
             KeyError,
@@ -1670,13 +1689,39 @@ class NativeBridgeClient:
     ) -> bool:
         """Test both clocks so a bounded RPC cannot outlive signed expiry."""
 
-        if session_deadline is not None and time.monotonic() >= session_deadline:
+        deadline = self._session_deadline if session_deadline is None else session_deadline
+        if time.monotonic() >= deadline:
             return True
         return utc_now() >= self._session_expiry()
+
+    def _require_temporally_live_session(self) -> None:
+        """Reapply wall-clock bounds without extending the fixed monotonic life."""
+
+        wall_now = utc_now()
+        try:
+            validate_native_session_temporal_bounds(
+                self._session_created_at,
+                self._session_expires_at,
+                now=wall_now,
+            )
+        except (CanonicalJsonError, TypeError, ValueError) as error:
+            self._invalidate_locked()
+            if wall_now >= self._session_expires_at:
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_EXPIRED,
+                    "native session expired",
+                ) from error
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native session wall clock is invalid",
+            ) from error
+        if time.monotonic() >= self._session_deadline:
+            self._expire_locked()
 
     def _rpc_deadline(self, method: str) -> RequestTiming:
         """Cap one configured method timeout by the remaining session life."""
 
+        self._require_temporally_live_session()
         expires = self._session_expiry()
         wall_now = utc_now()
         monotonic_now = time.monotonic()
@@ -1685,7 +1730,7 @@ class NativeBridgeClient:
         remaining = (expires - wall_now).total_seconds()
         if not math.isfinite(remaining) or remaining <= 0:
             self._expire_locked()
-        session_deadline = monotonic_now + remaining
+        session_deadline = min(self._session_deadline, monotonic_now + remaining)
         method_deadline = monotonic_now + self._method_timeout_seconds(method)
         deadline = min(method_deadline, session_deadline)
         if deadline <= monotonic_now:
@@ -1734,6 +1779,7 @@ class NativeBridgeClient:
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "native session was invalidated",
             )
+        self._require_temporally_live_session()
         if self._session_has_expired(session_deadline=session_deadline):
             self._expire_locked()
         current = inspect_process(cast(int, self._session["pid"]))
@@ -2387,6 +2433,11 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
             )
         validate_pipe_name(context.pipe_name)
         try:
+            validate_native_session_temporal_bounds(
+                context.created_at,
+                context.created_at + MAX_NATIVE_SESSION_LIFETIME,
+                now=utc_now(),
+            )
             derive_challenge_response(
                 context.client_nonce,
                 context.challenge,
@@ -2394,7 +2445,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 session_id=context.session_id,
                 protocol_version=context.protocol_version,
             )
-        except (NativeProtocolError, TypeError):
+        except (NativeProtocolError, TypeError, ValueError):
             raise PipelineError(
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "native handshake preparation is invalid",
@@ -2408,10 +2459,31 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
         *,
         session_deadline: float | None = None,
     ) -> bool:
-        # A pre-session context has no bridge-issued expiry.  Its two bounded
-        # RPCs use their configured deadlines; a signed expiry begins only
-        # when a complete descriptor is constructed below.
-        return session_deadline is not None and time.monotonic() >= session_deadline
+        if session_deadline is not None and time.monotonic() >= session_deadline:
+            return True
+        return utc_now() >= self._context.created_at + MAX_NATIVE_SESSION_LIFETIME
+
+    def _require_temporally_live_context(self) -> None:
+        """Reject future/expired preparation before connecting or writing."""
+
+        wall_now = utc_now()
+        try:
+            validate_native_session_temporal_bounds(
+                self._context.created_at,
+                self._context.created_at + MAX_NATIVE_SESSION_LIFETIME,
+                now=wall_now,
+            )
+        except (CanonicalJsonError, TypeError, ValueError) as error:
+            self._invalidate_locked()
+            if wall_now >= self._context.created_at + MAX_NATIVE_SESSION_LIFETIME:
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_EXPIRED,
+                    "native handshake expired",
+                ) from error
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native handshake preparation is invalid",
+            ) from error
 
     def _rpc_deadline(self, method: str) -> RequestTiming:
         if method not in self._HANDSHAKE_METHODS:
@@ -2440,6 +2512,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "native handshake was invalidated",
             )
+        self._require_temporally_live_context()
         if self._session_has_expired(session_deadline=session_deadline):
             self._invalidate_locked()
             raise PipelineError(
@@ -2663,12 +2736,21 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                     "native pipe process was not bound",
                 )
             connected = self._connected_process
-            expires_at = self._context.created_at + timedelta(minutes=5)
-            if utc_now() >= expires_at:
-                raise PipelineError(
-                    ErrorCode.NATIVE_SESSION_EXPIRED,
-                    "native handshake expired before descriptor publication",
+            expires_at = self._context.created_at + MAX_NATIVE_SESSION_LIFETIME
+            publication_now = utc_now()
+            try:
+                validate_native_session_temporal_bounds(
+                    self._context.created_at,
+                    expires_at,
+                    now=publication_now,
                 )
+            except (CanonicalJsonError, TypeError, ValueError) as error:
+                raise PipelineError(
+                    ErrorCode.NATIVE_SESSION_EXPIRED
+                    if publication_now >= expires_at
+                    else ErrorCode.NATIVE_SESSION_INVALID,
+                    "native handshake expired before descriptor publication",
+                ) from error
             artifact = {
                 "schema_version": "liang-pingfa/native-bridge-session/v1",
                 "session_id": self._context.session_id,
@@ -2693,7 +2775,11 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 "current_document": handshake["current_document"],
                 "capabilities": handshake["capabilities"],
             }
-            completed = validate_native_contract("session", attach_integrity(artifact))
+            completed = validate_native_contract(
+                "session",
+                attach_integrity(artifact),
+                now=publication_now,
+            )
             # Re-run the full configured compatibility gate only after the
             # descriptor is complete; no incomplete artifact can reach the
             # strict persisted-session client.
