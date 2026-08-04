@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from hmac import compare_digest
 from importlib import resources
+import json
 import math
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ from .canonical import (
     CanonicalJsonError,
     canonical_json_bytes,
     canonical_sha256,
+    normalize_json_value,
     parse_utc,
     strict_json_loads,
     validate_json_canonical_form,
@@ -119,6 +121,10 @@ _SCHEMA_VERSIONS: dict[NativeArtifactKind, str] = {
 # full canonical/schema/semantic pass bounded below that deadline.
 MAX_NATIVE_GEOMETRY_ENTITIES: Final = 2_000
 MAX_NATIVE_GEOMETRY_SEGMENTS: Final = 10_000
+# This is a UTF-8 *byte* ceiling, not a JSON Schema ``maxLength`` ceiling.
+# Schemas retain their code-point bound as a secondary structural constraint,
+# while every raw/embedded geometry boundary calls the bounded helper below.
+MAX_NATIVE_GEOMETRY_JSON_BYTES: Final = 16 * 1024 * 1024
 # Retain the earlier internal spellings for callers outside this module while
 # making the contract-specific names authoritative.
 MAX_NATIVE_ENTITIES: Final = MAX_NATIVE_GEOMETRY_ENTITIES
@@ -126,6 +132,7 @@ MAX_NATIVE_SEGMENTS: Final = MAX_NATIVE_GEOMETRY_SEGMENTS
 MAX_TRANSLATION = 1_000_000.0
 PRIVATE_RECORD_CARDINALITY: Final = "explicit_private"
 _SCHEMA_CHECKPOINT_INTERVAL: Final = 64
+_GEOMETRY_UTF8_SCAN_CHARACTERS: Final = 16 * 1024
 _PRIVATE_PERSISTED_KINDS: Final[frozenset[NativeSchemaKind]] = frozenset(
     {
         "config",
@@ -140,6 +147,149 @@ _PRIVATE_PERSISTED_KINDS: Final[frozenset[NativeSchemaKind]] = frozenset(
         "verification",
     }
 )
+
+
+def require_geometry_json_utf8_bytes(
+    value: Any,
+    *,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> str:
+    """Return raw geometry JSON only when it fits the fixed UTF-8 byte cap.
+
+    Encoding a hostile ``str`` in one call would allocate a second object as
+    large as the input before a caller could reject it.  Scan bounded slices
+    instead and stop at the first byte beyond the fixed v1 limit.  Callers
+    receive only stable, redacted errors; raw geometry is never interpolated.
+    """
+
+    if not isinstance(value, str):
+        raise PipelineError(error, "native geometry JSON is invalid")
+    byte_count = 0
+    try:
+        for offset in range(0, len(value), _GEOMETRY_UTF8_SCAN_CHARACTERS):
+            _check_deadline(deadline_check, "geometry UTF-8 byte limit")
+            byte_count += len(
+                value[offset : offset + _GEOMETRY_UTF8_SCAN_CHARACTERS].encode(
+                    "utf-8",
+                    errors="strict",
+                )
+            )
+            if byte_count > MAX_NATIVE_GEOMETRY_JSON_BYTES:
+                raise PipelineError(
+                    error,
+                    "native geometry JSON exceeds the fixed UTF-8 byte limit",
+                )
+    except UnicodeEncodeError as exc:
+        raise PipelineError(error, "native geometry JSON is invalid") from exc
+    _check_deadline(deadline_check, "geometry UTF-8 byte limit")
+    return value
+
+
+def require_geometry_json_payload_bytes(
+    payload: bytes,
+    *,
+    error: ErrorCode,
+) -> bytes:
+    """Reject an oversized persisted raw geometry payload before UTF-8 decode.
+
+    A canonical private artifact may have exactly one terminal LF.  It is not
+    part of the geometry JSON byte budget; every other byte is counted before
+    decoding or normalizing the payload.
+    """
+
+    if not isinstance(payload, bytes):
+        raise PipelineError(error, "native geometry JSON is invalid")
+    raw_length = len(payload) - int(payload.endswith(b"\n"))
+    if raw_length > MAX_NATIVE_GEOMETRY_JSON_BYTES:
+        raise PipelineError(
+            error,
+            "native geometry JSON exceeds the fixed UTF-8 byte limit",
+        )
+    return payload
+
+
+def canonical_geometry_json_bytes(
+    geometry: Mapping[str, Any],
+    *,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> bytes:
+    """Serialize direct geometry once with a bounded UTF-8 output stream."""
+
+    try:
+        normalized = normalize_json_value(
+            geometry,
+            deadline_check=deadline_check,
+        )
+        encoder = json.JSONEncoder(
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        chunks: list[bytes] = []
+        byte_count = 0
+        for text_chunk in encoder.iterencode(normalized):
+            for offset in range(
+                0,
+                len(text_chunk),
+                _GEOMETRY_UTF8_SCAN_CHARACTERS,
+            ):
+                _check_deadline(
+                    deadline_check,
+                    "geometry canonical serialization",
+                )
+                chunk = text_chunk[
+                    offset : offset + _GEOMETRY_UTF8_SCAN_CHARACTERS
+                ].encode("utf-8", errors="strict")
+                byte_count += len(chunk)
+                if byte_count > MAX_NATIVE_GEOMETRY_JSON_BYTES:
+                    raise PipelineError(
+                        error,
+                        "native geometry JSON exceeds the fixed UTF-8 byte limit",
+                    )
+                chunks.append(chunk)
+        _check_deadline(deadline_check, "geometry canonical serialization")
+        return b"".join(chunks)
+    except (
+        CanonicalJsonError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise PipelineError(error, "native geometry JSON is invalid") from exc
+
+
+def geometry_text_matches_canonical_bytes(
+    text: str,
+    parsed: Mapping[str, Any],
+    *,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> bool:
+    """Compare canonical bytes without allocating a second full raw encoding."""
+
+    canonical = canonical_geometry_json_bytes(
+        parsed,
+        error=error,
+        deadline_check=deadline_check,
+    )
+    offset = 0
+    try:
+        for start in range(0, len(text), _GEOMETRY_UTF8_SCAN_CHARACTERS):
+            _check_deadline(deadline_check, "geometry canonical byte comparison")
+            chunk = text[start : start + _GEOMETRY_UTF8_SCAN_CHARACTERS].encode(
+                "utf-8",
+                errors="strict",
+            )
+            if canonical[offset : offset + len(chunk)] != chunk:
+                return False
+            offset += len(chunk)
+    except UnicodeEncodeError:
+        return False
+    _check_deadline(deadline_check, "geometry canonical byte comparison")
+    return offset == len(canonical)
 
 
 def _error_for(kind: NativeSchemaKind) -> ErrorCode:
@@ -1031,6 +1181,15 @@ def _preflight_geometry_limits(
                 ErrorCode.NATIVE_GEOMETRY_INVALID,
                 "native geometry exceeds the fixed segment limit",
             )
+    # Direct in-process callers do not have a raw JSON string to gate. Count
+    # their canonical representation only after the cheap cardinality guards
+    # above, but before schema/integrity work, so they cannot bypass the same
+    # raw export budget used by pipe/file boundaries.
+    canonical_geometry_json_bytes(
+        artifact,
+        error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+        deadline_check=deadline_check,
+    )
 
 
 def _validate_geometry_semantics(
@@ -1346,12 +1505,56 @@ def _validate_plan_semantics(artifact: dict[str, Any]) -> None:
             targets.add(target)
 
 
-def _embedded_geometry(text: str, *, error: ErrorCode) -> dict[str, Any]:
+def _preflight_embedded_geometry_json(
+    kind: NativeSchemaKind,
+    artifact: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
+    """Apply the raw byte cap before parsing embedded geometry JSON."""
+
+    if not isinstance(artifact, Mapping):
+        return
+    field = (
+        "preconditions_geometry_json"
+        if kind == "manifest"
+        else "geometry_json"
+        if kind == "console_export"
+        else None
+    )
+    if field is not None:
+        require_geometry_json_utf8_bytes(
+            artifact.get(field),
+            error=_error_for(kind),
+            deadline_check=deadline_check,
+        )
+
+
+def _embedded_geometry(
+    text: str,
+    *,
+    error: ErrorCode,
+    deadline_check: _DeadlineCheck | None = None,
+) -> dict[str, Any]:
+    text = require_geometry_json_utf8_bytes(
+        text,
+        error=error,
+        deadline_check=deadline_check,
+    )
     try:
-        parsed = strict_native_json(text)
-        if text.encode("utf-8") != canonical_json_bytes(parsed):
+        parsed = strict_native_json(text, deadline_check=deadline_check)
+        if not geometry_text_matches_canonical_bytes(
+            text,
+            parsed,
+            error=error,
+            deadline_check=deadline_check,
+        ):
             raise ValueError("embedded geometry is not canonical")
-        return validate_native_contract("geometry", parsed)
+        return validate_native_contract(
+            "geometry",
+            parsed,
+            deadline_check=deadline_check,
+        )
     except (CanonicalJsonError, RecursionError, ValueError, PipelineError) as exc:
         if isinstance(exc, PipelineError) and exc.code == ErrorCode.NATIVE_GEOMETRY_INVALID:
             raise
@@ -1526,6 +1729,12 @@ def validate_native_contract(
 
     if kind == "geometry":
         _preflight_geometry_limits(artifact, deadline_check=deadline_check)
+    elif kind in {"manifest", "console_export"}:
+        _preflight_embedded_geometry_json(
+            kind,
+            artifact,
+            deadline_check=deadline_check,
+        )
     normalized = _validate_common(kind, artifact, deadline_check=deadline_check)
     try:
         if kind == "config":
@@ -1607,7 +1816,7 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
     if config["geometry_limits"] != {
         "max_entities": MAX_NATIVE_GEOMETRY_ENTITIES,
         "max_segments": MAX_NATIVE_GEOMETRY_SEGMENTS,
-        "max_geometry_json_bytes": 16 * 1024 * 1024,
+        "max_geometry_json_bytes": MAX_NATIVE_GEOMETRY_JSON_BYTES,
         "max_inventory_json_bytes": 64 * 1024,
     }:
         raise ValueError("native geometry limits are not the fixed v1 bounds")
@@ -1782,7 +1991,21 @@ def load_native_artifact(kind: NativeArtifactKind, path: Path) -> dict[str, Any]
 
     def consume(payload: bytes) -> dict[str, Any]:
         try:
-            loaded = load_json_value(payload.decode("utf-8", errors="strict"))
+            if kind == "geometry":
+                require_geometry_json_payload_bytes(
+                    payload,
+                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+                )
+            text = payload.decode("utf-8", errors="strict")
+            if kind == "geometry":
+                # The payload preflight avoids allocating any decoded text for
+                # an oversized file; this preserves the same cap for a
+                # terminal-LF private artifact.
+                require_geometry_json_utf8_bytes(
+                    text[:-1] if text.endswith("\n") else text,
+                    error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+                )
+            loaded = load_json_value(text)
         except (CanonicalJsonError, RecursionError, UnicodeDecodeError) as error:
             raise PipelineError(
                 _ARTIFACT_ERRORS[kind],

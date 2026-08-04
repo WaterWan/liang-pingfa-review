@@ -20,6 +20,7 @@ from .canonical import (
 from .errors import ErrorCode, PipelineError
 from .native_audit import native_audit_binding, require_fresh_native_audit
 from .native_contracts import (
+    canonical_geometry_json_bytes,
     derive_native_target_id,
     derive_native_marker_text,
     geometry_adapter_binding,
@@ -392,7 +393,10 @@ def build_native_manifest(
             "fresh native session expired before manifest",
         )
     manifest_expires = min(current + timedelta(minutes=5), session_expires)
-    raw_geometry = canonical_json_bytes(checked_export).decode("utf-8")
+    raw_geometry = canonical_geometry_json_bytes(
+        checked_export,
+        error=ErrorCode.NATIVE_MANIFEST_INVALID,
+    ).decode("utf-8")
     artifact = {
         "schema_version": "liang-pingfa/native-edit-manifest/v1",
         "manifest_id": "native-manifest-" + secrets.token_hex(16),

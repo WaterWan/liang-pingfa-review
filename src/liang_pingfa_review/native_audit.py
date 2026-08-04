@@ -20,6 +20,7 @@ from .canonical import acquire_source_lease, attach_integrity, format_utc, utc_n
 from .errors import ErrorCode, PipelineError
 from .native_bridge import NativeBridgeClient
 from .native_contracts import (
+    canonical_geometry_json_bytes,
     derive_native_target_id,
     geometry_adapter_binding,
     geometry_document_binding,
@@ -101,6 +102,13 @@ def build_native_audit(
 ) -> dict[str, Any]:
     """Build a 15-minute redacted native audit from one exact raw export."""
 
+    # Direct callers hand us a decoded mapping rather than bridge text. Count
+    # its sole canonical raw representation before validating/copying it so
+    # this entry point cannot bypass the geometry UTF-8 byte ceiling.
+    canonical_geometry_json_bytes(
+        export,
+        error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+    )
     checked_config = validate_native_contract("config", config)
     checked_export, checked_session = require_geometry_export_matches_session(
         export,

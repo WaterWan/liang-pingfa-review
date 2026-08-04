@@ -11,7 +11,7 @@
     "nonce": {"$ref": "#/$defs/nonce"},
     "final_revision_fingerprint": {"$ref": "#/$defs/sha256"},
     "final_document_binding": {"$ref": "#/$defs/finalDocumentBinding"},
-    "geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216},
+    "geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216, "description": "Secondary Unicode code-point bound; raw embedded geometry is separately limited to 16777216 UTF-8 bytes before parsing."},
     "geometry_sha256": {"$ref": "#/$defs/sha256"},
     "integrity": {"$ref": "#/$defs/integrity"}
   },
