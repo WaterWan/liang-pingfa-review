@@ -27,12 +27,17 @@ public static class NativeBridgeProtocolV1
     /// <summary>Outer framed limit for a geometry response carrying escaped JSON.</summary>
     public const int MaxGeometryResponseBytes = 32 * 1024 * 1024;
     /// <summary>
-    /// Maximum unescaped canonical geometry JSON inside a response or
-    /// manifest, measured in UTF-8 encoded bytes (not UTF-16 characters or
-    /// JSON Schema code points).
+    /// Maximum exact opaque geometry JSON inside a response or manifest,
+    /// measured in UTF-8 encoded bytes (not UTF-16 characters or JSON Schema
+    /// code points). Bound the outer carrier before NFC, then parse its inner
+    /// JSON separately as canonical NFC.
     /// </summary>
     public const int MaxGeometryJsonBytes = 16 * 1024 * 1024;
-    /// <summary>Maximum canonical JSON in the fixed two-digest inventory result.</summary>
+    /// <summary>
+    /// Maximum UTF-8 bytes in the exact opaque <c>inventory_json</c> carrier.
+    /// Bound the outer carrier before NFC; parse and validate its inner JSON
+    /// separately, where strings remain canonical NFC.
+    /// </summary>
     public const int MaxInventoryJsonBytes = 64 * 1024;
     /// <summary>v1 semantic capacity proven below the fixed 60-second RPC deadline.</summary>
     public const int MaxNativeGeometryEntities = 2_000;
@@ -176,8 +181,9 @@ public sealed record NativeManifestExecutionResultV1(
 
 /// <summary>
 /// Separate post-save envelope that binds the embedded geometry revision.
-/// <paramref name="CanonicalGeometryJson"/> is limited by
-/// <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> UTF-8 bytes.
+/// <paramref name="CanonicalGeometryJson"/> is an exact opaque outer carrier,
+/// limited by <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> UTF-8
+/// bytes before outer NFC. Its separately parsed inner JSON is canonical NFC.
 /// </summary>
 public sealed record NativeConsoleExportV1(
     string RunId,
@@ -327,17 +333,19 @@ public sealed record NativeCurrentDocumentResultV1(
     [property: JsonPropertyName("current_document")] NativeCurrentDocumentV1 CurrentDocument);
 
 /// <summary>
-/// Exact inventory result.  The bridge intentionally returns the bounded
-/// canonical inventory as <c>inventory_json</c>, not a geometry export.
+/// Exact inventory result. The bridge returns an exact opaque, byte-bounded
+/// <c>inventory_json</c> carrier, not a geometry export. Do not NFC-normalize
+/// the outer carrier; parse its inner JSON separately as canonical NFC.
 /// </summary>
 public sealed record NativeInventoryExportV1(
     [property: JsonPropertyName("kind")] NativeWireResultKindV1 Kind,
     [property: JsonPropertyName("inventory_json")] string InventoryJson);
 
 /// <summary>
-/// Exact bounded geometry result, whose private canonical JSON must not
-/// exceed <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> UTF-8
-/// bytes before an adapter parses or normalizes it.
+/// Exact bounded geometry result. <c>geometry_json</c> is an opaque outer
+/// carrier whose exact UTF-8 bytes must not exceed
+/// <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> before any outer
+/// NFC. Parse its inner JSON separately as canonical NFC.
 /// </summary>
 public sealed record NativeExactGeometryExportV1(
     [property: JsonPropertyName("kind")] NativeWireResultKindV1 Kind,

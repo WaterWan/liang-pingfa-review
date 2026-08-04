@@ -41,3 +41,12 @@ adapters must enforce that byte cap before parsing or normalizing every raw or
 embedded geometry field. Inventory remains
 separate and is capped by `MaxInventoryJsonBytes` and
 `MaxInventoryResponseBytes`.
+
+At the exact schema paths `result.geometry_json`, `result.inventory_json`,
+manifest `preconditions_geometry_json`, and console-export `geometry_json`,
+the serialized JSON carrier is opaque outer data: bind/hash its exact
+codepoints and UTF-8 bytes, and do **not** NFC-normalize the whole carrier.
+After its byte cap passes, parse the inner JSON independently with the same
+depth, duplicate-key, per-string NFC, schema, semantic, and deadline rules.
+This preserves v1 hashes for previously valid canonical inner JSON; no
+artifact version migration is required.
