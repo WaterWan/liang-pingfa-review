@@ -33,6 +33,7 @@ from liang_pingfa_review.native_bridge import (
     NativeBridgeClient,
     NativeBridgeHandshakeClient,
     NativeBridgeHandshakeContext,
+    NativeSessionClockReading,
     NativePipeClosed,
     ProcessIdentity,
     WindowsNamedPipe,
@@ -167,7 +168,7 @@ class _GeneratedBlockingPipe(_GeneratedReusablePipe):
 class _GeneratedClock:
     """Deterministic paired wall/monotonic clock for session-bound RPC tests."""
 
-    def __init__(self, current: datetime, *, monotonic: float = 100.0) -> None:
+    def __init__(self, current: datetime, *, monotonic: float = 1_000.0) -> None:
         self.current = current
         self.value = monotonic
 
@@ -176,6 +177,13 @@ class _GeneratedClock:
 
     def monotonic(self) -> float:
         return self.value
+
+    def session_clock(self) -> NativeSessionClockReading:
+        return NativeSessionClockReading(
+            clock=native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK,
+            boot_id="a" * 32,
+            uptime_milliseconds=int(self.value * 1000),
+        )
 
     def advance(self, seconds: float) -> None:
         self.current += timedelta(seconds=seconds)
@@ -1048,6 +1056,14 @@ class NativeProtocolTests(unittest.TestCase):
         descriptor["expires_at"] = format_utc(
             clock.current + timedelta(seconds=seconds)
         )
+        expires_milliseconds = int((clock.value + seconds) * 1000)
+        descriptor["monotonic_clock"] = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK
+        descriptor["monotonic_boot_id"] = "a" * 32
+        descriptor["monotonic_issued"] = str(
+            expires_milliseconds
+            - native_contracts_module.MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        )
+        descriptor["monotonic_expires"] = str(expires_milliseconds)
         return attach_integrity(descriptor)
 
     def _clocked_client(
@@ -1080,6 +1096,7 @@ class NativeProtocolTests(unittest.TestCase):
             descriptor,
             config=configured or config(),
             transport=pipe,
+            session_clock=clock.session_clock,
         )
 
     def test_rpc_deadline_is_capped_by_session_and_expires_during_io(self) -> None:
@@ -1740,6 +1757,98 @@ class NativeProtocolTests(unittest.TestCase):
         self.assertTrue(client.invalid)
         self.assertTrue(pipe.closed)
 
+    def test_persisted_uptime_rejects_reset_domain_and_exact_expiry(self) -> None:
+        """Descriptor lifetime is bound to a boot domain, not a local origin."""
+
+        def client_for(
+            clock: _GeneratedClock,
+            descriptor: dict[str, Any],
+        ) -> tuple[NativeBridgeClient, _GeneratedReusablePipe]:
+            pipe = _GeneratedClockedPipe(
+                health_response,
+                clock=clock,
+                server_pid=descriptor["pid"],
+            )
+            return (
+                self._clocked_client(
+                    clock=clock,
+                    descriptor=descriptor,
+                    pipe=pipe,
+                ),
+                pipe,
+            )
+
+        just_before_clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        just_before = self._expiring_session(just_before_clock, 1)
+        just_before_client, just_before_pipe = client_for(
+            just_before_clock,
+            just_before,
+        )
+        self.assertEqual(just_before_client.health()["kind"], "health")
+        frames_before_expiry = just_before_pipe.frame_count
+        just_before_clock.advance(1)
+        with self.assertRaises(PipelineError) as raised:
+            just_before_client.health()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertEqual(just_before_pipe.frame_count, frames_before_expiry)
+
+        exact_clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        exact = self._expiring_session(exact_clock, 0)
+        # Keep UTC live so this case proves the exact persisted uptime
+        # boundary, rather than merely the pre-existing UTC expiry gate.
+        exact["expires_at"] = format_utc(
+            exact_clock.current + timedelta(seconds=60)
+        )
+        exact = attach_integrity(exact)
+        exact_pipe = _GeneratedClockedPipe(
+            health_response,
+            clock=exact_clock,
+            server_pid=exact["pid"],
+        )
+        with self.assertRaises(PipelineError) as raised:
+            self._clocked_client(
+                clock=exact_clock,
+                descriptor=exact,
+                pipe=exact_pipe,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertEqual(exact_pipe.frame_count, 0)
+
+        reset_clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        reset = self._expiring_session(reset_clock, 60)
+        reset_clock.value -= 301
+        reset_pipe = _GeneratedClockedPipe(
+            health_response,
+            clock=reset_clock,
+            server_pid=reset["pid"],
+        )
+        with self.assertRaises(PipelineError) as raised:
+            self._clocked_client(
+                clock=reset_clock,
+                descriptor=reset,
+                pipe=reset_pipe,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+        self.assertEqual(reset_pipe.frame_count, 0)
+
+        domain_clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        domain = self._expiring_session(domain_clock, 60)
+        domain["monotonic_boot_id"] = "b" * 32
+        domain = attach_integrity(domain)
+        domain_pipe = _GeneratedClockedPipe(
+            health_response,
+            clock=domain_clock,
+            server_pid=domain["pid"],
+        )
+        with self.assertRaises(PipelineError) as raised:
+            self._clocked_client(
+                clock=domain_clock,
+                descriptor=domain,
+                pipe=domain_pipe,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+        self.assertEqual(domain_pipe.frame_count, 0)
+
     def test_long_method_timeout_cannot_extend_session_deadline(self) -> None:
         clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
         descriptor = self._expiring_session(clock, 1)
@@ -2084,7 +2193,34 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
             challenge=descriptor["challenge"],
             mode=mode,
             created_at=created_at or datetime.now(UTC),
+            monotonic_clock=descriptor["monotonic_clock"],
+            monotonic_boot_id=descriptor["monotonic_boot_id"],
+            monotonic_issued=descriptor["monotonic_issued"],
+            monotonic_expires=descriptor["monotonic_expires"],
         )
+
+    @staticmethod
+    def _clocked_descriptor(
+        clock: _GeneratedClock,
+        *,
+        created_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Build a signed private descriptor from one fake boot clock."""
+
+        created = created_at if created_at is not None else clock.current
+        issued = int(clock.value * 1000)
+        descriptor = session()
+        descriptor["created_at"] = format_utc(created)
+        descriptor["expires_at"] = format_utc(
+            created + native_contracts_module.MAX_NATIVE_SESSION_LIFETIME
+        )
+        descriptor["monotonic_clock"] = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK
+        descriptor["monotonic_boot_id"] = "a" * 32
+        descriptor["monotonic_issued"] = str(issued)
+        descriptor["monotonic_expires"] = str(
+            issued + native_contracts_module.MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        )
+        return attach_integrity(descriptor)
 
     @staticmethod
     def _bridge_result(
@@ -2145,6 +2281,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         server_pid: int | None = None,
         created_at: datetime | None = None,
         mode: str = "read_only",
+        clock: _GeneratedClock | None = None,
         session_capabilities: list[str] | None = None,
         omit_bridge_nonce: bool = False,
         invalid_challenge: bool = False,
@@ -2168,9 +2305,20 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         )
         return (
             NativeBridgeHandshakeClient(
-                self._context(selected, created_at=created_at, mode=mode),
+                self._context(
+                    selected,
+                    created_at=(
+                        created_at
+                        if created_at is not None
+                        else (clock.current if clock is not None else None)
+                    ),
+                    mode=mode,
+                ),
                 config=config(),
                 transport=pipe,
+                session_clock=(
+                    clock.session_clock if clock is not None else None
+                ),
             ),
             pipe,
             methods,
@@ -2191,6 +2339,217 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         self.assertEqual(validate_native_contract("session", completed), completed)
         self.assertFalse(client.invalid)
         self.assertFalse(pipe.closed)
+
+    def test_prepare_captures_one_boot_uptime_binding_before_setup_work(self) -> None:
+        """Preparation owns the sole issuance tick, before any slow setup."""
+
+        created = datetime(2030, 1, 1, tzinfo=UTC)
+        reading = NativeSessionClockReading(
+            clock=native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK,
+            boot_id="a" * 32,
+            uptime_milliseconds=1_000_000,
+        )
+        descriptor = session()
+        process = self._process(descriptor)
+        events: list[str] = []
+        contexts: list[NativeBridgeHandshakeContext] = []
+
+        class CapturingHandshake:
+            def __init__(
+                self,
+                context: NativeBridgeHandshakeContext,
+                *,
+                config: dict[str, Any],
+                session_clock: Any,
+            ) -> None:
+                self.context = context
+                contexts.append(context)
+                self.config = config
+                self.session_clock = session_clock
+                events.append("client")
+
+            def complete_session_descriptor(self) -> dict[str, Any]:
+                events.append("complete")
+                return {"generated": True}
+
+            def close(self) -> None:
+                events.append("close")
+
+        def clock_reader() -> NativeSessionClockReading:
+            events.append("clock")
+            return reading
+
+        with (
+            mock.patch("liang_pingfa_review.native_bridge._require_windows"),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.utc_now",
+                side_effect=lambda: (events.append("utc") or created),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.validate_pipe_name",
+                side_effect=lambda _value: events.append("pipe"),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.validate_native_contract",
+                side_effect=lambda _kind, value: (
+                    events.append("config") or value
+                ),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.validate_native_installation",
+                side_effect=lambda _config: events.append("installation"),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.inspect_process",
+                side_effect=lambda _pid: (events.append("process") or process),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.NativeBridgeHandshakeClient",
+                CapturingHandshake,
+            ),
+        ):
+            result = prepare_native_session(
+                pid=descriptor["pid"],
+                pipe_name=descriptor["pipe_name"],
+                config=config(),
+                session_clock=clock_reader,
+            )
+        self.assertEqual(result, {"generated": True})
+        self.assertEqual(events[:4], ["utc", "clock", "pipe", "config"])
+        self.assertEqual(len(contexts), 1)
+        context = contexts[0]
+        self.assertEqual(context.created_at, created)
+        self.assertEqual(context.monotonic_clock, reading.clock)
+        self.assertEqual(context.monotonic_boot_id, reading.boot_id)
+        self.assertEqual(context.monotonic_issued, "1000000")
+        self.assertEqual(context.monotonic_expires, "1300000")
+
+    def test_preparation_uptime_budget_survives_delay_and_wall_rollback(self) -> None:
+        """A 299-second delay leaves at most one second in a new client."""
+
+        origin = datetime(2030, 1, 1, tzinfo=UTC)
+        clock = _GeneratedClock(origin)
+        descriptor = self._clocked_descriptor(clock)
+        context = self._context(descriptor, created_at=origin)
+        # Preparation was long-running, then the wall clock rolled back while
+        # staying inside the strict UTC interval. The uptime clock did not.
+        clock.advance(299)
+        clock.current -= timedelta(seconds=298)
+        methods: list[str] = []
+
+        def handshake_response(request: dict[str, Any]) -> dict[str, Any]:
+            methods.append(request["method"])
+            return self._bridge_result(request, descriptor)
+
+        handshake_pipe = _GeneratedReusablePipe(
+            handshake_response,
+            server_pid=descriptor["pid"],
+        )
+        process = self._process(descriptor)
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch(
+                    "liang_pingfa_review.native_bridge.utc_now",
+                    side_effect=clock.utc_now,
+                )
+            )
+            stack.enter_context(
+                mock.patch(
+                    "liang_pingfa_review.native_bridge.time.monotonic",
+                    side_effect=clock.monotonic,
+                )
+            )
+            stack.enter_context(
+                mock.patch(
+                    "liang_pingfa_review.native_bridge.inspect_process",
+                    return_value=process,
+                )
+            )
+            handshake = NativeBridgeHandshakeClient(
+                context,
+                config=config(),
+                transport=handshake_pipe,
+                session_clock=clock.session_clock,
+            )
+            completed = handshake.complete_session_descriptor()
+            self.assertEqual(methods, ["health", "get_session"])
+            self.assertEqual(
+                completed["monotonic_issued"],
+                descriptor["monotonic_issued"],
+            )
+            self.assertEqual(
+                completed["monotonic_expires"],
+                descriptor["monotonic_expires"],
+            )
+            post_handshake_pipe = _GeneratedReusablePipe(
+                health_response,
+                server_pid=descriptor["pid"],
+            )
+            completed_client = NativeBridgeClient(
+                completed,
+                config=config(),
+                transport=post_handshake_pipe,
+                session_clock=clock.session_clock,
+            )
+            self.assertLessEqual(
+                completed_client._session_deadline - clock.value,
+                1.0,
+            )
+            clock.advance(1)
+            with self.assertRaises(PipelineError) as raised:
+                completed_client.health()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertEqual(post_handshake_pipe.frame_count, 0)
+
+    def test_handshake_after_original_uptime_expiry_publishes_no_descriptor(self) -> None:
+        """Completion never mints a fresh five-minute deadline after session RPC."""
+
+        clock = _GeneratedClock(datetime.now(UTC))
+        descriptor = self._clocked_descriptor(clock)
+        client, pipe, methods, _selected = self._client(
+            descriptor=descriptor,
+            clock=clock,
+        )
+        original_get_session = client.get_session
+
+        def delayed_get_session() -> dict[str, Any]:
+            result = original_get_session()
+            clock.advance(301)
+            return result
+
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process(descriptor),
+        ), mock.patch.object(client, "get_session", side_effect=delayed_get_session):
+            with self.assertRaises(PipelineError) as raised:
+                client.complete_session_descriptor()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertEqual(methods, ["health", "get_session"])
+        self.assertEqual(pipe.frame_count, 2)
+        self.assertTrue(client.invalid)
+
+    def test_prehandshake_expiry_writes_no_pipe_frame(self) -> None:
+        """The original uptime boundary is checked before health can write."""
+
+        clock = _GeneratedClock(datetime.now(UTC))
+        descriptor = self._clocked_descriptor(clock)
+        client, pipe, methods, _selected = self._client(
+            descriptor=descriptor,
+            clock=clock,
+        )
+        clock.advance(301)
+        # Keep strict UTC live to prove that the pre-frame rejection comes
+        # from the original same-boot deadline rather than wall expiry.
+        clock.current -= timedelta(seconds=300)
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process(descriptor),
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                client.health()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertEqual(methods, [])
+        self.assertEqual(pipe.frame_count, 0)
 
     def test_reordered_or_early_methods_write_no_frame(self) -> None:
         for label, invoke in (
@@ -2706,6 +3065,7 @@ class NativeSessionDescriptorTests(unittest.TestCase):
                 ComponentDaclAce("allow", "S-1-5-18", 0x10000000, False),
             ),
         )
+        descriptor = session()
         with ExitStack() as stack:
             for patcher in self._writer_patches(backend):
                 stack.enter_context(patcher)
@@ -2716,7 +3076,7 @@ class NativeSessionDescriptorTests(unittest.TestCase):
             )
             result = write_private_native_session_descriptor(
                 self.path,
-                session(),
+                descriptor,
                 backend=backend,
                 acl_reader=lambda _opened: dacl,
                 trusted_parent_sids=self._trusted,
@@ -2730,7 +3090,7 @@ class NativeSessionDescriptorTests(unittest.TestCase):
         self.assertFalse(backend.created.delete_requested)
         self.assertEqual(
             backend.created.payload,
-            canonical_json_bytes(session()) + b"\n",
+            canonical_json_bytes(descriptor) + b"\n",
         )
         self.assertNotIn(session()["pipe_name"], str(result))
         self.assertNotIn(session()["client_nonce"], str(result))
@@ -2791,6 +3151,31 @@ class NativeSessionDescriptorTests(unittest.TestCase):
                 self.assertTrue(backend.created.closed)
                 self.assertNotIn(session()["pipe_name"], str(raised.exception))
                 self.assertNotIn(session()["bridge_nonce"], str(raised.exception))
+
+    def test_descriptor_publication_rejects_original_uptime_expiry(self) -> None:
+        """Private file creation cannot publish a descriptor after expiry."""
+
+        backend = _GeneratedSessionBackend(self.parent)
+        descriptor = session()
+        descriptor["monotonic_clock"] = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK
+        descriptor["monotonic_boot_id"] = "a" * 32
+        descriptor["monotonic_issued"] = "1000000"
+        descriptor["monotonic_expires"] = "1300000"
+        descriptor = attach_integrity(descriptor)
+        expired_clock = _GeneratedClock(datetime.now(UTC), monotonic=1_300.0)
+        with ExitStack() as stack:
+            for patcher in self._writer_patches(backend):
+                stack.enter_context(patcher)
+            with self.assertRaises(PipelineError) as raised:
+                write_private_native_session_descriptor(
+                    self.path,
+                    descriptor,
+                    backend=backend,
+                    trusted_parent_sids=self._trusted,
+                    session_clock=expired_clock.session_clock,
+                )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertIsNone(backend.created)
 
     def test_post_rename_cleanup_handles_binding_parse_operation_and_replacement_failures(self) -> None:
         descriptor = canonical_json_bytes(session()) + b"\n"
@@ -2892,6 +3277,53 @@ class NativeSessionDescriptorTests(unittest.TestCase):
                     self.fail("future descriptor reached a consumer")
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
         self.assertTrue(opened.renamed)
+        self.assertTrue(opened.delete_requested)
+        self.assertTrue(opened.closed)
+
+    def test_claimed_descriptor_in_another_process_keeps_original_uptime_remaining(self) -> None:
+        """A same-boot consumer receives remaining time, never a new window."""
+
+        issuer_clock = _GeneratedClock(datetime.now(UTC), monotonic=1_000.0)
+        consumer_clock = _GeneratedClock(datetime.now(UTC), monotonic=1_299.0)
+        descriptor = session()
+        descriptor["monotonic_clock"] = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK
+        descriptor["monotonic_boot_id"] = "a" * 32
+        descriptor["monotonic_issued"] = "1000000"
+        descriptor["monotonic_expires"] = "1300000"
+        descriptor = attach_integrity(descriptor)
+        self.assertEqual(
+            issuer_clock.session_clock().boot_id,
+            consumer_clock.session_clock().boot_id,
+        )
+        opened = _GeneratedOwnedSecretFile(
+            self.path,
+            payload=canonical_json_bytes(descriptor) + b"\n",
+        )
+        backend = _GeneratedSessionBackend(self.parent, existing=opened)
+        with ExitStack() as stack:
+            for patcher in self._consume_patches(backend):
+                stack.enter_context(patcher)
+            with consume_native_session(
+                self.path,
+                session_clock=consumer_clock.session_clock,
+            ) as consumed:
+                with mock.patch(
+                    "liang_pingfa_review.native_bridge.time.monotonic",
+                    side_effect=consumer_clock.monotonic,
+                ):
+                    client = NativeBridgeClient(
+                        consumed,
+                        config=config(),
+                        transport=_GeneratedReusablePipe(
+                            health_response,
+                            server_pid=consumed["pid"],
+                        ),
+                        session_clock=consumer_clock.session_clock,
+                    )
+                    self.assertLessEqual(
+                        client._session_deadline - consumer_clock.value,
+                        1.0,
+                    )
         self.assertTrue(opened.delete_requested)
         self.assertTrue(opened.closed)
 

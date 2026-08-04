@@ -512,6 +512,86 @@ class NativeContractTests(unittest.TestCase):
                         validate_native_contract("session", candidate)
                     self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
 
+    def test_session_monotonic_binding_is_strict_fixed_and_private(self) -> None:
+        """A re-signed descriptor cannot alter its one boot-scoped deadline."""
+
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+        schema = schema_for_native("session")
+        for field in (
+            "monotonic_clock",
+            "monotonic_boot_id",
+            "monotonic_issued",
+            "monotonic_expires",
+        ):
+            self.assertIn(field, schema["required"])
+            self.assertIn(field, schema["properties"])
+        protocol_dtos = (
+            Path(__file__).parents[1]
+            / "native-bridge-contracts"
+            / "ProtocolV1.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("MaxSessionLifetimeMilliseconds", protocol_dtos)
+        self.assertIn("SessionMonotonicClock", protocol_dtos)
+        self.assertIn("NativePrivateSessionLifetimeV1", protocol_dtos)
+        self.assertIn("NativePrivateSessionLifetimeV1 PrivateLifetime", protocol_dtos)
+
+        def signed(
+            *,
+            clock: str = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK,
+            boot_id: str = "a" * 32,
+            issued: str = "1000000",
+            expires: str = "1300000",
+        ) -> dict:
+            candidate = session()
+            candidate["created_at"] = canonical_module.format_utc(now)
+            candidate["expires_at"] = canonical_module.format_utc(
+                now + MAX_NATIVE_SESSION_LIFETIME
+            )
+            candidate["monotonic_clock"] = clock
+            candidate["monotonic_boot_id"] = boot_id
+            candidate["monotonic_issued"] = issued
+            candidate["monotonic_expires"] = expires
+            return attach_integrity(candidate)
+
+        maximum_issued = (
+            native_contracts_module.MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
+            - native_contracts_module.MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        )
+        valid = (
+            signed(),
+            signed(
+                issued=str(maximum_issued),
+                expires=str(
+                    native_contracts_module.MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
+                ),
+            ),
+        )
+        invalid = (
+            ("clock-domain", signed(clock="process-monotonic-ns/v1")),
+            ("boot-id", signed(boot_id="A" * 32)),
+            ("leading-zero", signed(issued="01000000")),
+            ("reversed", signed(issued="1300000", expires="1000000")),
+            ("short", signed(expires="1299999")),
+            ("maximum-plus-epsilon", signed(expires="1300001")),
+            (
+                "wrap",
+                signed(
+                    issued=str(maximum_issued + 1),
+                    expires=str(
+                        native_contracts_module.MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
+                    ),
+                ),
+            ),
+        )
+        with mock.patch.object(native_contracts_module, "utc_now", return_value=now):
+            for candidate in valid:
+                with self.subTest(case="valid"):
+                    self.assertEqual(validate_native_contract("session", candidate), candidate)
+            for label, candidate in invalid:
+                with self.subTest(case=label), self.assertRaises(PipelineError) as raised:
+                    validate_native_contract("session", candidate)
+                self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+
     def test_session_challenge_response_binds_the_full_versioned_transcript(self) -> None:
         """Re-signed descriptors still cannot alter or replay the handshake."""
 
@@ -794,10 +874,19 @@ class NativeContractTests(unittest.TestCase):
 
     def test_audit_is_redacted_and_report_never_leaks_geometry(self) -> None:
         raw = geometry([entity("ABCD", text="secret-overlay", position=(42.0, 99.0, 0.0))])
-        audit = build_native_audit(raw, session(), config())
+        descriptor = session()
+        audit = build_native_audit(raw, descriptor, config())
         serialized = json.dumps(audit, ensure_ascii=False)
         report = render_native_audit_report(audit)
-        for forbidden in ("secret-overlay", "TEMP"):
+        for forbidden in (
+            "secret-overlay",
+            "TEMP",
+            "monotonic_clock",
+            "monotonic_boot_id",
+            "monotonic_issued",
+            "monotonic_expires",
+            descriptor["monotonic_boot_id"],
+        ):
             self.assertNotIn(forbidden, serialized)
             self.assertNotIn(forbidden, report)
 
@@ -1178,6 +1267,11 @@ var host = new NativeWireHostV1(
     NativeWireHostModeV1.full_host);
 var document = new NativeCurrentDocumentV1(true, sha, sha, sha, 128, "AC1032", sha, sha);
 var capabilities = new[] { "read.inventory/v1", "read.exact_geometry/v1" };
+var privateLifetime = new NativePrivateSessionLifetimeV1(
+    NativeBridgeProtocolV1.SessionMonotonicClock,
+    new string('d', 32),
+    "1000000",
+    "1300000");
 var responses = new object[]
 {
     new NativeHealthResponseV1(
@@ -1233,7 +1327,9 @@ Console.WriteLine(JsonSerializer.Serialize(new
         [nameof(NativeCurrentDocumentV1)] = Names<NativeCurrentDocumentV1>(),
         [nameof(NativeSessionHandshakeParametersV1)] = Names<NativeSessionHandshakeParametersV1>(),
         [nameof(NativeDocumentBoundParametersV1)] = Names<NativeDocumentBoundParametersV1>(),
+        [nameof(NativePrivateSessionLifetimeV1)] = Names<NativePrivateSessionLifetimeV1>(),
     },
+    private_session_lifetime = privateLifetime,
     responses,
 }));
 
@@ -1330,10 +1426,25 @@ static string[] Names<T>() =>
                 "session_id",
                 "expected_document_revision",
             },
+            "NativePrivateSessionLifetimeV1": {
+                "monotonic_clock",
+                "monotonic_boot_id",
+                "monotonic_issued",
+                "monotonic_expires",
+            },
         }
         self.assertEqual(
             {name: set(properties) for name, properties in payload["shapes"].items()},
             expected_shapes,
+        )
+        self.assertEqual(
+            payload["private_session_lifetime"],
+            {
+                "monotonic_clock": native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK,
+                "monotonic_boot_id": "d" * 32,
+                "monotonic_issued": "1000000",
+                "monotonic_expires": "1300000",
+            },
         )
         for response in payload["responses"]:
             with self.subTest(kind=response.get("result", {}).get("kind", "failure")):
