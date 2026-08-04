@@ -13,6 +13,7 @@ from unittest import mock
 
 from liang_pingfa_review import cli
 from liang_pingfa_review.cli import build_parser, main
+from liang_pingfa_review.errors import ErrorCode, PipelineError
 from tests.support.synthetic_native import config, session
 
 
@@ -101,6 +102,37 @@ class NativeCliTests(unittest.TestCase):
         prepare.assert_called_once()
         writer.assert_called_once_with(arguments.session_out, descriptor)
         self.assertEqual(emit.call_args.args[0], {"status": "ok", "command": "native-session prepare"})
+
+    def test_native_session_prepare_does_not_report_success_when_publication_fails(self) -> None:
+        arguments = SimpleNamespace(
+            native_config=Path("generated-config.json"),
+            pid=1234,
+            pipe=chr(92) * 2
+            + "."
+            + chr(92)
+            + "pipe"
+            + chr(92)
+            + "liang-pingfa-native-a1b2c3d4e5f6g7h8",
+            session_out=Path("generated-private-session.json"),
+        )
+        publication_failure = PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "generated descriptor publication failed",
+        )
+        with (
+            mock.patch.object(cli, "prepare_native_session", return_value=session()),
+            mock.patch.object(cli, "load_native_config", return_value=config()),
+            mock.patch.object(
+                cli,
+                "write_private_native_session_descriptor",
+                side_effect=publication_failure,
+            ),
+            mock.patch.object(cli, "_emit") as emit,
+            self.assertRaises(PipelineError) as raised,
+        ):
+            cli._native_session_prepare(arguments)
+        self.assertIs(raised.exception, publication_failure)
+        emit.assert_not_called()
 
     def test_native_audit_and_plan_mark_only_machine_json_private(self) -> None:
         """CLI routes native pairs to the mixed retained-handle publisher."""

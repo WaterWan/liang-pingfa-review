@@ -14,6 +14,7 @@ import sys
 import tempfile
 from time import perf_counter
 import unittest
+import unicodedata
 from collections.abc import Callable
 from unittest import mock
 
@@ -27,10 +28,13 @@ from liang_pingfa_review.canonical import attach_integrity, canonical_json_bytes
 from liang_pingfa_review.errors import ErrorCode, PipelineError
 from liang_pingfa_review.native_audit import build_native_audit
 from liang_pingfa_review.native_contracts import (
+    canonical_geometry_json_bytes,
     MAX_NATIVE_GEOMETRY_ENTITIES,
+    MAX_NATIVE_GEOMETRY_JSON_BYTES,
     MAX_NATIVE_GEOMETRY_SEGMENTS,
     bits_from_float,
     load_native_artifact,
+    require_geometry_json_utf8_bytes,
     schema_for_native,
     translate_binary64_bits,
     translated_geometry_bits,
@@ -363,7 +367,7 @@ class NativeContractTests(unittest.TestCase):
             {
                 "max_entities": MAX_NATIVE_GEOMETRY_ENTITIES,
                 "max_segments": MAX_NATIVE_GEOMETRY_SEGMENTS,
-                "max_geometry_json_bytes": 16 * 1024 * 1024,
+                "max_geometry_json_bytes": MAX_NATIVE_GEOMETRY_JSON_BYTES,
                 "max_inventory_json_bytes": 64 * 1024,
             },
         )
@@ -388,6 +392,7 @@ class NativeContractTests(unittest.TestCase):
             "MaxInventoryJsonBytes = 64 * 1024",
         ):
             self.assertIn(declaration, protocol_dtos)
+        self.assertIn("measured in UTF-8 encoded bytes", protocol_dtos)
 
         too_many_segments = geometry([entity("10", native_type="LWPOLYLINE")])
         too_many_segments["entities"][0]["segments"] = [
@@ -1236,6 +1241,136 @@ static string[] Names<T>() =>
                     validate_native_contract("response", response),
                     response,
                 )
+
+
+class NativeGeometryUtf8ByteLimitTests(unittest.TestCase):
+    """Prove the 16 MiB geometry limit counts UTF-8 bytes, not characters."""
+
+    @staticmethod
+    def _require(value: str) -> str:
+        return require_geometry_json_utf8_bytes(
+            value,
+            error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+        )
+
+    def test_ascii_exactly_at_and_over_the_utf8_byte_cap(self) -> None:
+        at_limit = "a" * MAX_NATIVE_GEOMETRY_JSON_BYTES
+        self.assertIs(self._require(at_limit), at_limit)
+        over_limit = at_limit + "a"
+        with self.assertRaises(PipelineError) as raised:
+            self._require(over_limit)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+    def test_bounded_canonical_stream_preserves_exact_geometry_wire_bytes(self) -> None:
+        exported = geometry()
+        self.assertEqual(
+            canonical_geometry_json_bytes(
+                exported,
+                error=ErrorCode.NATIVE_GEOMETRY_INVALID,
+            ),
+            canonical_json_bytes(exported),
+        )
+
+    def test_chinese_and_four_byte_unicode_count_encoded_bytes(self) -> None:
+        chinese = "中"
+        chinese_at_limit = chinese * (
+            MAX_NATIVE_GEOMETRY_JSON_BYTES // len(chinese.encode("utf-8"))
+        )
+        self.assertLessEqual(
+            len(chinese_at_limit.encode("utf-8")),
+            MAX_NATIVE_GEOMETRY_JSON_BYTES,
+        )
+        self.assertIs(self._require(chinese_at_limit), chinese_at_limit)
+        with self.assertRaises(PipelineError):
+            self._require(chinese_at_limit + chinese)
+
+        astral = "\U0001F600"
+        astral_at_limit = astral * (
+            MAX_NATIVE_GEOMETRY_JSON_BYTES // len(astral.encode("utf-8"))
+        )
+        self.assertEqual(
+            len(astral_at_limit.encode("utf-8")),
+            MAX_NATIVE_GEOMETRY_JSON_BYTES,
+        )
+        self.assertIs(self._require(astral_at_limit), astral_at_limit)
+        with self.assertRaises(PipelineError):
+            self._require(astral_at_limit + astral)
+
+    def test_nfc_expansion_and_contraction_cannot_change_raw_byte_budget(self) -> None:
+        # U+0344 expands under NFC from two UTF-8 bytes to two combining
+        # scalars/four UTF-8 bytes. The raw boundary accepts the exact
+        # received byte count and leaves canonical validation to the parser.
+        expanding = "\u0344"
+        self.assertGreater(
+            len(unicodedata.normalize("NFC", expanding).encode("utf-8")),
+            len(expanding.encode("utf-8")),
+        )
+        expanded_raw_at_limit = expanding * (
+            MAX_NATIVE_GEOMETRY_JSON_BYTES // len(expanding.encode("utf-8"))
+        )
+        self.assertIs(self._require(expanded_raw_at_limit), expanded_raw_at_limit)
+
+        # U+212B contracts to U+00C5 under NFC. A raw over-limit input must
+        # still fail instead of gaining capacity by normalization.
+        contracting = "\u212B"
+        self.assertLess(
+            len(unicodedata.normalize("NFC", contracting).encode("utf-8")),
+            len(contracting.encode("utf-8")),
+        )
+        raw_over_limit = contracting * (
+            MAX_NATIVE_GEOMETRY_JSON_BYTES // len(contracting.encode("utf-8")) + 1
+        )
+        with self.assertRaises(PipelineError) as raised:
+            self._require(raw_over_limit)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+    def test_private_loader_and_embedded_parser_reject_before_decoding_geometry(self) -> None:
+        payload = b"x" * (MAX_NATIVE_GEOMETRY_JSON_BYTES + 1)
+
+        def read_payload(
+            _kind: str,
+            _path: Path,
+            *,
+            consume,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            return consume(payload)
+
+        with mock.patch.object(
+            native_contracts_module,
+            "read_private_native_artifact_bytes",
+            side_effect=read_payload,
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                load_native_artifact("geometry", Path("generated-geometry.json"))
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+        raw_embedded = "中" * (
+            MAX_NATIVE_GEOMETRY_JSON_BYTES // len("中".encode("utf-8")) + 1
+        )
+        with mock.patch.object(native_contracts_module, "strict_native_json") as parser:
+            with self.assertRaises(PipelineError) as raised:
+                native_contracts_module._embedded_geometry(
+                    raw_embedded,
+                    error=ErrorCode.NATIVE_READBACK_INVALID,
+                )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
+        parser.assert_not_called()
+
+    def test_two_thousand_entities_with_four_kib_text_fail_before_audit_binding(self) -> None:
+        """Reproduce the character-count bypass with valid v1 cardinality."""
+
+        oversized = geometry()
+        generated = deepcopy(oversized["entities"][0])
+        generated["text"] = "中" * 4096
+        oversized["entities"] = [generated] * MAX_NATIVE_GEOMETRY_ENTITIES
+        with mock.patch(
+            "liang_pingfa_review.native_audit.require_geometry_export_matches_session"
+        ) as binding:
+            with self.assertRaises(PipelineError) as raised:
+                build_native_audit(oversized, session(), config())
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+        binding.assert_not_called()
 
 
 if __name__ == "__main__":
