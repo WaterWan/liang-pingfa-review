@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import re
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,155 @@ class ValidateSkillTests(unittest.TestCase):
     def test_clean_repository_passes(self) -> None:
         validate_skill.validate_repository(self.repository)
 
+    def test_python_literal_unc_decoding_rejects_escaped_bypasses(self) -> None:
+        slash = chr(92)
+        target = self.repository / "src/liang_pingfa_review/native_manifest.py"
+        original = target.read_text(encoding="utf-8")
+        cases = {
+            "normal": (
+                'value = "'
+                + slash * 4
+                + "private-server"
+                + slash * 2
+                + 'share"\n'
+            ),
+            "raw": (
+                'value = r"'
+                + slash * 2
+                + "private-server"
+                + slash
+                + 'share"\n'
+            ),
+            "bytes": (
+                'value = b"'
+                + slash * 4
+                + "private-server"
+                + slash * 2
+                + 'share"\n'
+            ),
+            "f-constant": (
+                'value = f"'
+                + slash * 4
+                + "private-server"
+                + slash * 2
+                + 'share"\n'
+            ),
+            "device": (
+                'value = "'
+                + slash * 4
+                + "?"
+                + slash * 2
+                + "C:"
+                + slash * 2
+                + 'secret"\n'
+            ),
+            "localhost": (
+                'value = "'
+                + slash * 4
+                + "localhost"
+                + slash * 2
+                + 'share"\n'
+            ),
+            "mixed": (
+                'value = "'
+                + slash * 4
+                + "."
+                + slash * 2
+                + "pipe"
+                + slash * 2
+                + "liang-pingfa-native-a1b2c3d4e5f6g7h8 "
+                + slash * 4
+                + "private-server"
+                + slash * 2
+                + 'share"\n'
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                target.write_text(
+                    original + "\n" + source,
+                    encoding="utf-8",
+                )
+                with self.assertRaises(validate_skill.ValidationError) as raised:
+                    validate_skill.validate_repository(self.repository)
+                if name == "device":
+                    self.assertTrue(
+                        any(
+                            "local path found in src/liang_pingfa_review/native_manifest.py"
+                            in issue
+                            for issue in raised.exception.issues
+                        )
+                    )
+                else:
+                    self.assertIn(
+                        "UNC local path found in src/liang_pingfa_review/native_manifest.py",
+                        raised.exception.issues,
+                    )
+
+    def test_python_concatenated_literal_with_backslashes_fails_closed(self) -> None:
+        slash = chr(92)
+        target = self.repository / "src/liang_pingfa_review/native_manifest.py"
+        source = (
+            'value = "'
+            + slash * 4
+            + '" "private-server'
+            + slash * 2
+            + 'share"\n'
+        )
+        target.write_text(
+            target.read_text(encoding="utf-8") + "\n" + source,
+            encoding="utf-8",
+        )
+        with self.assertRaises(validate_skill.ValidationError) as raised:
+            validate_skill.validate_repository(self.repository)
+        self.assertTrue(
+            any(
+                "UNC local path found" in issue
+                or "dynamic or concatenated Python literal" in issue
+                for issue in raised.exception.issues
+            )
+        )
+
+    def test_python_dynamic_f_string_with_backslash_literal_fails_closed(self) -> None:
+        slash = chr(92)
+        target = self.repository / "src/liang_pingfa_review/native_manifest.py"
+        source = (
+            'host = "generated"\nvalue = f"'
+            + slash * 4
+            + "{host}"
+            + slash * 2
+            + 'share"\n'
+        )
+        target.write_text(
+            target.read_text(encoding="utf-8") + "\n" + source,
+            encoding="utf-8",
+        )
+        with self.assertRaises(validate_skill.ValidationError) as raised:
+            validate_skill.validate_repository(self.repository)
+        self.assertIn(
+            "dynamic or concatenated Python literal with backslashes found in "
+            "src/liang_pingfa_review/native_manifest.py",
+            raised.exception.issues,
+        )
+
+    def test_decoded_exact_project_pipe_remains_allowed_only_in_protocol_context(self) -> None:
+        slash = chr(92)
+        target = self.repository / "tests/test_native_protocol.py"
+        source = (
+            'allowed_pipe = "'
+            + slash * 4
+            + "."
+            + slash * 2
+            + "pipe"
+            + slash * 2
+            + 'liang-pingfa-native-a1b2c3d4e5f6g7h8"\n'
+        )
+        target.write_text(
+            target.read_text(encoding="utf-8") + "\n" + source,
+            encoding="utf-8",
+        )
+        validate_skill.validate_repository(self.repository)
+
     def test_generated_build_dist_and_egg_info_are_ignored(self) -> None:
         generated_files = (
             self.repository / "build/lib/generated.py",
@@ -84,6 +234,34 @@ class ValidateSkillTests(unittest.TestCase):
             generated_file.write_bytes(b"generated")
 
         validate_skill.validate_repository(self.repository)
+
+    def test_exact_csharp_project_bin_and_obj_are_ignored(self) -> None:
+        generated_files = (
+            self.repository
+            / "native-bridge-contracts/bin/Release/net8.0/generated.dll",
+            self.repository
+            / "native-bridge-contracts/obj/Release/net8.0/generated.cs",
+        )
+        for generated_file in generated_files:
+            generated_file.parent.mkdir(parents=True, exist_ok=True)
+            generated_file.write_bytes(b"generated")
+
+        validate_skill.validate_repository(self.repository)
+
+    def test_nested_csharp_bin_and_obj_remain_subject_to_policy(self) -> None:
+        for relative in (
+            "native-bridge-contracts/tools/bin/generated.dll",
+            "src/liang_pingfa_review/obj/generated.py",
+        ):
+            with self.subTest(relative=relative):
+                generated_file = self.repository / relative
+                generated_file.parent.mkdir(parents=True, exist_ok=True)
+                generated_file.write_bytes(b"generated")
+
+                self.assert_validation_fails_with(
+                    f"path is not allowed by repository policy: {relative}"
+                )
+                generated_file.unlink()
 
     def test_nested_build_directory_remains_subject_to_policy(self) -> None:
         nested_generated_file = self.repository / "src/build/generated.py"
@@ -154,6 +332,48 @@ class ValidateSkillTests(unittest.TestCase):
             raised.exception.issues,
         )
 
+    def test_forced_tracked_csharp_bin_and_obj_files_fail(self) -> None:
+        tracked_repository = Path(self.temporary_directory.name) / "tracked-csharp"
+        tracked_repository.mkdir()
+        tracked_files = (
+            tracked_repository
+            / "native-bridge-contracts/bin/Release/net8.0/generated.dll",
+            tracked_repository
+            / "native-bridge-contracts/obj/Release/net8.0/generated.cs",
+        )
+        for tracked_file in tracked_files:
+            tracked_file.parent.mkdir(parents=True, exist_ok=True)
+            tracked_file.write_bytes(b"generated")
+
+        subprocess.run(
+            ["git", "init"],
+            cwd=tracked_repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "add", "--force", "."],
+            cwd=tracked_repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        with self.assertRaises(validate_skill.ValidationError) as raised:
+            validate_skill.validate_tracked_files(tracked_repository)
+
+        self.assertIn(
+            "tracked path is not allowed by repository policy: "
+            "native-bridge-contracts/bin/Release/net8.0/generated.dll",
+            raised.exception.issues,
+        )
+        self.assertIn(
+            "tracked path is not allowed by repository policy: "
+            "native-bridge-contracts/obj/Release/net8.0/generated.cs",
+            raised.exception.issues,
+        )
+
     def test_pip_install_then_validation_passes_without_cleanup(self) -> None:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", ".", "--no-deps"],
@@ -161,10 +381,55 @@ class ValidateSkillTests(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         validate_skill.validate_repository(self.repository)
+
+    def test_dotnet_build_then_validation_passes_without_cleanup(self) -> None:
+        if shutil.which("dotnet") is None:
+            self.skipTest(".NET SDK is unavailable outside the CI build image")
+        result = subprocess.run(
+            [
+                "dotnet",
+                "build",
+                "native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj",
+                "-c",
+                "Release",
+                "--nologo",
+            ],
+            cwd=self.repository,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        validate_skill.validate_repository(self.repository)
+
+    def test_each_ci_job_checks_tracked_files_before_building_contracts(self) -> None:
+        workflow = (
+            self.repository / ".github/workflows/validate.yml"
+        ).read_text(encoding="utf-8")
+        tracked_command = "python scripts/validate_skill.py --tracked"
+        build_command = (
+            "dotnet build native-bridge-contracts/"
+            "LiangPingfa.NativeBridge.Contracts.csproj"
+        )
+        jobs_section = workflow.split("\njobs:\n", 1)[-1]
+        workflow_jobs = re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_section)
+        self.assertEqual(workflow_jobs, ["validate-windows"])
+        self.assertNotIn("ubuntu", workflow.casefold())
+        self.assertNotIn("linux", workflow.casefold())
+        for job_name in ("validate-windows",):
+            start = workflow.index(f"  {job_name}:")
+            next_job = workflow.find("\n  validate-", start + 1)
+            job = workflow[start : next_job if next_job >= 0 else len(workflow)]
+            self.assertLess(job.index(tracked_command), job.index(build_command))
 
     def test_invalid_name_fails(self) -> None:
         skill_path = self.repository / validate_skill.SKILL_PATH
@@ -217,6 +482,40 @@ class ValidateSkillTests(unittest.TestCase):
         self.assert_validation_fails_with(
             "missing required beam topology contract: "
             "tests/contracts/beam-topology-in-situ.json"
+        )
+
+    def test_native_privacy_docs_require_owner_and_raw_artifact_disclosure(self) -> None:
+        reference = (
+            self.repository
+            / validate_skill.SKILL_DIRECTORY
+            / "references"
+            / "native-cad-bridge.md"
+        )
+        reference.write_text(
+            reference.read_text(encoding="utf-8").replace(
+                "owner/DACL validation is required",
+                "removed retained-handle owner validation",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "native bridge reference is missing private-artifact privacy wording: "
+            "owner/DACL validation is required"
+        )
+
+    def test_native_privacy_docs_reject_false_redaction_claims(self) -> None:
+        readme = self.repository / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8")
+            + "\nprivate artifacts contain no raw data\n",
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "README.md falsely claims private artifacts are redacted: "
+            "private artifacts contain no raw data"
         )
 
     def test_topology_contract_rejects_profile_execution_controls(self) -> None:
@@ -745,6 +1044,50 @@ class ValidateSkillTests(unittest.TestCase):
         self.assert_validation_fails_with(
             "obvious Windows absolute local path found in README.md"
         )
+
+    def test_unc_validator_allows_only_exact_pipe_spans(self) -> None:
+        source_path = self.repository / "tests/support/synthetic_native.py"
+        pipe = (
+            chr(92) * 2
+            + "."
+            + chr(92)
+            + "pipe"
+            + chr(92)
+            + "liang-pingfa-native-<runtime-token>"
+        )
+        source_path.write_text(
+            source_path.read_text(encoding="utf-8")
+            + f'\nGENERIC_TEST_PIPE = r"{pipe}"\n',
+            encoding="utf-8",
+        )
+        validate_skill.validate_repository(self.repository)
+
+        unsafe_prefix = chr(92) * 2
+        for name, candidate in (
+            ("server", unsafe_prefix + "private-server" + chr(92) + "share"),
+            ("localhost", unsafe_prefix + "localhost" + chr(92) + "share"),
+            ("device", unsafe_prefix + "?" + chr(92) + "device"),
+            (
+                "mixed",
+                pipe + " and " + unsafe_prefix + "private-server" + chr(92) + "share",
+            ),
+        ):
+            with self.subTest(name=name):
+                source_path.write_text(
+                    source_path.read_text(encoding="utf-8")
+                    + f'\nUNSAFE_TEST_LITERAL = r"{candidate}"\n',
+                    encoding="utf-8",
+                )
+                self.assert_validation_fails_with(
+                    "UNC local path found in tests/support/synthetic_native.py"
+                )
+                source_path.write_text(
+                    source_path.read_text(encoding="utf-8").rsplit(
+                        "\nUNSAFE_TEST_LITERAL", 1
+                    )[0]
+                    + "\n",
+                    encoding="utf-8",
+                )
 
     def test_local_audit_artifact_fails(self) -> None:
         artifact_path = self.repository / "output/audit.json"

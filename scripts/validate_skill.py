@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -24,9 +27,40 @@ REFERENCE_PATHS = (
     Path("references/dwg-two-stage-workflow.md"),
     Path("references/multi-annotation-overlap.md"),
     Path("references/beam-topology-audit.md"),
+    Path("references/native-cad-bridge.md"),
 )
 MULTI_ANNOTATION_CONTRACT_PATH = Path("tests/contracts/multi-annotation-overlap.json")
 TOPOLOGY_CONTRACT_PATH = Path("tests/contracts/beam-topology-in-situ.json")
+NATIVE_PROTOCOL_CONTRACT_PATH = Path("tests/contracts/native-bridge-protocol.json")
+NATIVE_SCHEMA_PATHS = (
+    "native-adapter-config-v1.schema.json",
+    "native-bridge-request-v1.schema.json",
+    "native-bridge-response-v1.schema.json",
+    "native-bridge-session-v1.schema.json",
+    "native-geometry-export-v1.schema.json",
+    "native-audit-v1.schema.json",
+    "native-edit-intent-v1.schema.json",
+    "native-edit-plan-v1.schema.json",
+    "native-edit-manifest-v1.schema.json",
+    "native-console-result-v1.schema.json",
+    "native-console-export-v1.schema.json",
+    "native-verification-v1.schema.json",
+)
+NATIVE_PROTOCOL_TEXT_PATHS = frozenset(
+    {
+        "src/liang_pingfa_review/native_bridge.py",
+        "src/liang_pingfa_review/schemas/native-bridge-session-v1.schema.json",
+        "tests/support/mock_native_bridge.py",
+        "tests/support/synthetic_native.py",
+        "tests/test_native_protocol.py",
+    }
+)
+NATIVE_PIPE_LITERAL_CONTEXTS = NATIVE_PROTOCOL_TEXT_PATHS | frozenset(
+    {
+        ".github/skills/liang-pingfa-tuzhi-shencha/references/native-cad-bridge.md",
+        "scripts/validate_skill.py",
+    }
+)
 TOPOLOGY_ROLE_ARRAYS = (
     "beam_edges",
     "beam_ids",
@@ -143,6 +177,7 @@ ALLOWED_FILES = frozenset(
         ".github/skills/liang-pingfa-tuzhi-shencha/references/local-regression.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/multi-annotation-overlap.md",
         ".github/skills/liang-pingfa-tuzhi-shencha/references/beam-topology-audit.md",
+        ".github/skills/liang-pingfa-tuzhi-shencha/references/native-cad-bridge.md",
         "scripts/validate_skill.py",
         "src/liang_pingfa_review/__init__.py",
         "src/liang_pingfa_review/__main__.py",
@@ -154,6 +189,15 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/contracts.py",
         "src/liang_pingfa_review/errors.py",
         "src/liang_pingfa_review/local_regression.py",
+        "src/liang_pingfa_review/native_protocol.py",
+        "src/liang_pingfa_review/native_contracts.py",
+        "src/liang_pingfa_review/native_bridge.py",
+        "src/liang_pingfa_review/native_audit.py",
+        "src/liang_pingfa_review/native_plan.py",
+        "src/liang_pingfa_review/native_manifest.py",
+        "src/liang_pingfa_review/core_console.py",
+        "src/liang_pingfa_review/native_apply.py",
+        "src/liang_pingfa_review/native_verify.py",
         "src/liang_pingfa_review/oda.py",
         "src/liang_pingfa_review/overlay_profile.py",
         "src/liang_pingfa_review/ownership.py",
@@ -171,28 +215,66 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/schemas/beam-topology-profile-v1.schema.json",
         "src/liang_pingfa_review/schemas/edit-plan-v1.schema.json",
         "src/liang_pingfa_review/schemas/verification-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-adapter-config-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-request-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-response-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-session-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-geometry-export-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-audit-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-edit-intent-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-edit-plan-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-edit-manifest-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-console-result-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-console-export-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-verification-v1.schema.json",
         "tests/support/__init__.py",
         "tests/support/owned_files.py",
         "tests/support/synthetic_dxf.py",
+        "tests/support/synthetic_native.py",
+        "tests/support/mock_native_bridge.py",
+        "tests/support/mock_core_console.py",
         "tests/test_apply_verify.py",
         "tests/test_audit_plan.py",
         "tests/test_canonical_contracts.py",
         "tests/test_handle_ownership.py",
-        "tests/test_linux_ci_setup.py",
         "tests/test_oda_cli.py",
         "tests/test_source_binding.py",
         "tests/test_validate_skill.py",
         "tests/test_topology_profile.py",
+        "tests/test_native_protocol.py",
+        "tests/test_native_contracts.py",
+        "tests/test_native_audit_plan.py",
+        "tests/test_native_apply_verify.py",
+        "tests/test_native_core_console.py",
+        "tests/test_native_cli.py",
+        "tests/test_native_publication_transaction.py",
+        "tests/test_native_real_integration.py",
         "tests/contracts/local-representation-readability.json",
         "tests/contracts/two-stage-overlay-workflow.json",
         "tests/contracts/multi-annotation-overlap.json",
         "tests/contracts/beam-topology-in-situ.json",
+        "tests/contracts/native-bridge-protocol.json",
         "tests/local-fixtures/README.md",
+        "native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj",
+        "native-bridge-contracts/ProtocolV1.cs",
+        "native-bridge-contracts/Interfaces.cs",
+        "native-bridge-contracts/README.md",
+        "native-bridge-contracts/LICENSE",
     }
 )
 
 IGNORED_DIRECTORIES = frozenset({".git", "__pycache__"})
 ROOT_GENERATED_DIRECTORIES = frozenset({"build", "dist"})
+# These are the only generated ``bin``/``obj`` trees accepted in a working
+# tree.  The contracts project is built in CI, so its normal SDK output must
+# not make a subsequent full-tree validation fail.  Keep this path-exact:
+# arbitrary nested build output remains subject to the strict allowlist.
+CSHARP_GENERATED_DIRECTORIES = frozenset(
+    {
+        "native-bridge-contracts/bin",
+        "native-bridge-contracts/obj",
+    }
+)
 FORBIDDEN_EXTENSIONS = frozenset(
     {
         ".pdf",
@@ -234,11 +316,25 @@ FORBIDDEN_EXTENSIONS = frozenset(
         ".whl",
     }
 )
-TEXT_FILE_SUFFIXES = frozenset({".md", ".py", ".yml", ".yaml", ".json", ".toml"})
+TEXT_FILE_SUFFIXES = frozenset(
+    {".md", ".py", ".yml", ".yaml", ".json", ".toml", ".cs", ".csproj"}
+)
 
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
 UNC_PATH_PATTERN = re.compile(r"(?<!\x5c)\x5c\x5c[^\x5c/\s]+[\x5c/]")
+_GENERIC_NATIVE_PIPE_PREFIX = (
+    chr(92) * 2 + "." + chr(92) + "pipe" + chr(92) + "liang-pingfa-native-"
+)
+GENERIC_NATIVE_PIPE_LITERAL_PATTERN = re.compile(
+    re.escape(_GENERIC_NATIVE_PIPE_PREFIX)
+    + r"(?:<[A-Za-z0-9_-]{1,96}>|[A-Za-z0-9_-]{16,128})"
+    + r"(?=$|[\s,;:'\"`)\]}>])"
+)
+GENERIC_NATIVE_PIPE_GRAMMAR_PATTERN = re.compile(
+    r"\\\\pipe\\\\liang-pingfa-native-\[A-Za-z0-9_-\]\{16,128\}"
+)
+_GENERIC_NATIVE_PIPE_GRAMMAR_PREFIX = "^" + chr(92) * 5 + "."
 POSIX_LOCAL_PATH_PATTERN = re.compile(
     r"(?<![A-Za-z0-9._-])/(?:Users|home|private|mnt|var|tmp|opt|root)(?:/|$)",
     re.IGNORECASE,
@@ -333,11 +429,42 @@ REQUIRED_GITIGNORE_RULES = (
     "*.tar.zst",
     "*.cab",
     "*.iso",
+    ".liang-pingfa-native/",
+    "/native-session*.json",
+    "/native-export*.json",
+    "/native-intent*.json",
+    "/native-manifest*.json",
+    "/native-console-result*.json",
+    "/native-console-export*.json",
+    "/native-verification*.json",
+    "/native-plan*.json",
+    "/native-audit*.json",
+    "/native-*.log",
+    "*.native-output.dwg",
+    "/native-bridge-contracts/bin/",
+    "/native-bridge-contracts/obj/",
 )
 SOURCE_SCOPE_SENTENCE = "Verified source scope: 22G101-1 printed pages 1-22 through 1-33."
 BOUNDED_THREAT_MODEL = (
     "trusted Windows account/session, ODA executable, OS, and local NTFS volume; "
     "no hostile same-account/admin process"
+)
+NATIVE_PRIVATE_ARTIFACT_PRIVACY_PHRASES = (
+    "PRIVATE-ARTIFACT-PRIVACY:",
+    "retained no-follow",
+    "owner/DACL validation is required",
+    "never commit or upload",
+    "nonce/challenge, and process/document bindings.",
+    "raw text, coordinates, layers, paths,",
+    "Manifests contain raw preconditions/geometry and plugin,",
+    "Intent can contain requested deltas and",
+    "Console results/logs are sensitive and bounded.",
+    "audit/plan/verification/recovery JSON is private redacted-or-opaque machine data",
+    "Only public Markdown reports, CLI error events, and CI logs are redacted and",
+)
+NATIVE_PRIVATE_ARTIFACT_FALSE_REDACTION_PHRASES = (
+    "private artifacts contain no raw data",
+    "raw private artifacts are publicly redacted",
 )
 SUPPORT_BOUNDARY_PHRASES = {
     "README.md": (
@@ -460,6 +587,8 @@ def _iter_repository_files(root: Path, issues: list[str]) -> Iterable[Path]:
                 continue
             if directory == root and directory_name in ROOT_GENERATED_DIRECTORIES:
                 continue
+            if relative in CSHARP_GENERATED_DIRECTORIES:
+                continue
             if directory_name.endswith(".egg-info"):
                 continue
             retained_directories.append(directory_name)
@@ -566,6 +695,193 @@ def _is_text_file(path: Path) -> bool:
     return path.suffix.lower() in TEXT_FILE_SUFFIXES or path.name in {"LICENSE", ".gitignore"}
 
 
+def _unc_span_is_allowed(
+    value: str,
+    start: int,
+    end: int,
+    *,
+    relative: str,
+    path: Path,
+) -> bool:
+    """Allow only one complete documented project pipe span at ``start``."""
+
+    literal_match = GENERIC_NATIVE_PIPE_LITERAL_PATTERN.match(value, start)
+    # Regex source encodes an exact project pipe grammar rather than a live
+    # path. It remains allowlisted after Python decoding as well, but only
+    # with the exact grammar prefix and in an explicit protocol context.
+    grammar_match = GENERIC_NATIVE_PIPE_GRAMMAR_PATTERN.match(value, start)
+    return relative in NATIVE_PIPE_LITERAL_CONTEXTS and (
+        (
+            literal_match is not None
+            and literal_match.end() >= end
+        )
+        or (
+            path.suffix.lower() in {".py", ".json"}
+            and grammar_match is not None
+            and grammar_match.end() >= end
+            and value[:start].endswith(_GENERIC_NATIVE_PIPE_GRAMMAR_PREFIX)
+        )
+    )
+
+
+def _text_safety_issue(
+    value: str,
+    *,
+    relative: str,
+    path: Path,
+) -> str | None:
+    """Return the first path/hash policy violation in a text value."""
+
+    if WINDOWS_ABSOLUTE_PATH_PATTERN.search(value):
+        return f"obvious Windows absolute local path found in {relative}"
+    for unc_match in UNC_PATH_PATTERN.finditer(value):
+        if not _unc_span_is_allowed(
+            value,
+            unc_match.start(),
+            unc_match.end(),
+            relative=relative,
+            path=path,
+        ):
+            return f"UNC local path found in {relative}"
+    if POSIX_LOCAL_PATH_PATTERN.search(value):
+        return f"obvious POSIX local path found in {relative}"
+    if SHA256_PATTERN.search(value):
+        return f"possible source hash found in {relative}"
+    return None
+
+
+def _literal_text(value: object) -> str | None:
+    """Decode a Python literal value without evaluating any source expression."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        # Latin-1 is total and preserves every byte's code point, including
+        # escaped ``\x5c`` backslashes, without guessing an executable codec.
+        return value.decode("latin-1")
+    return None
+
+
+def _static_python_expression_text(node: ast.AST) -> str | None:
+    """Return a safely decoded static string/bytes expression, if exact."""
+
+    if isinstance(node, ast.Constant):
+        return _literal_text(node.value)
+    if isinstance(node, ast.JoinedStr):
+        values: list[str] = []
+        for item in node.values:
+            if not isinstance(item, ast.Constant):
+                return None
+            text = _literal_text(item.value)
+            if text is None:
+                return None
+            values.append(text)
+        return "".join(values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_python_expression_text(node.left)
+        right = _static_python_expression_text(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _python_literal_values(
+    text: str,
+    *,
+    relative: str,
+    issues: list[str],
+) -> list[str]:
+    """Tokenize and AST-decode Python literals without executing source.
+
+    Adjacent literals and dynamic f-string/addition expressions are handled
+    conservatively: when their literal portions can form a doubled
+    backslash, the repository is rejected instead of trying to model runtime
+    interpolation or concatenation.
+    """
+
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        tree = ast.parse(text, filename=relative, mode="exec")
+    except (SyntaxError, tokenize.TokenError, IndentationError):
+        # A malformed Python source cannot be safely decoded. Raw scanning
+        # still runs, but an encoded backslash syntax fails closed here.
+        if chr(92) in text:
+            issues.append(f"Python literals cannot be safely decoded in {relative}")
+        return []
+
+    values: list[str] = []
+    unsafe_composition = False
+    slash_pair = chr(92) * 2
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant):
+            value = _literal_text(node.value)
+            if value is not None:
+                values.append(value)
+        elif isinstance(node, ast.JoinedStr):
+            static = _static_python_expression_text(node)
+            if static is not None:
+                values.append(static)
+            else:
+                literal_parts = [
+                    value
+                    for item in node.values
+                    if isinstance(item, ast.Constant)
+                    and (value := _literal_text(item.value)) is not None
+                ]
+                if slash_pair in "".join(literal_parts):
+                    unsafe_composition = True
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            static = _static_python_expression_text(node)
+            if static is not None:
+                values.append(static)
+            else:
+                literal_parts = [
+                    value
+                    for item in ast.walk(node)
+                    if isinstance(item, ast.Constant)
+                    and (value := _literal_text(item.value)) is not None
+                ]
+                if slash_pair in "".join(literal_parts):
+                    unsafe_composition = True
+
+    index = 0
+    while index < len(tokens):
+        if tokens[index].type != tokenize.STRING:
+            index += 1
+            continue
+        group = [tokens[index]]
+        cursor = index + 1
+        while cursor < len(tokens):
+            token = tokens[cursor]
+            if token.type in {tokenize.NL, tokenize.COMMENT}:
+                cursor += 1
+                continue
+            if token.type == tokenize.STRING:
+                group.append(token)
+                cursor += 1
+                continue
+            break
+        if len(group) > 1:
+            decoded: list[str] = []
+            for token in group:
+                try:
+                    value = _literal_text(ast.literal_eval(token.string))
+                except (SyntaxError, ValueError):
+                    value = None
+                if value is not None:
+                    decoded.append(value)
+            if slash_pair in "".join(decoded):
+                unsafe_composition = True
+        index += 1
+
+    if unsafe_composition:
+        issues.append(
+            f"dynamic or concatenated Python literal with backslashes found in {relative}"
+        )
+    return values
+
+
 def _validate_text_safety(root: Path, files: Iterable[Path], issues: list[str]) -> None:
     for path in files:
         if not _is_text_file(path):
@@ -574,6 +890,34 @@ def _validate_text_safety(root: Path, files: Iterable[Path], issues: list[str]) 
         if text is None:
             continue
         relative = _relative_posix(path, root)
+        if path.suffix.lower() == ".py":
+            # Python source has escape syntax. Its literals are checked only
+            # after tokenize/AST decoding so a normal escaped pipe spelling is
+            # neither missed nor mistaken for a second raw UNC span. Raw text
+            # scanning remains authoritative for documentation, JSON, YAML,
+            # C#, and other non-Python repository text.
+            decoded_issue = next(
+                (
+                    issue
+                    for value in _python_literal_values(
+                        text,
+                        relative=relative,
+                        issues=issues,
+                    )
+                    if (
+                        issue := _text_safety_issue(
+                            value,
+                            relative=relative,
+                            path=path,
+                        )
+                    )
+                    is not None
+                ),
+                None,
+            )
+            if decoded_issue is not None:
+                issues.append(decoded_issue)
+            continue
         values = [text]
         if path.suffix.lower() == ".json":
             try:
@@ -595,19 +939,24 @@ def _validate_text_safety(root: Path, files: Iterable[Path], issues: list[str]) 
                             collect_strings(item)
 
                 collect_strings(parsed)
-        for value in values:
-            if WINDOWS_ABSOLUTE_PATH_PATTERN.search(value):
-                issues.append(f"obvious Windows absolute local path found in {relative}")
-                break
-            if UNC_PATH_PATTERN.search(value):
-                issues.append(f"UNC local path found in {relative}")
-                break
-            if POSIX_LOCAL_PATH_PATTERN.search(value):
-                issues.append(f"obvious POSIX local path found in {relative}")
-                break
-            if SHA256_PATTERN.search(value):
-                issues.append(f"possible source hash found in {relative}")
-                break
+        raw_issue = next(
+            (
+                issue
+                for value in values
+                if (
+                    issue := _text_safety_issue(
+                        value,
+                        relative=relative,
+                        path=path,
+                    )
+                )
+                is not None
+            ),
+            None,
+        )
+        if raw_issue is not None:
+            issues.append(raw_issue)
+            continue
 
 
 def _validate_markdown_links(skill_directory: Path, issues: list[str]) -> None:
@@ -1351,6 +1700,19 @@ def _validate_packaging(root: Path, issues: list[str]) -> None:
         "src/liang_pingfa_review/schemas/beam-topology-profile-v1.schema.json",
         "src/liang_pingfa_review/schemas/edit-plan-v1.schema.json",
         "src/liang_pingfa_review/schemas/verification-v1.schema.json",
+        "src/liang_pingfa_review/native_protocol.py",
+        "src/liang_pingfa_review/native_contracts.py",
+        "src/liang_pingfa_review/native_bridge.py",
+        "src/liang_pingfa_review/native_audit.py",
+        "src/liang_pingfa_review/native_plan.py",
+        "src/liang_pingfa_review/native_manifest.py",
+        "src/liang_pingfa_review/core_console.py",
+        "src/liang_pingfa_review/native_apply.py",
+        "src/liang_pingfa_review/native_verify.py",
+    )
+    required_package_paths += tuple(
+        "src/liang_pingfa_review/schemas/" + filename
+        for filename in NATIVE_SCHEMA_PATHS
     )
     for relative_path in required_package_paths:
         if not (root / relative_path).is_file():
@@ -1358,21 +1720,24 @@ def _validate_packaging(root: Path, issues: list[str]) -> None:
 
 
 def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
-    """Require both hermetic Ubuntu checks and native Windows phase two."""
+    """Require the Windows-only validation path and native phase two."""
 
     workflow_path = root / ".github/workflows/validate.yml"
     workflow = _read_text(workflow_path, issues)
     if workflow is None:
         return
     for required_text in (
-        "validate-ubuntu:",
-        "runs-on: ubuntu-latest",
         "validate-windows:",
         "runs-on: windows-latest",
         'python-version: "3.13"',
         "python -m pip install .",
         'python -m unittest discover -s tests -p "test_*.py" -v',
         "python -m compileall -q src tests scripts",
+        "actions/setup-dotnet@v4",
+        'dotnet-version: "8.0.x"',
+        "dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj",
+        "python -m liang_pingfa_review doctor",
+        "python -m liang_pingfa_review native-doctor",
     ):
         if required_text not in workflow:
             issues.append(
@@ -1380,6 +1745,12 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
             )
     lowered = workflow.casefold()
     for forbidden_text in (
+        "validate-ubuntu:",
+        "ubuntu-latest",
+        "runs-on: ubuntu",
+        "linux",
+        "portable_ci",
+        "portable unit suite",
         "choco install oda",
         "winget install oda",
         "odafileconverter.exe",
@@ -1389,6 +1760,370 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
             issues.append(
                 f"validate workflow must not install or invoke real ODA: {forbidden_text}"
             )
+
+    # The SDK creates the exact C# ``bin``/``obj`` paths above.  Validate the
+    # tracked allowlist before that build so a generated tree cannot mask a
+    # tracked artifact in a fresh checkout.
+    build_command = (
+        "dotnet build native-bridge-contracts/"
+        "LiangPingfa.NativeBridge.Contracts.csproj"
+    )
+    tracked_command = "python scripts/validate_skill.py --tracked"
+    jobs_section = workflow.split("\njobs:\n", 1)[-1]
+    job_names = re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_section)
+    if job_names != ["validate-windows"]:
+        issues.append(
+            "validate workflow must contain exactly one job named validate-windows"
+        )
+    for job_name in ("validate-windows",):
+        job_match = re.search(
+            rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:|\Z)",
+            workflow,
+        )
+        if job_match is None:
+            continue
+        job = job_match.group("body")
+        tracked_index = job.find(tracked_command)
+        build_index = job.find(build_command)
+        if tracked_index < 0 or build_index < 0 or tracked_index > build_index:
+            issues.append(
+                "validate workflow must run tracked validation before C# build: "
+                + job_name
+            )
+
+
+def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
+    """Keep the optional native lane SDK-free, strict, redacted, and separate."""
+
+    contract_path = root / NATIVE_PROTOCOL_CONTRACT_PATH
+    contract_text = _read_text(contract_path, issues)
+    if contract_text is None:
+        issues.append(
+            "missing native protocol contract: "
+            + NATIVE_PROTOCOL_CONTRACT_PATH.as_posix()
+        )
+    else:
+        try:
+            contract = json.loads(contract_text)
+        except json.JSONDecodeError as error:
+            issues.append(f"invalid native protocol contract JSON: {error.msg}")
+            contract = None
+        expected_keys = {
+            "case_id",
+            "scope",
+            "input_storage",
+            "session_rules",
+            "rpc_allowlist",
+            "write_rules",
+            "prohibited_output",
+            "non_claims",
+        }
+        if not isinstance(contract, dict) or set(contract) != expected_keys:
+            issues.append("native protocol contract must use exactly the approved fields")
+        elif (
+            contract.get("case_id") != "native-bridge-protocol"
+            or contract.get("scope") != "optional-local-native-bridge"
+            or contract.get("input_storage") != "private-local-only"
+            or contract.get("rpc_allowlist")
+            != [
+                "health",
+                "get_session",
+                "get_current_document",
+                "export_inventory",
+                "export_exact_geometry",
+            ]
+        ):
+            issues.append("native protocol contract must retain the fixed read-only allowlist")
+        else:
+            required_session_rules = {
+                "private-ntfs-session-descriptor-current-user-system-dacl",
+                "post-rename-secret-cleanup-through-retained-handle",
+                "atomic-single-flight-configured-deadlines",
+                "overlapped-cancellable-absolute-deadline-io",
+            }
+            required_write_rules = {
+                "fresh-prewrite-binding-never-predicts-final-revision",
+                "final-revision-database-output-copy-readback-bound",
+            }
+            if (
+                not isinstance(contract["session_rules"], list)
+                or not required_session_rules.issubset(set(contract["session_rules"]))
+            ):
+                issues.append(
+                    "native protocol contract must retain private descriptor and RPC rules"
+                )
+            if (
+                not isinstance(contract["write_rules"], list)
+                or not required_write_rules.issubset(set(contract["write_rules"]))
+            ):
+                issues.append(
+                    "native protocol contract must retain separate pre/final revision rules"
+                )
+            if (
+                not isinstance(contract["prohibited_output"], list)
+                or "record_counts" not in set(contract["prohibited_output"])
+            ):
+                issues.append(
+                    "native protocol contract must redact record counts from public events"
+                )
+
+    for filename in NATIVE_SCHEMA_PATHS:
+        path = root / "src" / "liang_pingfa_review" / "schemas" / filename
+        text = _read_text(path, issues)
+        if text is None:
+            continue
+        try:
+            schema = json.loads(text)
+        except json.JSONDecodeError as error:
+            issues.append(f"invalid native schema {filename}: {error.msg}")
+            continue
+
+        def require_strict_objects(value: object) -> None:
+            if isinstance(value, dict):
+                if (
+                    value.get("type") == "object"
+                    and value.get("additionalProperties") is not False
+                ):
+                    issues.append(
+                        f"native schema object is not strict: {filename}"
+                    )
+                for item in value.values():
+                    require_strict_objects(item)
+            elif isinstance(value, list):
+                for item in value:
+                    require_strict_objects(item)
+
+        require_strict_objects(schema)
+        if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+            issues.append(f"native schema is not Draft 2020-12: {filename}")
+        if not str(schema.get("$id", "")).startswith("liang-pingfa/native-"):
+            issues.append(f"native schema has wrong namespace: {filename}")
+
+    manifest_schema = _read_text(
+        root
+        / "src"
+        / "liang_pingfa_review"
+        / "schemas"
+        / "native-edit-manifest-v1.schema.json",
+        issues,
+    )
+    if manifest_schema is not None and (
+        '"expected_prewrite_revision"' not in manifest_schema
+        or '"expected_final_revision_fingerprint"' in manifest_schema
+    ):
+        issues.append("native manifest schema must bind pre-write state without final prediction")
+    cardinality_schemas = (
+        "native-audit-v1.schema.json",
+        "native-edit-plan-v1.schema.json",
+        "native-edit-manifest-v1.schema.json",
+        "native-verification-v1.schema.json",
+    )
+    for filename in cardinality_schemas:
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is None:
+            continue
+        try:
+            schema = json.loads(text)
+            required = schema["required"]
+            properties = schema["properties"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append(f"native cardinality schema is invalid: {filename}")
+            continue
+        if (
+            "record_cardinality" not in required
+            or properties.get("record_cardinality") != {"const": "explicit_private"}
+            or "cardinality_disclosed" in text
+        ):
+            issues.append(
+                "native enumerating artifact must admit explicit private cardinality: "
+                f"{filename}"
+            )
+    for filename in (
+        "native-audit-v1.schema.json",
+        "native-edit-plan-v1.schema.json",
+        "native-edit-manifest-v1.schema.json",
+    ):
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is None:
+            continue
+        try:
+            schema = json.loads(text)
+            required = schema["required"]
+            properties = schema["properties"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append(f"native marker-binding schema is invalid: {filename}")
+            continue
+        if (
+            "marker_policy_binding" not in required
+            or "marker_policy_binding" not in properties
+            or "height_bits" not in text
+            or "rotation_bits" not in text
+            or "text_derivation_version" not in text
+            or "geometry_defaults" not in text
+        ):
+            issues.append(
+                "native marker policy must be fully audit/plan/manifest-bound: "
+                f"{filename}"
+            )
+    for filename in (
+        "native-console-result-v1.schema.json",
+        "native-console-export-v1.schema.json",
+    ):
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is not None and (
+            '"final_revision_fingerprint"' not in text
+            or '"final_document_binding"' not in text
+        ):
+            issues.append(f"native schema lacks final transaction binding: {filename}")
+
+    cli_text = _read_text(root / "src/liang_pingfa_review/cli.py", issues)
+    if cli_text is not None:
+        for command in (
+            '"native-session"',
+            '"native-doctor"',
+            '"native-audit"',
+            '"native-plan"',
+            '"native-review-plan"',
+            '"native-apply"',
+            '"native-verify"',
+        ):
+            if command not in cli_text:
+                issues.append(f"native CLI command is missing: {command}")
+        if "--backend" in cli_text:
+            issues.append("native lane must not add a generic backend selector")
+
+    native_sources = (
+        "native_protocol.py",
+        "native_contracts.py",
+        "native_bridge.py",
+        "native_audit.py",
+        "native_plan.py",
+        "native_manifest.py",
+        "core_console.py",
+        "native_apply.py",
+        "native_verify.py",
+    )
+    for filename in native_sources:
+        text = _read_text(root / "src/liang_pingfa_review" / filename, issues)
+        if text is not None and (
+            "from .oda import" in text or "OdaRunner" in text or "ODA File Converter" in text
+        ):
+            issues.append(f"native source must not invoke ODA: {filename}")
+
+    contracts_root = root / "native-bridge-contracts"
+    project = _read_text(
+        contracts_root / "LiangPingfa.NativeBridge.Contracts.csproj", issues
+    )
+    csharp_files = (
+        contracts_root / "ProtocolV1.cs",
+        contracts_root / "Interfaces.cs",
+        contracts_root / "README.md",
+        contracts_root / "LICENSE",
+    )
+    if project is not None:
+        for required in ("<TargetFramework>net8.0</TargetFramework>",):
+            if required not in project:
+                issues.append(f"SDK-free C# project is missing: {required}")
+    for path in csharp_files + ((contracts_root / "LiangPingfa.NativeBridge.Contracts.csproj"),):
+        text = _read_text(path, issues)
+        if text is None:
+            continue
+        lowered = text.casefold()
+        for forbidden in (
+            "autodesk",
+            "teigha",
+            "tssd",
+            "oda",
+            "packagereference",
+            "<reference",
+        ):
+            if forbidden in lowered:
+                issues.append(
+                    f"SDK-free C# contracts contain forbidden proprietary/package reference: {path.name}"
+                )
+    protocol_dtos = _read_text(contracts_root / "ProtocolV1.cs", issues)
+    if protocol_dtos is not None:
+        for required in (
+            "NativePrewriteRevisionV1",
+            "NativeFinalDocumentBindingV1",
+            "FinalRevisionFingerprint",
+            "NativeSessionHandshakeResultV1",
+            "ChallengeResponse",
+            "NativeInventoryExportV1",
+            "InventoryJson",
+            "NativeExactGeometryResponseV1",
+            'JsonPropertyName("inventory_json")',
+        ):
+            if required not in protocol_dtos:
+                issues.append(f"SDK-free C# contracts lack final/pre-write DTO: {required}")
+    interface_dtos = _read_text(contracts_root / "Interfaces.cs", issues)
+    if interface_dtos is not None:
+        for required in (
+            "NativeHealthResponseV1",
+            "NativeSessionHandshakeResponseV1",
+            "NativeCurrentDocumentResponseV1",
+            "NativeInventoryResponseV1",
+            "NativeExactGeometryResponseV1",
+        ):
+            if required not in interface_dtos:
+                issues.append(f"read-only C# interface lacks wire response DTO: {required}")
+
+    report_source = _read_text(root / "src/liang_pingfa_review/reports.py", issues)
+    if report_source is not None and (
+        "record counts" not in report_source
+        or "Private machine-readable audit, plan, manifest, and verification" not in report_source
+    ):
+        issues.append(
+            "native reports must redact cardinality while acknowledging private artifacts"
+        )
+
+    native_reference = _read_text(
+        root / SKILL_DIRECTORY / "references" / "native-cad-bridge.md", issues
+    )
+    readme = _read_text(root / "README.md", issues)
+    skill = _read_text(root / SKILL_PATH, issues)
+    for name, text in (
+        ("native bridge reference", native_reference),
+        ("README.md", readme),
+    ):
+        if text is None:
+            continue
+        for required in (
+            "默认只读",
+            "PID",
+            "copy-only",
+            "固定",
+            "读回",
+            "不",
+        ):
+            if required not in text:
+                issues.append(f"{name} is missing native boundary wording: {required}")
+    for name, text in (
+        ("native bridge reference", native_reference),
+        ("README.md", readme),
+        ("SKILL.md", skill),
+    ):
+        if text is None:
+            continue
+        for required in NATIVE_PRIVATE_ARTIFACT_PRIVACY_PHRASES:
+            if required not in text:
+                issues.append(
+                    f"{name} is missing private-artifact privacy wording: {required}"
+                )
+        for forbidden in NATIVE_PRIVATE_ARTIFACT_FALSE_REDACTION_PHRASES:
+            if forbidden in text:
+                issues.append(
+                    f"{name} falsely claims private artifacts are redacted: {forbidden}"
+                )
 
 
 def _validate_bounded_oda_contract(root: Path, issues: list[str]) -> None:
@@ -1524,6 +2259,7 @@ def validate_repository(root: Path | str) -> None:
     _validate_beam_topology_contract(repository_root, issues)
     _validate_topology_trace_privacy_schema(repository_root, issues)
     _validate_bounded_oda_contract(repository_root, issues)
+    _validate_native_bridge_contract(repository_root, issues)
 
     if issues:
         raise ValidationError(issues)

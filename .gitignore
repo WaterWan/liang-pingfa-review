@@ -12,6 +12,20 @@ audit-v2.md
 beam-topology-profile.json
 *.overlay-cleaned.dwg
 
+# Optional native bridge private work products
+.liang-pingfa-native/
+/native-session*.json
+/native-export*.json
+/native-intent*.json
+/native-manifest*.json
+/native-console-result*.json
+/native-console-export*.json
+/native-verification*.json
+/native-plan*.json
+/native-audit*.json
+/native-*.log
+*.native-output.dwg
+
 # Source documents and CAD exports
 *.pdf
 *.PDF
@@ -81,6 +95,8 @@ __pycache__/
 /build/
 /dist/
 *.egg-info/
+/native-bridge-contracts/bin/
+/native-bridge-contracts/obj/
 
 # IDE files
 .vscode/
