@@ -6,6 +6,7 @@ from copy import deepcopy
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import secrets
@@ -20,6 +21,7 @@ import unittest
 from unittest import mock
 
 import liang_pingfa_review.native_bridge as native_bridge_module
+import liang_pingfa_review.canonical as canonical_module
 import liang_pingfa_review.native_contracts as native_contracts_module
 import liang_pingfa_review.native_protocol as native_protocol_module
 from liang_pingfa_review.errors import ErrorCode, PipelineError
@@ -103,6 +105,11 @@ class _GeneratedReusablePipe:
                     encode_frame(
                         self._handler(request),
                         maximum=response_limit_for_method(request["method"]),
+                        opaque_string_rules=(
+                            native_contracts_module.opaque_embedded_json_rules(
+                                "response"
+                            )
+                        ),
                     )
                 )
         return len(payload)
@@ -336,6 +343,40 @@ class _GeneratedDirectoryChain:
 
 class NativeProtocolTests(unittest.TestCase):
     """Exercise every framing rule without a proprietary bridge."""
+
+    @staticmethod
+    def _raw_geometry_response_payload(request_id: str, carrier: str) -> bytes:
+        """Encode a hostile outer carrier without invoking our canonicalizer."""
+
+        return json.dumps(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "id": request_id,
+                "result": {
+                    "kind": "geometry",
+                    "geometry_json": carrier,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @staticmethod
+    def _raw_inventory_response_payload(request_id: str, carrier: str) -> bytes:
+        """Encode a raw inventory carrier without normalizing it first."""
+
+        return json.dumps(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "id": request_id,
+                "result": {
+                    "kind": "inventory",
+                    "inventory_json": carrier,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
     def test_handshake_validation_binds_response_to_session_transcript(self) -> None:
         descriptor = session()
@@ -783,23 +824,22 @@ class NativeProtocolTests(unittest.TestCase):
             + 1
         )
 
-        def response(request: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "protocol_version": PROTOCOL_VERSION,
-                "id": request["id"],
-                "result": {
-                    "kind": "geometry",
-                    "geometry_json": raw_geometry,
-                },
-            }
-
-        pipe = _GeneratedReusablePipe(response, server_pid=descriptor["pid"])
+        request_id = "a" * 32
+        payload = self._raw_geometry_response_payload(request_id, raw_geometry)
+        pipe = _GeneratedRawResponsePipe(
+            struct.pack(">I", len(payload)) + payload,
+            server_pid=descriptor["pid"],
+        )
         with (
             mock.patch(
                 "liang_pingfa_review.native_bridge.inspect_process",
                 return_value=self._process_for(descriptor),
             ),
-            mock.patch("liang_pingfa_review.native_bridge.strict_native_json") as parser,
+            mock.patch(
+                "liang_pingfa_review.native_bridge.new_request_id",
+                return_value=request_id,
+            ),
+            mock.patch.object(native_contracts_module, "strict_native_json") as parser,
         ):
             client = NativeBridgeClient(descriptor, config=config(), transport=pipe)
             with self.assertRaises(PipelineError) as raised:
@@ -808,6 +848,132 @@ class NativeProtocolTests(unittest.TestCase):
         parser.assert_not_called()
         self.assertTrue(client.invalid)
         self.assertTrue(pipe.closed)
+
+    def test_opaque_geometry_carrier_accepts_exact_byte_cap_and_rejects_cap_plus_one(
+        self,
+    ) -> None:
+        """The outer frame keeps its exact carrier without NFC-normalizing it."""
+
+        carrier = "\u0344" * (
+            native_contracts_module.MAX_NATIVE_GEOMETRY_JSON_BYTES
+            // len("\u0344".encode("utf-8"))
+        )
+        rules = native_contracts_module.opaque_embedded_json_rules("response")
+        decoded = native_protocol_module.decode_payload(
+            self._raw_geometry_response_payload("a" * 32, carrier),
+            maximum=native_protocol_module.MAX_GEOMETRY_RESPONSE_BYTES,
+            opaque_string_rules=rules,
+        )
+        self.assertEqual(decoded["result"]["geometry_json"], carrier)
+        with self.assertRaises(NativeProtocolError):
+            native_protocol_module.decode_payload(
+                self._raw_geometry_response_payload("a" * 32, carrier + "\u0344"),
+                maximum=native_protocol_module.MAX_GEOMETRY_RESPONSE_BYTES,
+                opaque_string_rules=rules,
+            )
+
+    def test_opaque_inventory_carrier_accepts_exact_byte_cap_and_rejects_cap_plus_one(
+        self,
+    ) -> None:
+        carrier = "中" * (
+            native_contracts_module.MAX_NATIVE_INVENTORY_JSON_BYTES
+            // len("中".encode("utf-8"))
+        )
+        rules = native_contracts_module.opaque_embedded_json_rules("response")
+        decoded = native_protocol_module.decode_payload(
+            self._raw_inventory_response_payload("a" * 32, carrier),
+            maximum=native_protocol_module.MAX_INVENTORY_RESPONSE_BYTES,
+            opaque_string_rules=rules,
+        )
+        self.assertEqual(decoded["result"]["inventory_json"], carrier)
+        with self.assertRaises(NativeProtocolError):
+            native_protocol_module.decode_payload(
+                self._raw_inventory_response_payload("a" * 32, carrier + "中"),
+                maximum=native_protocol_module.MAX_INVENTORY_RESPONSE_BYTES,
+                opaque_string_rules=rules,
+            )
+
+    def test_pathological_outer_geometry_never_reaches_nfc(self) -> None:
+        """A frame-valid 16 MiB combining scalar fails under the RPC budget."""
+
+        descriptor = session()
+        carrier = "\u0344" * (
+            native_contracts_module.MAX_NATIVE_GEOMETRY_JSON_BYTES
+            // len("\u0344".encode("utf-8"))
+        )
+        request_id = "a" * 32
+        payload = self._raw_geometry_response_payload(request_id, carrier)
+        pipe = _GeneratedRawResponsePipe(
+            struct.pack(">I", len(payload)) + payload,
+            server_pid=descriptor["pid"],
+        )
+        normalizer_lengths: list[int] = []
+        original_normalize = canonical_module.unicodedata.normalize
+
+        def bounded_normalize(form: str, value: str) -> str:
+            normalizer_lengths.append(len(value))
+            if len(value) > canonical_module.MAX_JSON_STRING_CODEPOINTS:
+                raise AssertionError("unbounded opaque carrier reached NFC")
+            return original_normalize(form, value)
+
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_bridge.inspect_process",
+                return_value=self._process_for(descriptor),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.new_request_id",
+                return_value=request_id,
+            ),
+            mock.patch.object(
+                canonical_module.unicodedata,
+                "normalize",
+                side_effect=bounded_normalize,
+            ),
+        ):
+            client = NativeBridgeClient(descriptor, config=config(), transport=pipe)
+            with self.assertRaises(PipelineError) as raised:
+                client.export_exact_geometry()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+        self.assertNotIn(len(carrier), normalizer_lengths)
+        self.assertTrue(
+            all(
+                length <= canonical_module.MAX_JSON_STRING_CODEPOINTS
+                for length in normalizer_lengths
+            )
+        )
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
+
+    def test_valid_unicode_geometry_carrier_preserves_inner_text(self) -> None:
+        """Inner JSON remains strict/canonical for CJK, astral, escapes, and Hangul."""
+
+        descriptor = session()
+        text = '中文 \U0001F600 [] {} "quoted" 가'
+        export = geometry(
+            [entity("10", text=text)],
+            session_value=descriptor,
+        )
+
+        def response(request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "protocol_version": PROTOCOL_VERSION,
+                "id": request["id"],
+                "result": {
+                    "kind": "geometry",
+                    "geometry_json": canonical_json_bytes(export).decode("utf-8"),
+                },
+            }
+
+        pipe = _GeneratedReusablePipe(response, server_pid=descriptor["pid"])
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process_for(descriptor),
+        ):
+            client = NativeBridgeClient(descriptor, config=config(), transport=pipe)
+            received = client.export_exact_geometry()
+        self.assertEqual(received["entities"][0]["text"], text)
+        self.assertEqual(received, export)
 
     def test_deep_raw_response_is_a_terminal_protocol_error_and_releases_lock(self) -> None:
         """A 1500-level peer response cannot escape as RecursionError."""
@@ -1138,6 +1304,126 @@ class NativeProtocolTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_PROTOCOL_INVALID)
         self.assertTrue(geometry_client.invalid)
 
+    def test_inner_nfc_deadline_before_normalization_invalidates_session(self) -> None:
+        """Expiry at the mandatory pre-NFC check must prevent the native call."""
+
+        clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        descriptor = self._expiring_session(clock, 10)
+        configured = config()
+        configured["timeouts"]["geometry_ms"] = 1000
+        text = "é"
+        export = geometry([entity("10", text=text)], session_value=descriptor)
+        request_id = "a" * 32
+        payload = self._raw_geometry_response_payload(
+            request_id,
+            canonical_json_bytes(export).decode("utf-8"),
+        )
+        pipe = _GeneratedRawResponsePipe(
+            struct.pack(">I", len(payload)) + payload,
+            server_pid=descriptor["pid"],
+        )
+        client = self._clocked_client(
+            clock=clock,
+            descriptor=descriptor,
+            pipe=pipe,
+            configured=configured,
+        )
+        original_checkpoint = canonical_module._check_deadline
+        original_normalize = canonical_module.unicodedata.normalize
+        expired = False
+
+        def expire_before_normalization(checker, stage: str) -> None:
+            nonlocal expired
+            if (
+                checker is not None
+                and stage == "JSON NFC validation"
+                and not expired
+            ):
+                expired = True
+                clock.advance(1.1)
+            original_checkpoint(checker, stage)
+
+        def fail_if_inner_text_normalizes(form: str, value: str) -> str:
+            if value == text:
+                raise AssertionError("deadline did not run before inner NFC")
+            return original_normalize(form, value)
+
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_bridge.new_request_id",
+                return_value=request_id,
+            ),
+            mock.patch.object(
+                canonical_module,
+                "_check_deadline",
+                side_effect=expire_before_normalization,
+            ),
+            mock.patch.object(
+                canonical_module.unicodedata,
+                "normalize",
+                side_effect=fail_if_inner_text_normalizes,
+            ),
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                client.export_exact_geometry()
+        self.assertTrue(expired)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_PROTOCOL_INVALID)
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
+
+    def test_inner_nfc_deadline_after_normalization_invalidates_session(self) -> None:
+        """Expiry after the native call must be observed before parsing continues."""
+
+        clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        descriptor = self._expiring_session(clock, 10)
+        configured = config()
+        configured["timeouts"]["geometry_ms"] = 1000
+        text = "é"
+        export = geometry([entity("10", text=text)], session_value=descriptor)
+        request_id = "a" * 32
+        payload = self._raw_geometry_response_payload(
+            request_id,
+            canonical_json_bytes(export).decode("utf-8"),
+        )
+        pipe = _GeneratedRawResponsePipe(
+            struct.pack(">I", len(payload)) + payload,
+            server_pid=descriptor["pid"],
+        )
+        client = self._clocked_client(
+            clock=clock,
+            descriptor=descriptor,
+            pipe=pipe,
+            configured=configured,
+        )
+        original_normalize = canonical_module.unicodedata.normalize
+        normalized_inner_text = False
+
+        def expire_after_normalization(form: str, value: str) -> str:
+            nonlocal normalized_inner_text
+            normalized = original_normalize(form, value)
+            if value == text and not normalized_inner_text:
+                normalized_inner_text = True
+                clock.advance(1.1)
+            return normalized
+
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_bridge.new_request_id",
+                return_value=request_id,
+            ),
+            mock.patch.object(
+                canonical_module.unicodedata,
+                "normalize",
+                side_effect=expire_after_normalization,
+            ),
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                client.export_exact_geometry()
+        self.assertTrue(normalized_inner_text)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_PROTOCOL_INVALID)
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
+
     def test_large_geometry_uses_bounded_deadline_checkpoints(self) -> None:
         """Deadline probes scale by bounded intervals, not by nested re-scans."""
 
@@ -1171,7 +1457,7 @@ class NativeProtocolTests(unittest.TestCase):
         self.assertLess(len(checks), len(records) * 16)
 
     def test_geometry_deadline_checkpoint_bounds_cover_minimum_and_cap(self) -> None:
-        """Every geometry size is interruptible without per-field clock probes."""
+        """Every geometry size stays interruptible with bounded Unicode work."""
 
         def checkpoint_count(record_count: int) -> int:
             records = [
@@ -1191,12 +1477,14 @@ class NativeProtocolTests(unittest.TestCase):
         maximum_records = native_contracts_module.MAX_NATIVE_GEOMETRY_ENTITIES
         maximum_checks = checkpoint_count(maximum_records)
 
-        # Major stages make a one-record export observable, while the full
-        # geometry cap remains comfortably below the existing linear ceiling.
+        # Major stages make a one-record export observable. Mandatory
+        # before/after checks now bracket each actual non-ASCII NFC call, so
+        # retain a conservative linear ceiling rather than the old
+        # no-per-scalar threshold.
         self.assertGreaterEqual(minimum_checks, 16)
         self.assertLess(minimum_checks, 128)
         self.assertGreaterEqual(maximum_checks, maximum_records)
-        self.assertLess(maximum_checks, maximum_records * 16)
+        self.assertLess(maximum_checks, maximum_records * 20)
 
     def test_fake_clock_interrupts_every_large_validation_stage(self) -> None:
         """Valid large values must observe the original deadline mid-traversal."""

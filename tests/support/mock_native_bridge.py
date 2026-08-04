@@ -20,6 +20,7 @@ from liang_pingfa_review.native_protocol import (
     encode_frame,
     response_limit_for_method,
 )
+from liang_pingfa_review.native_contracts import opaque_embedded_json_rules
 
 
 class ScriptedPipe:
@@ -57,6 +58,7 @@ class ScriptedPipe:
                     encode_frame(
                         response,
                         maximum=response_limit_for_method(request["method"]),
+                        opaque_string_rules=opaque_embedded_json_rules("response"),
                     )
                 )
                 if self._extra_frame:
@@ -64,6 +66,9 @@ class ScriptedPipe:
                         encode_frame(
                             response,
                             maximum=response_limit_for_method(request["method"]),
+                            opaque_string_rules=opaque_embedded_json_rules(
+                                "response"
+                            ),
                         )
                     )
         return amount
