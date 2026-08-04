@@ -6,7 +6,7 @@ deterministic across supported Python versions and locales.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -14,7 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, Final, TypeAlias, cast
 import unicodedata
 
 from .errors import ErrorCode, PipelineError
@@ -35,113 +35,466 @@ from .ownership import (
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+_DeadlineCheck: TypeAlias = Callable[[str], None]
 
 SUPPORTED_DWG_VERSIONS: dict[str, str] = {"AC1032": "AC1032/R2018"}
+# This is deliberately one project-wide policy rather than a parser-specific
+# default. It bounds every artifact, configuration, session, and RPC payload
+# before any recursive parser, normalizer, serializer, or schema validator
+# receives it. Packaged schemas currently remain far below this 128-level cap.
+MAX_JSON_NESTING_DEPTH: Final[int] = 128
+# RPC callers supply an absolute-deadline callback.  These fixed intervals
+# keep every iterative native-response pass interruptible without making
+# ordinary artifact loads pay callback overhead.
+_CANONICAL_NODE_CHECK_INTERVAL: Final[int] = 64
+_CANONICAL_TEXT_CHECK_INTERVAL: Final[int] = 4096
+_CANONICAL_HASH_CHECK_INTERVAL: Final[int] = 64 * 1024
 
 
 class CanonicalJsonError(ValueError):
     """Raised when a value cannot be represented by the strict JSON profile."""
 
 
-def _nfc(value: str) -> str:
+def _check_deadline(
+    deadline_check: _DeadlineCheck | None,
+    stage: str,
+) -> None:
+    """Run an optional caller-owned absolute-deadline checkpoint."""
+
+    if deadline_check is not None:
+        deadline_check(stage)
+
+
+def _nfc(
+    value: str,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+    stage: str = "JSON NFC normalization",
+) -> str:
+    """Normalize one string after bounded progress probes.
+
+    ``unicodedata.normalize`` is the authority for Unicode normalization.  A
+    cheap bounded scan before it makes large RPC strings observable to the
+    request timer while retaining byte-for-byte behavior for non-RPC callers.
+    Native geometry's individual text fields are schema-bounded to 4096
+    characters; the scan also covers outer embedded JSON strings.
+    """
+
+    if deadline_check is not None:
+        for _offset in range(0, len(value), _CANONICAL_TEXT_CHECK_INTERVAL):
+            _check_deadline(deadline_check, stage)
+        _check_deadline(deadline_check, stage)
     return unicodedata.normalize("NFC", value)
 
 
-def normalize_json_value(value: Any) -> JsonValue:
+def _is_json_sequence(value: Any) -> bool:
+    """Return whether a value is a JSON-array candidate, excluding strings."""
+
+    return isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    )
+
+
+def validate_json_nesting(
+    value: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
+    """Iteratively reject over-deep or cyclic Python JSON-like values.
+
+    This defense-in-depth guard intentionally examines mappings, lists, and
+    tuples before recursive consumers such as JSON Schema can process them.
+    Repeated references are allowed, but a reference back into the active
+    container path is a recursive Python object and cannot be canonical JSON.
+    """
+
+    active_containers: set[int] = set()
+    stack: list[tuple[bool, Any, int]] = [(False, value, 0)]
+    nodes = 0
+    try:
+        while stack:
+            if nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                _check_deadline(
+                    deadline_check,
+                    "JSON object construction post-walk",
+                )
+            nodes += 1
+            leaving, current, depth = stack.pop()
+            if leaving:
+                active_containers.remove(cast(int, current))
+                continue
+            if not isinstance(current, Mapping) and not _is_json_sequence(current):
+                continue
+
+            next_depth = depth + 1
+            if next_depth > MAX_JSON_NESTING_DEPTH:
+                raise CanonicalJsonError("JSON nesting exceeds the fixed limit")
+            identity = id(current)
+            if identity in active_containers:
+                raise CanonicalJsonError("recursive JSON value")
+            active_containers.add(identity)
+            stack.append((True, identity, next_depth))
+
+            if isinstance(current, Mapping):
+                for key, item in current.items():
+                    # Keys are normally strings, but inspect both sides of a
+                    # hostile Mapping before normalization rejects bad keys.
+                    stack.append((False, item, next_depth))
+                    stack.append((False, key, next_depth))
+            else:
+                for item in current:
+                    stack.append((False, item, next_depth))
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON value recursion is unsupported") from error
+
+
+def _validate_json_text_nesting(
+    text: str,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
+    """Bound JSON delimiter nesting without invoking a recursive decoder.
+
+    The scan is intentionally syntax-light: ``json.loads`` remains the
+    authority for malformed input. It only recognizes JSON strings and their
+    escapes so brackets or braces inside quoted text never affect the cap.
+    """
+
+    if not isinstance(text, str):
+        raise CanonicalJsonError("JSON text is not a string")
+    depth = 0
+    in_string = False
+    escaped = False
+    for offset, character in enumerate(text):
+        if offset % _CANONICAL_TEXT_CHECK_INTERVAL == 0:
+            _check_deadline(deadline_check, "JSON text nesting scan")
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "{[":
+            depth += 1
+            if depth > MAX_JSON_NESTING_DEPTH:
+                raise CanonicalJsonError("JSON nesting exceeds the fixed limit")
+        elif character in "}]":
+            # A negative depth is malformed JSON, which the strict parser
+            # below reports without trying to repair it.
+            depth -= 1
+
+
+def validate_json_canonical_form(
+    value: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> None:
+    """Reject non-NFC, duplicate-key, and non-finite JSON values iteratively.
+
+    This is deliberately separate from normalization so strict RPC decoding
+    can prove canonical input before schema validation.  It is also shared by
+    native contract validation, avoiding a second divergent traversal for
+    Unicode, finite-number, and normalized-key checks.
+    """
+
+    validate_json_nesting(value, deadline_check=deadline_check)
+    stack = [value]
+    nodes = 0
+    finite_numbers = 0
+    try:
+        while stack:
+            if nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                _check_deadline(deadline_check, "JSON canonical post-walk")
+            nodes += 1
+            current = stack.pop()
+            if isinstance(current, str):
+                if current != _nfc(
+                    current,
+                    deadline_check=deadline_check,
+                    stage="JSON NFC validation",
+                ):
+                    raise CanonicalJsonError("string is not NFC")
+            elif isinstance(current, Mapping):
+                normalized: set[str] = set()
+                for index, (key, item) in enumerate(current.items()):
+                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                        _check_deadline(
+                            deadline_check,
+                            "JSON duplicate-key validation",
+                        )
+                    if not isinstance(key, str):
+                        raise CanonicalJsonError("object key is not a string")
+                    normalized_key = _nfc(
+                        key,
+                        deadline_check=deadline_check,
+                        stage="JSON NFC validation",
+                    )
+                    if normalized_key != key:
+                        raise CanonicalJsonError("object key is not NFC")
+                    if normalized_key in normalized:
+                        raise CanonicalJsonError(
+                            "duplicate normalized object key"
+                        )
+                    normalized.add(normalized_key)
+                    stack.append(item)
+            elif _is_json_sequence(current):
+                for index, item in enumerate(current):
+                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                        _check_deadline(
+                            deadline_check,
+                            "JSON canonical post-walk",
+                        )
+                    stack.append(item)
+            elif isinstance(current, float):
+                if finite_numbers % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                    _check_deadline(
+                        deadline_check,
+                        "JSON finite-number validation",
+                    )
+                finite_numbers += 1
+                if not math.isfinite(current):
+                    raise CanonicalJsonError("non-finite number")
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON value recursion is unsupported") from error
+
+
+def normalize_json_value(
+    value: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+    _nesting_already_checked: bool = False,
+) -> JsonValue:
     """Normalize a strict JSON value, rejecting lossy or ambiguous inputs."""
 
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise CanonicalJsonError("non-finite number")
-        return 0.0 if value == 0 else value
-    if isinstance(value, str):
-        return _nfc(value)
-    if isinstance(value, Mapping):
-        normalized: dict[str, JsonValue] = {}
-        for raw_key, raw_value in value.items():
-            if not isinstance(raw_key, str):
-                raise CanonicalJsonError("object key is not a string")
-            key = _nfc(raw_key)
-            if key in normalized:
-                raise CanonicalJsonError("duplicate normalized object key")
-            normalized[key] = normalize_json_value(raw_value)
-        return normalized
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        return [normalize_json_value(item) for item in value]
-    raise CanonicalJsonError(f"unsupported JSON value type: {type(value).__name__}")
+    if not _nesting_already_checked:
+        validate_json_nesting(value, deadline_check=deadline_check)
+    pending = object()
+    result: list[Any] = [pending]
+    # Entries carry a source value and its destination container/slot. The
+    # explicit stack avoids a second recursive path after depth validation.
+    stack: list[tuple[Any, dict[str, Any] | list[Any] | None, str | int | None]] = [
+        (value, None, None)
+    ]
+    nodes = 0
+    finite_numbers = 0
+
+    def assign(
+        destination: dict[str, Any] | list[Any] | None,
+        slot: str | int | None,
+        normalized: JsonValue,
+    ) -> None:
+        if destination is None:
+            result[0] = normalized
+        else:
+            assert slot is not None
+            destination[slot] = normalized
+
+    try:
+        while stack:
+            if nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                _check_deadline(deadline_check, "JSON normalization")
+            nodes += 1
+            current, destination, slot = stack.pop()
+            if current is None or isinstance(current, bool):
+                assign(destination, slot, current)
+            elif isinstance(current, int):
+                assign(destination, slot, current)
+            elif isinstance(current, float):
+                if finite_numbers % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                    _check_deadline(
+                        deadline_check,
+                        "JSON finite-number validation",
+                    )
+                finite_numbers += 1
+                if not math.isfinite(current):
+                    raise CanonicalJsonError("non-finite number")
+                assign(destination, slot, 0.0 if current == 0 else current)
+            elif isinstance(current, str):
+                assign(
+                    destination,
+                    slot,
+                    _nfc(
+                        current,
+                        deadline_check=deadline_check,
+                        stage="JSON NFC normalization",
+                    ),
+                )
+            elif isinstance(current, Mapping):
+                normalized_mapping: dict[str, Any] = {}
+                assign(destination, slot, normalized_mapping)
+                entries: list[tuple[str, Any]] = []
+                for index, (raw_key, raw_value) in enumerate(current.items()):
+                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                        _check_deadline(
+                            deadline_check,
+                            "JSON duplicate-key normalization",
+                        )
+                    if not isinstance(raw_key, str):
+                        raise CanonicalJsonError("object key is not a string")
+                    key = _nfc(
+                        raw_key,
+                        deadline_check=deadline_check,
+                        stage="JSON NFC normalization",
+                    )
+                    if key in normalized_mapping:
+                        raise CanonicalJsonError("duplicate normalized object key")
+                    # Reserve the key before traversing its value so NFC
+                    # collisions cannot be obscured by traversal order.
+                    normalized_mapping[key] = pending
+                    entries.append((key, raw_value))
+                for key, raw_value in reversed(entries):
+                    stack.append((raw_value, normalized_mapping, key))
+            elif _is_json_sequence(current):
+                # Decoded JSON arrays are lists.  Do not duplicate an
+                # attacker-controlled large list merely to reverse it.
+                items = current if isinstance(current, list) else list(current)
+                normalized_sequence: list[Any] = [pending] * len(items)
+                assign(destination, slot, normalized_sequence)
+                for index in range(len(items) - 1, -1, -1):
+                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                        _check_deadline(
+                            deadline_check,
+                            "JSON sequence normalization",
+                        )
+                    stack.append((items[index], normalized_sequence, index))
+            else:
+                raise CanonicalJsonError(
+                    f"unsupported JSON value type: {type(current).__name__}"
+                )
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON value recursion is unsupported") from error
+    if result[0] is pending:
+        raise CanonicalJsonError("JSON value normalization failed")
+    return cast(JsonValue, result[0])
 
 
-def canonical_json_bytes(value: Any) -> bytes:
+def canonical_json_bytes(
+    value: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> bytes:
     """Encode a value with deterministic UTF-8 JSON serialization."""
 
-    normalized = normalize_json_value(value)
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
+    try:
+        normalized = normalize_json_value(value, deadline_check=deadline_check)
+        if deadline_check is None:
+            return json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        encoder = json.JSONEncoder(
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        encoded: list[str] = []
+        next_checkpoint = _CANONICAL_TEXT_CHECK_INTERVAL
+        character_count = 0
+        for chunk in encoder.iterencode(normalized):
+            encoded.append(chunk)
+            character_count += len(chunk)
+            while character_count >= next_checkpoint:
+                _check_deadline(deadline_check, "JSON canonical serialization")
+                next_checkpoint += _CANONICAL_TEXT_CHECK_INTERVAL
+        _check_deadline(deadline_check, "JSON canonical serialization")
+        return "".join(encoded).encode("utf-8")
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON serialization recursion is unsupported") from error
 
 
-def canonical_sha256(value: Any) -> str:
+def canonical_sha256(
+    value: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> str:
     """Return the lowercase SHA-256 of canonical JSON."""
 
-    return sha256(canonical_json_bytes(value)).hexdigest()
+    payload = canonical_json_bytes(value, deadline_check=deadline_check)
+    if deadline_check is None:
+        return sha256(payload).hexdigest()
+    digest = sha256()
+    for offset in range(0, len(payload), _CANONICAL_HASH_CHECK_INTERVAL):
+        _check_deadline(deadline_check, "JSON canonical hashing")
+        digest.update(payload[offset : offset + _CANONICAL_HASH_CHECK_INTERVAL])
+    _check_deadline(deadline_check, "JSON canonical hashing")
+    return digest.hexdigest()
 
 
-def strict_json_loads(text: str) -> JsonValue:
-    """Load JSON while rejecting duplicate keys and non-standard constants."""
+def load_bounded_json(
+    text: str,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> Any:
+    """Decode JSON through the shared depth and duplicate-key boundary.
+
+    This lower-level parser deliberately does not normalize Unicode. A narrow
+    profile loader may have its own documented normalization semantics, but it
+    still receives the same iterative pre-parse and post-parse nesting cap.
+    Canonical artifacts should use :func:`strict_json_loads`.
+    """
 
     def reject_constant(value: str) -> None:
         raise CanonicalJsonError(f"non-standard JSON constant: {value}")
 
+    pair_count = 0
+
     def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal pair_count
         result: dict[str, Any] = {}
-        raw_keys: set[str] = set()
-        normalized_keys: set[str] = set()
         for raw_key, value in pairs:
-            if raw_key in raw_keys:
+            if pair_count % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                _check_deadline(deadline_check, "JSON duplicate-key validation")
+            pair_count += 1
+            if raw_key in result:
                 raise CanonicalJsonError("duplicate object key")
-            raw_keys.add(raw_key)
-            key = _nfc(raw_key)
-            if key != raw_key:
-                raise CanonicalJsonError("object key is not NFC")
-            if key in normalized_keys:
-                raise CanonicalJsonError("duplicate normalized object key")
-            normalized_keys.add(key)
-            result[key] = value
+            result[raw_key] = value
         return result
 
     try:
+        _validate_json_text_nesting(text, deadline_check=deadline_check)
+        _check_deadline(deadline_check, "JSON object construction")
         loaded = json.loads(
             text,
             object_pairs_hook=object_pairs,
             parse_constant=reject_constant,
         )
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as error:
         if isinstance(error, CanonicalJsonError):
             raise
         raise CanonicalJsonError("invalid JSON") from error
+    try:
+        validate_json_nesting(loaded, deadline_check=deadline_check)
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON validation recursion is unsupported") from error
+    return loaded
 
-    def require_nfc(value: Any) -> None:
-        if isinstance(value, str):
-            if value != _nfc(value):
-                raise CanonicalJsonError("string is not NFC")
-        elif isinstance(value, Mapping):
-            for key, item in value.items():
-                require_nfc(key)
-                require_nfc(item)
-        elif isinstance(value, list):
-            for item in value:
-                require_nfc(item)
 
-    require_nfc(loaded)
-    return normalize_json_value(loaded)
+def strict_json_loads(
+    text: str,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> JsonValue:
+    """Load canonical JSON while rejecting duplicate keys and non-NFC strings."""
+
+    try:
+        loaded = load_bounded_json(text, deadline_check=deadline_check)
+        validate_json_canonical_form(loaded, deadline_check=deadline_check)
+        return normalize_json_value(
+            loaded,
+            deadline_check=deadline_check,
+            _nesting_already_checked=True,
+        )
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON validation recursion is unsupported") from error
 
 
 def load_json_file(path: Path) -> JsonValue:
@@ -149,33 +502,45 @@ def load_json_file(path: Path) -> JsonValue:
 
     try:
         return strict_json_loads(path.read_text(encoding="utf-8"))
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         raise CanonicalJsonError("unable to read JSON artifact") from error
 
 
-def integrity_payload(artifact: Mapping[str, Any]) -> dict[str, JsonValue]:
+def integrity_payload(
+    artifact: Mapping[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> dict[str, JsonValue]:
     """Return a normalized artifact body excluding the self-integrity field."""
 
     payload = dict(artifact)
     payload.pop("integrity", None)
-    normalized = normalize_json_value(payload)
+    normalized = normalize_json_value(payload, deadline_check=deadline_check)
     if not isinstance(normalized, dict):
         raise CanonicalJsonError("artifact must be an object")
     return normalized
 
 
-def attach_integrity(artifact: Mapping[str, Any]) -> dict[str, JsonValue]:
+def attach_integrity(
+    artifact: Mapping[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> dict[str, JsonValue]:
     """Return a copy with a canonical self-integrity SHA-256 field."""
 
-    result = integrity_payload(artifact)
+    result = integrity_payload(artifact, deadline_check=deadline_check)
     result["integrity"] = {
         "algorithm": "SHA-256",
-        "sha256": canonical_sha256(result),
+        "sha256": canonical_sha256(result, deadline_check=deadline_check),
     }
     return result
 
 
-def verify_integrity(artifact: Mapping[str, Any]) -> bool:
+def verify_integrity(
+    artifact: Mapping[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+) -> bool:
     """Verify an artifact's self-integrity field without accepting defaults."""
 
     integrity = artifact.get("integrity")
@@ -186,7 +551,10 @@ def verify_integrity(artifact: Mapping[str, Any]) -> bool:
     actual = integrity.get("sha256")
     if not isinstance(actual, str):
         return False
-    return actual == canonical_sha256(integrity_payload(artifact))
+    return actual == canonical_sha256(
+        integrity_payload(artifact, deadline_check=deadline_check),
+        deadline_check=deadline_check,
+    )
 
 
 def write_new_text(path: Path, text: str) -> None:
@@ -226,18 +594,28 @@ class CreatedFileBinding:
 
 
 def created_file_matches(binding: CreatedFileBinding) -> bool:
-    """Return whether the artifact still names the recorded owned bytes."""
+    """Return whether the artifact still names the recorded owned bytes.
+
+    A retained artifact may have been privately staged with zero sharing, so
+    its exact handle is the only safe authority before final release.
+    """
 
     try:
         if binding.opened is not None:
+            expected_path = os.path.normcase(os.path.normpath(os.fspath(binding.path)))
+            handle_paths = {
+                os.path.normcase(
+                    os.path.normpath(os.fspath(binding.opened.final_path()))
+                ),
+                os.path.normcase(
+                    os.path.normpath(os.fspath(binding.opened.path))
+                ),
+            }
             return (
                 binding.opened.capture_binding().same_identity_and_content(
                     binding.owned_binding
                 )
-                and binding.backend.path_matches_binding(
-                    binding.path,
-                    binding.owned_binding,
-                )
+                and expected_path in handle_paths
             )
         return binding_matches_path(binding.owned_binding, binding.backend)
     except (OSError, OwnershipError):
@@ -473,8 +851,9 @@ def describe_owned_source(
 
     This is used for a just-published DWG and for an output held under the
     verification lease.  The bytes, size, header, and identity are read from
-    the held handle, then the current pathname is required to resolve to that
-    same exact object before an artifact can bind it.
+    the held handle.  An exclusive private-publication handle deliberately
+    denies pathname reopen, so its retained backend spelling is accepted as
+    the no-reopen alias fallback for a final handle path.
     """
 
     try:
@@ -485,12 +864,16 @@ def describe_owned_source(
             ErrorCode.OUTPUT_CHANGED_DURING_VERIFY,
             "output binding handle is unavailable",
         ) from error
+    expected_path = os.path.normcase(os.path.normpath(os.fspath(path)))
+    handle_paths = {
+        os.path.normcase(os.path.normpath(os.fspath(final_path))),
+        os.path.normcase(os.path.normpath(os.fspath(opened.path))),
+    }
     if (
         binding.is_directory
         or binding.sha256 is None
         or binding.byte_size is None
-        or not backend.path_matches_binding(path, binding)
-        or not backend.path_matches_binding(final_path, binding)
+        or expected_path not in handle_paths
     ):
         raise PipelineError(
             ErrorCode.OUTPUT_CHANGED_DURING_VERIFY,
