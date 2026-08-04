@@ -25,6 +25,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from .canonical import (
     CanonicalJsonError,
+    DeadlineCheckpointSampler,
     canonical_json_bytes,
     canonical_sha256,
     normalize_json_value,
@@ -230,19 +231,21 @@ def canonical_geometry_json_bytes(
         )
         chunks: list[bytes] = []
         byte_count = 0
+        sampler = DeadlineCheckpointSampler(
+            deadline_check,
+            interval=_GEOMETRY_UTF8_SCAN_CHARACTERS,
+            checkpoint=_check_deadline,
+        )
         for text_chunk in encoder.iterencode(normalized):
             for offset in range(
                 0,
                 len(text_chunk),
                 _GEOMETRY_UTF8_SCAN_CHARACTERS,
             ):
-                _check_deadline(
-                    deadline_check,
-                    "geometry canonical serialization",
-                )
-                chunk = text_chunk[
+                bounded_text = text_chunk[
                     offset : offset + _GEOMETRY_UTF8_SCAN_CHARACTERS
-                ].encode("utf-8", errors="strict")
+                ]
+                chunk = bounded_text.encode("utf-8", errors="strict")
                 byte_count += len(chunk)
                 if byte_count > MAX_NATIVE_GEOMETRY_JSON_BYTES:
                     raise PipelineError(
@@ -250,7 +253,10 @@ def canonical_geometry_json_bytes(
                         "native geometry JSON exceeds the fixed UTF-8 byte limit",
                     )
                 chunks.append(chunk)
-        _check_deadline(deadline_check, "geometry canonical serialization")
+                sampler.advance(
+                    "geometry canonical serialization",
+                    len(bounded_text),
+                )
         return b"".join(chunks)
     except (
         CanonicalJsonError,
@@ -376,13 +382,14 @@ def _deadline_aware_validator(
     if deadline_check is None:
         return Draft202012Validator(schema)
 
-    checks = 0
+    sampler = DeadlineCheckpointSampler(
+        deadline_check,
+        interval=_SCHEMA_CHECKPOINT_INTERVAL,
+        checkpoint=_check_deadline,
+    )
 
     def checkpoint(stage: str, *, force: bool = False) -> None:
-        nonlocal checks
-        if force or checks % _SCHEMA_CHECKPOINT_INTERVAL == 0:
-            _check_deadline(deadline_check, f"{kind} JSON Schema {stage}")
-        checks += 1
+        sampler.visit(f"{kind} JSON Schema {stage}", force=force)
 
     def deadline_items(
         validator: Draft202012Validator,
@@ -402,11 +409,15 @@ def _deadline_aware_validator(
             if item_ref == "#/$defs/segment"
             else "items"
         )
-        checkpoint(item_stage, force=True)
         if not validator.is_type(instance, "array"):
+            checkpoint(item_stage)
             return
         prefix = len(schema_value.get("prefixItems", []))
         total = len(instance)
+        # Small nested arrays are sampled by the shared schema counter, while
+        # long arrays force an initial and each subsequent bounded checkpoint.
+        # This avoids a callback for every one-item field in every entity.
+        checkpoint(item_stage, force=total >= _SCHEMA_CHECKPOINT_INTERVAL)
         extra = total - prefix
         if extra <= 0:
             return
@@ -417,7 +428,7 @@ def _deadline_aware_validator(
             for index in range(prefix, total):
                 checkpoint(
                     item_stage,
-                    force=index % _SCHEMA_CHECKPOINT_INTERVAL == 0,
+                    force=(index + 1) % _SCHEMA_CHECKPOINT_INTERVAL == 0,
                 )
             yield ValidationError(
                 f"Expected at most {prefix} item(s), found {extra} extra"
@@ -426,7 +437,7 @@ def _deadline_aware_validator(
         for index in range(prefix, total):
             checkpoint(
                 item_stage,
-                force=index % _SCHEMA_CHECKPOINT_INTERVAL == 0,
+                force=(index + 1) % _SCHEMA_CHECKPOINT_INTERVAL == 0,
             )
             yield from validator.descend(
                 instance=instance[index],

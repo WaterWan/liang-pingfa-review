@@ -47,12 +47,59 @@ MAX_JSON_NESTING_DEPTH: Final[int] = 128
 # keep every iterative native-response pass interruptible without making
 # ordinary artifact loads pay callback overhead.
 _CANONICAL_NODE_CHECK_INTERVAL: Final[int] = 64
-_CANONICAL_TEXT_CHECK_INTERVAL: Final[int] = 4096
+_CANONICAL_TEXT_CHECK_INTERVAL: Final[int] = 16 * 1024
+_CANONICAL_NFC_MINIMUM_CHECK_CHARACTERS: Final[int] = 4096
+_CANONICAL_SERIALIZATION_CHECK_INTERVAL: Final[int] = 16 * 1024
 _CANONICAL_HASH_CHECK_INTERVAL: Final[int] = 64 * 1024
 
 
 class CanonicalJsonError(ValueError):
     """Raised when a value cannot be represented by the strict JSON profile."""
+
+
+class DeadlineCheckpointSampler:
+    """Sample one absolute-deadline callback at a fixed unit interval.
+
+    Traversals call :meth:`visit` for each bounded node and call
+    :meth:`advance` for text that has already been split into bounded chunks.
+    The sampler never creates or changes a deadline; it only avoids calling
+    the caller-owned expensive monotonic-clock callback for every tiny unit.
+    Callers retain mandatory entry and exit checks around major stages.
+    """
+
+    def __init__(
+        self,
+        deadline_check: _DeadlineCheck | None,
+        *,
+        interval: int,
+        checkpoint: Callable[[_DeadlineCheck | None, str], None] | None = None,
+    ) -> None:
+        if interval <= 0:
+            raise ValueError("deadline checkpoint interval must be positive")
+        self._deadline_check = deadline_check
+        self._checkpoint = _check_deadline if checkpoint is None else checkpoint
+        self._interval = interval
+        self._units_until_check = interval
+
+    def visit(self, stage: str, *, force: bool = False) -> None:
+        """Record one visited node and checkpoint at the fixed interval."""
+
+        if force or self._units_until_check == self._interval:
+            self._checkpoint(self._deadline_check, stage)
+        self._units_until_check -= 1
+        if self._units_until_check == 0:
+            self._units_until_check = self._interval
+
+    def advance(self, stage: str, units: int) -> None:
+        """Record already-bounded text work, checking every ``interval`` units."""
+
+        if units < 0:
+            raise ValueError("deadline checkpoint units must not be negative")
+        while units >= self._units_until_check:
+            units -= self._units_until_check
+            self._checkpoint(self._deadline_check, stage)
+            self._units_until_check = self._interval
+        self._units_until_check -= units
 
 
 def _check_deadline(
@@ -80,9 +127,15 @@ def _nfc(
     characters; the scan also covers outer embedded JSON strings.
     """
 
-    if deadline_check is not None:
-        for _offset in range(0, len(value), _CANONICAL_TEXT_CHECK_INTERVAL):
-            _check_deadline(deadline_check, stage)
+    # Short fields are covered by the enclosing iterative node traversal.
+    # A longer scalar receives mandatory entry/exit checks; its maximum
+    # uninterrupted Unicode normalization work remains below the 16 KiB text
+    # interval, without probing every schema-bounded string.
+    if (
+        deadline_check is not None
+        and len(value) > _CANONICAL_NFC_MINIMUM_CHECK_CHARACTERS
+    ):
+        _check_deadline(deadline_check, stage)
         _check_deadline(deadline_check, stage)
     return unicodedata.normalize("NFC", value)
 
@@ -114,7 +167,10 @@ def validate_json_nesting(
     nodes = 0
     try:
         while stack:
-            if nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+            if (
+                nodes
+                and nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0
+            ):
                 _check_deadline(
                     deadline_check,
                     "JSON object construction post-walk",
@@ -187,6 +243,7 @@ def _validate_json_text_nesting(
             # A negative depth is malformed JSON, which the strict parser
             # below reports without trying to repair it.
             depth -= 1
+    _check_deadline(deadline_check, "JSON text nesting scan")
 
 
 def validate_json_canonical_form(
@@ -208,7 +265,10 @@ def validate_json_canonical_form(
     finite_numbers = 0
     try:
         while stack:
-            if nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+            if (
+                nodes
+                and nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0
+            ):
                 _check_deadline(deadline_check, "JSON canonical post-walk")
             nodes += 1
             current = stack.pop()
@@ -222,7 +282,10 @@ def validate_json_canonical_form(
             elif isinstance(current, Mapping):
                 normalized: set[str] = set()
                 for index, (key, item) in enumerate(current.items()):
-                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                    if (
+                        index
+                        and index % _CANONICAL_NODE_CHECK_INTERVAL == 0
+                    ):
                         _check_deadline(
                             deadline_check,
                             "JSON duplicate-key validation",
@@ -244,14 +307,20 @@ def validate_json_canonical_form(
                     stack.append(item)
             elif _is_json_sequence(current):
                 for index, item in enumerate(current):
-                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                    if (
+                        index
+                        and index % _CANONICAL_NODE_CHECK_INTERVAL == 0
+                    ):
                         _check_deadline(
                             deadline_check,
                             "JSON canonical post-walk",
                         )
                     stack.append(item)
             elif isinstance(current, float):
-                if finite_numbers % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                if (
+                    finite_numbers
+                    and finite_numbers % _CANONICAL_NODE_CHECK_INTERVAL == 0
+                ):
                     _check_deadline(
                         deadline_check,
                         "JSON finite-number validation",
@@ -296,7 +365,10 @@ def normalize_json_value(
 
     try:
         while stack:
-            if nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+            if (
+                nodes
+                and nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0
+            ):
                 _check_deadline(deadline_check, "JSON normalization")
             nodes += 1
             current, destination, slot = stack.pop()
@@ -305,7 +377,10 @@ def normalize_json_value(
             elif isinstance(current, int):
                 assign(destination, slot, current)
             elif isinstance(current, float):
-                if finite_numbers % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                if (
+                    finite_numbers
+                    and finite_numbers % _CANONICAL_NODE_CHECK_INTERVAL == 0
+                ):
                     _check_deadline(
                         deadline_check,
                         "JSON finite-number validation",
@@ -329,7 +404,10 @@ def normalize_json_value(
                 assign(destination, slot, normalized_mapping)
                 entries: list[tuple[str, Any]] = []
                 for index, (raw_key, raw_value) in enumerate(current.items()):
-                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                    if (
+                        index
+                        and index % _CANONICAL_NODE_CHECK_INTERVAL == 0
+                    ):
                         _check_deadline(
                             deadline_check,
                             "JSON duplicate-key normalization",
@@ -356,7 +434,10 @@ def normalize_json_value(
                 normalized_sequence: list[Any] = [pending] * len(items)
                 assign(destination, slot, normalized_sequence)
                 for index in range(len(items) - 1, -1, -1):
-                    if index % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                    if (
+                        index
+                        and index % _CANONICAL_NODE_CHECK_INTERVAL == 0
+                    ):
                         _check_deadline(
                             deadline_check,
                             "JSON sequence normalization",
@@ -397,15 +478,13 @@ def canonical_json_bytes(
             allow_nan=False,
         )
         encoded: list[str] = []
-        next_checkpoint = _CANONICAL_TEXT_CHECK_INTERVAL
-        character_count = 0
+        sampler = DeadlineCheckpointSampler(
+            deadline_check,
+            interval=_CANONICAL_SERIALIZATION_CHECK_INTERVAL,
+        )
         for chunk in encoder.iterencode(normalized):
             encoded.append(chunk)
-            character_count += len(chunk)
-            while character_count >= next_checkpoint:
-                _check_deadline(deadline_check, "JSON canonical serialization")
-                next_checkpoint += _CANONICAL_TEXT_CHECK_INTERVAL
-        _check_deadline(deadline_check, "JSON canonical serialization")
+            sampler.advance("JSON canonical serialization", len(chunk))
         return "".join(encoded).encode("utf-8")
     except RecursionError as error:
         raise CanonicalJsonError("JSON serialization recursion is unsupported") from error
@@ -423,9 +502,9 @@ def canonical_sha256(
         return sha256(payload).hexdigest()
     digest = sha256()
     for offset in range(0, len(payload), _CANONICAL_HASH_CHECK_INTERVAL):
-        _check_deadline(deadline_check, "JSON canonical hashing")
+        if offset:
+            _check_deadline(deadline_check, "JSON canonical hashing")
         digest.update(payload[offset : offset + _CANONICAL_HASH_CHECK_INTERVAL])
-    _check_deadline(deadline_check, "JSON canonical hashing")
     return digest.hexdigest()
 
 
@@ -451,7 +530,10 @@ def load_bounded_json(
         nonlocal pair_count
         result: dict[str, Any] = {}
         for raw_key, value in pairs:
-            if pair_count % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+            if (
+                pair_count
+                and pair_count % _CANONICAL_NODE_CHECK_INTERVAL == 0
+            ):
                 _check_deadline(deadline_check, "JSON duplicate-key validation")
             pair_count += 1
             if raw_key in result:
