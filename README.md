@@ -322,6 +322,13 @@ Remove-Item Env:\LIANG_PINGFA_RUN_GENERATED_ODA
 `health` 后 `get_session`；它不接受占位会话，也不能提前执行 document、inventory
 或 geometry RPC。两项响应及本地进程绑定通过后才构造并完整语义验证一次使用的
 私有 session descriptor。
+`native-session prepare` 一开始即捕获 UTC 创建时间以及同一 Windows 启动周期内的
+`GetTickCount64` 签发 tick、精确五分钟 deadline 和私有 boot/domain ID。descriptor
+完整性覆盖 `monotonic_clock`、`monotonic_boot_id`、`monotonic_issued` 和
+`monotonic_expires`；它们只存在于私有 descriptor，绝不进入 wire response、报告或
+CLI 事件。health、session 和后续 RPC 都取配置方法超时、严格 UTC 过期和这个原始
+uptime deadline 的最小值。重启/domain 不同、当前 uptime 小于签发值或达到 deadline
+都会失败关闭；延迟握手、落盘或另一进程消费都不会重新开始五分钟窗口。
 每份精确几何还必须与**同一**会话的 ID、完整进程/宿主、适配器/插件版本和指纹、
 完全相等的能力集合、保存源（含头、散列、大小、路径/文件身份）、数据库实例及
 revision 相符，并携带会话/文档 binding digest；只比较源字节绝不充分。v1 的固定

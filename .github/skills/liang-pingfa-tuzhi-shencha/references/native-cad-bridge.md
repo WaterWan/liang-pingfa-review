@@ -31,6 +31,15 @@ ODA 与原生通道之间回退。客户端在连接前后绑定 PID、创建时
 文档及本地 PID/process binding 全部通过后，才构造、完整语义验证并私有发布一次
 使用的 descriptor。会话短时、一次使用；断开、未知 RPC、重复/错配 ID、额外帧、
 文档切换或能力漂移都会失败关闭。
+`native-session prepare` 的最开始即捕获 UTC `created_at` 和同一 Windows 启动周期
+可跨 CLI 进程比较的 `GetTickCount64` tick，并只计算一次精确五分钟的
+`monotonic_expires`。私有 descriptor 的完整性还覆盖
+`monotonic_clock`、`monotonic_boot_id`、`monotonic_issued` 和
+`monotonic_expires`；这些字段不是 wire response、Markdown 报告或 CLI 事件。
+health、`get_session`、descriptor publication/consumption 和后续每个 RPC 都以原始
+uptime deadline、严格 UTC expiry 与配置方法超时的最早值为界。descriptor 仅在同一
+boot/domain 有效：重启/domain 不匹配、当前 uptime 小于签发值、或达到 expiry 都失败
+关闭，墙钟回拨、延迟握手和另一个进程读取不会重新获得五分钟窗口。
 `get_session` 的 `challenge_response` 必须是小写 SHA-256：按顺序编码协议
 版本、`liang-pingfa/native-bridge/challenge-response/v1`、session ID、client
 nonce、challenge、bridge nonce；每个 ASCII 字段均以前置的无符号 32 位大端字节
