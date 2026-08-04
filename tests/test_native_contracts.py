@@ -18,13 +18,19 @@ import unicodedata
 from collections.abc import Callable
 from unittest import mock
 
+import liang_pingfa_review.canonical as canonical_module
 import liang_pingfa_review.native_contracts as native_contracts_module
 from liang_pingfa_review.atomic_output import (
     ArtifactPublication,
     publish_artifacts,
     publish_private_artifacts,
 )
-from liang_pingfa_review.canonical import attach_integrity, canonical_json_bytes, canonical_sha256
+from liang_pingfa_review.canonical import (
+    CanonicalJsonError,
+    attach_integrity,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from liang_pingfa_review.errors import ErrorCode, PipelineError
 from liang_pingfa_review.native_audit import build_native_audit
 from liang_pingfa_review.native_contracts import (
@@ -32,12 +38,15 @@ from liang_pingfa_review.native_contracts import (
     MAX_NATIVE_GEOMETRY_ENTITIES,
     MAX_NATIVE_GEOMETRY_JSON_BYTES,
     MAX_NATIVE_GEOMETRY_SEGMENTS,
+    MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
     bits_from_float,
     load_native_artifact,
     require_geometry_json_utf8_bytes,
+    require_inventory_json_utf8_bytes,
     schema_for_native,
     translate_binary64_bits,
     translated_geometry_bits,
+    strict_native_json,
     validate_native_contract,
 )
 from liang_pingfa_review.native_manifest import build_native_manifest
@@ -62,6 +71,31 @@ from tests.support.synthetic_native import (
 class NativeContractTests(unittest.TestCase):
     """Prove generic validation fails closed before orchestration."""
 
+    def test_opaque_embedded_json_allowlist_has_only_exact_schema_paths(self) -> None:
+        self.assertEqual(
+            {
+                kind: dict(paths)
+                for kind, paths in native_contracts_module.NATIVE_OPAQUE_EMBEDDED_JSON_RULES.items()
+            },
+            {
+                "response": {
+                    ("result", "geometry_json"): MAX_NATIVE_GEOMETRY_JSON_BYTES,
+                    (
+                        "result",
+                        "inventory_json",
+                    ): native_contracts_module.MAX_NATIVE_INVENTORY_JSON_BYTES,
+                },
+                "manifest": {
+                    (
+                        "preconditions_geometry_json",
+                    ): MAX_NATIVE_GEOMETRY_JSON_BYTES,
+                },
+                "console_export": {
+                    ("geometry_json",): MAX_NATIVE_GEOMETRY_JSON_BYTES,
+                },
+            },
+        )
+
     def test_all_packaged_native_schemas_are_strict_recursively(self) -> None:
         def check(value: object) -> None:
             if not isinstance(value, dict):
@@ -80,6 +114,7 @@ class NativeContractTests(unittest.TestCase):
             "config",
             "request",
             "response",
+            "inventory",
             "session",
             "geometry",
             "audit",
@@ -1323,6 +1358,153 @@ class NativeGeometryUtf8ByteLimitTests(unittest.TestCase):
         with self.assertRaises(PipelineError) as raised:
             self._require(raw_over_limit)
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+    def test_inventory_utf8_boundary_is_exact_and_independent(self) -> None:
+        """Inventory receives its own opaque 64 KiB raw-carrier cap."""
+
+        at_limit = "a" * native_contracts_module.MAX_NATIVE_INVENTORY_JSON_BYTES
+        self.assertIs(
+            require_inventory_json_utf8_bytes(
+                at_limit,
+                error=ErrorCode.NATIVE_PROTOCOL_INVALID,
+            ),
+            at_limit,
+        )
+        with self.assertRaises(PipelineError) as raised:
+            require_inventory_json_utf8_bytes(
+                at_limit + "a",
+                error=ErrorCode.NATIVE_PROTOCOL_INVALID,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_PROTOCOL_INVALID)
+
+    def test_opaque_manifest_hash_uses_exact_carrier_and_keeps_valid_v1_hashes(
+        self,
+    ) -> None:
+        """Outer carrier codepoints bind exactly without changing valid v1 bytes."""
+
+        rules = native_contracts_module.opaque_embedded_json_rules("manifest")
+        outer = {"preconditions_geometry_json": "\u0344"}
+        encoded = canonical_json_bytes(outer, opaque_string_rules=rules)
+        self.assertEqual(
+            encoded,
+            json.dumps(
+                outer,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        )
+        self.assertEqual(
+            canonical_sha256(outer, opaque_string_rules=rules),
+            canonical_sha256(
+                json.loads(encoded.decode("utf-8")),
+                opaque_string_rules=rules,
+            ),
+        )
+
+        # All previously valid carriers contain canonical inner JSON, so the
+        # v1 digest is byte-identical under the explicit opaque semantics.
+        valid_outer = {
+            "preconditions_geometry_json": canonical_json_bytes(geometry()).decode(
+                "utf-8"
+            )
+        }
+        self.assertEqual(
+            canonical_sha256(valid_outer),
+            canonical_sha256(valid_outer, opaque_string_rules=rules),
+        )
+
+    def test_inner_geometry_scalar_cap_precedes_nfc_and_preserves_hangul_policy(
+        self,
+    ) -> None:
+        """A 4,097-code-point text scalar is rejected before NFC work."""
+
+        below_limit = "\u0344" * MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS
+        above_limit = below_limit + "\u0344"
+        calls: list[int] = []
+        original_normalize = canonical_module.unicodedata.normalize
+
+        def observe(form: str, value: str) -> str:
+            calls.append(len(value))
+            return original_normalize(form, value)
+
+        with mock.patch.object(
+            canonical_module.unicodedata,
+            "normalize",
+            side_effect=observe,
+        ):
+            with self.assertRaises(CanonicalJsonError):
+                strict_native_json(
+                    json.dumps({"text": below_limit}, ensure_ascii=False),
+                    maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
+                )
+            with self.assertRaises(CanonicalJsonError):
+                strict_native_json(
+                    json.dumps({"text": above_limit}, ensure_ascii=False),
+                    maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
+                )
+
+        self.assertIn(len(below_limit), calls)
+        self.assertNotIn(len(above_limit), calls)
+        self.assertTrue(
+            all(length <= MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS for length in calls)
+        )
+
+        composed = "가"
+        self.assertEqual(
+            strict_native_json(
+                json.dumps({"text": composed}, ensure_ascii=False),
+                maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
+            )["text"],
+            composed,
+        )
+        with self.assertRaises(CanonicalJsonError):
+            strict_native_json(
+                json.dumps({"text": "\u1100\u1161"}, ensure_ascii=False),
+                maximum_string_codepoints=MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
+            )
+
+    def test_maximum_geometry_carrier_rejects_huge_inner_text_before_nfc(self) -> None:
+        """A 16 MiB valid JSON carrier cannot normalize its oversized scalar."""
+
+        prefix = '{"text":"'
+        suffix = '"}'
+        remaining = MAX_NATIVE_GEOMETRY_JSON_BYTES - len(
+            (prefix + suffix).encode("utf-8")
+        )
+        carrier = (
+            prefix
+            + "\u0344" * (remaining // len("\u0344".encode("utf-8")))
+            + "a" * (remaining % len("\u0344".encode("utf-8")))
+            + suffix
+        )
+        self.assertEqual(
+            len(carrier.encode("utf-8")),
+            MAX_NATIVE_GEOMETRY_JSON_BYTES,
+        )
+        calls: list[int] = []
+        original_normalize = canonical_module.unicodedata.normalize
+
+        def bounded_normalize(form: str, value: str) -> str:
+            calls.append(len(value))
+            if len(value) > MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS:
+                raise AssertionError("oversized inner text reached NFC")
+            return original_normalize(form, value)
+
+        with mock.patch.object(
+            canonical_module.unicodedata,
+            "normalize",
+            side_effect=bounded_normalize,
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                native_contracts_module._embedded_geometry(
+                    carrier,
+                    error=ErrorCode.NATIVE_READBACK_INVALID,
+                )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
+        self.assertTrue(
+            all(length <= MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS for length in calls)
+        )
 
     def test_private_loader_and_embedded_parser_reject_before_decoding_geometry(self) -> None:
         payload = b"x" * (MAX_NATIVE_GEOMETRY_JSON_BYTES + 1)
