@@ -19,12 +19,19 @@ from .ownership import (
     OwnershipCleanupError,
     OwnershipError,
     OwnershipLostError,
+    PublicOutputAclPolicy,
     LexicalDirectoryChainLease,
+    WindowsFileOwnershipBackend,
     acquire_lexical_directory_chain,
+    apply_public_output_acl_policy,
+    capture_public_output_acl_policy,
+    current_user_sid,
     dispose_owned_binding,
     dispose_retained_owned_path,
     lexical_absolute_path,
     platform_backend,
+    secure_private_staging_file,
+    verify_private_staging_file,
 )
 from .temporary import recover_publication_temporary
 
@@ -443,6 +450,7 @@ class PublicationTemporary:
 
     owned: OwnedPath
     binding: OwnedPathBinding
+    public_acl_policy: PublicOutputAclPolicy
 
 
 @dataclass
@@ -452,22 +460,196 @@ class ArtifactTemporary:
     target: OutputTargetLease
     owned: OwnedPath
     binding: OwnedPathBinding
+    public_acl_policy: PublicOutputAclPolicy | None
+    private: bool = False
 
 
 @dataclass
 class PublishedArtifact:
-    """A no-replace public artifact still backed by its retained handle."""
+    """A no-replace final artifact still backed by its retained handle."""
 
     path: Path
     owned: OwnedPath
     binding: OwnedPathBinding
     backend: FileOwnershipBackend
+    private: bool = False
+
+
+@dataclass(frozen=True)
+class ArtifactPublication:
+    """One final artifact and its explicit visibility contract.
+
+    Public artifacts restore the captured parent DACL immediately before
+    rename.  Private artifacts retain the protected current-user/SYSTEM DACL
+    through and after the no-replace rename.
+    """
+
+    path: Path
+    payload: bytes
+    private: bool = False
 
 
 def _artifact_temporary_path(parent: OutputParentLease) -> Path:
     """Allocate a private sibling name beneath an already-bound parent."""
 
     return parent.path / f".liang-pingfa-artifact-{uuid4().hex}.tmp"
+
+
+def _handle_names_path(opened: OwnedPath, expected: Path) -> bool:
+    """Compare a pathname reported by an already-open handle only.
+
+    Publication temporaries have an exclusive no-share handle while private.
+    Reopening their pathname merely to compare identity would either fail on
+    Windows or create an avoidable confidentiality race.  ``final_path`` is
+    the handle's own authoritative spelling.
+    """
+
+    try:
+        # Windows can spell one handle's final path with a long component
+        # while the retained lexical chain used its valid 8.3 spelling.
+        # ``opened.path`` is maintained only by the held-handle backend on
+        # create/rename; it is a no-reopen fallback for that alias case.
+        return any(
+            _path_key(candidate) == _path_key(expected)
+            for candidate in (opened.final_path(), opened.path)
+        )
+    except (OSError, OwnershipError):
+        return False
+
+
+def _validate_private_artifact_parent(parent: OutputParentLease) -> None:
+    """Reject an untrusted parent that can replace a private final artifact.
+
+    A direct private file DACL protects confidentiality after creation, but a
+    parent with DELETE_CHILD or directory-security/reparse authority could
+    still remove or redirect its name before the final retained handle is
+    acquired.  The production gate therefore evaluates every already-held
+    no-follow ancestor.  Generated backends expose the same boundary through
+    a narrow probe without pretending POSIX mode bits are Windows DACLs.
+    """
+
+    try:
+        parent.require_binding()
+        if not isinstance(parent.backend, WindowsFileOwnershipBackend):
+            probe = getattr(parent.backend, "validate_private_artifact_ancestry", None)
+            if callable(probe):
+                probe(parent.path)
+                return
+            # Test-only backends that already model private staging ancestry
+            # retain the equivalent capability name.
+            fallback = getattr(parent.backend, "validate_private_staging_ancestry", None)
+            if callable(fallback):
+                fallback(parent.path)
+                return
+            raise OwnershipCleanupError(
+                "private artifact ancestry capability is unavailable"
+            )
+
+        # Import at use time: native_bridge imports no publication module, but
+        # this keeps generic ODA publication independent of native-only ACL
+        # parsing until a caller explicitly requests a private artifact.
+        from .native_bridge import (
+            _TRUSTED_ADMINISTRATORS_SID,
+            _TRUSTED_SYSTEM_SID,
+            _read_component_dacl,
+            validate_component_dacl,
+        )
+
+        trusted = frozenset(
+            {
+                current_user_sid(),
+                _TRUSTED_SYSTEM_SID,
+                _TRUSTED_ADMINISTRATORS_SID,
+            }
+        )
+        for component in parent.chain.components:
+            validate_component_dacl(
+                _read_component_dacl(component.owned),
+                is_directory=True,
+                trusted_sids=trusted,
+                allow_trustedinstaller_owner=True,
+            )
+        parent.require_binding()
+    except PipelineError as error:
+        raise PipelineError(
+            ErrorCode.ATOMIC_PUBLISH_FAILED,
+            "private artifact parent cannot be validated",
+        ) from error
+    except (OSError, OwnershipError) as error:
+        raise PipelineError(
+            ErrorCode.ATOMIC_PUBLISH_FAILED,
+            "private artifact parent cannot be validated",
+        ) from error
+
+
+def _create_private_publication_file(
+    path: Path,
+    backend: FileOwnershipBackend,
+    *,
+    private_final: bool,
+) -> tuple[OwnedPath, PublicOutputAclPolicy | None]:
+    """Create a hidden file private through commit and optionally afterward."""
+
+    creator = getattr(backend, "create_private_file", None)
+    if not callable(creator):
+        raise OwnershipCleanupError("private publication file API is unavailable")
+    opened = creator(path)
+    try:
+        # Only public finals need the parent-derived policy.  Capturing it for
+        # a private final is harmless but makes accidental later restoration
+        # too easy, so private artifacts deliberately carry no such policy.
+        public_acl_policy = (
+            None
+            if private_final
+            else capture_public_output_acl_policy(opened, backend)
+        )
+        secure_private_staging_file(opened, backend)
+        if not _handle_names_path(opened, path):
+            raise OwnershipLostError("private publication file path drifted")
+        return opened, public_acl_policy
+    except BaseException:
+        try:
+            opened.request_delete()
+        finally:
+            opened.close()
+        raise
+
+
+def _restore_public_acl_before_commit(
+    opened: OwnedPath,
+    binding: OwnedPathBinding,
+    policy: PublicOutputAclPolicy,
+    destination: Path,
+    backend: FileOwnershipBackend,
+) -> None:
+    """Switch to the ordinary output policy immediately before final rename."""
+
+    apply_public_output_acl_policy(opened, policy, backend)
+    current = opened.capture_binding()
+    if (
+        current.is_directory
+        or not current.same_identity_and_content(binding)
+        or not _handle_names_path(opened, destination)
+    ):
+        raise OwnershipLostError("private publication final ACL transition drifted")
+
+
+def _verify_private_acl_before_commit(
+    opened: OwnedPath,
+    binding: OwnedPathBinding,
+    destination: Path,
+    backend: FileOwnershipBackend,
+) -> None:
+    """Require a private final DACL without restoring the parent policy."""
+
+    verify_private_staging_file(opened, backend)
+    current = opened.capture_binding()
+    if (
+        current.is_directory
+        or not current.same_identity_and_content(binding)
+        or not _handle_names_path(opened, destination)
+    ):
+        raise OwnershipLostError("private artifact final ACL binding drifted")
 
 
 def _discard_retained_artifact(
@@ -501,6 +683,8 @@ def _discard_retained_artifact(
 def _stage_new_artifact(
     target: OutputTargetLease,
     payload: bytes,
+    *,
+    private: bool = False,
 ) -> ArtifactTemporary:
     """Write one artifact only to a retained temporary under its bound parent."""
 
@@ -508,6 +692,7 @@ def _stage_new_artifact(
         raise PipelineError(ErrorCode.INVALID_ARGUMENT, "artifact payload is invalid")
     opened: OwnedPath | None = None
     binding: OwnedPathBinding | None = None
+    public_acl_policy: PublicOutputAclPolicy | None = None
     try:
         # This is deliberately immediately before CreateFileW.  Holding the
         # directory's no-delete lease plus this identity recheck closes the
@@ -516,18 +701,37 @@ def _stage_new_artifact(
         temporary = _artifact_temporary_path(target.parent)
         if temporary == target.destination:
             raise PipelineError(ErrorCode.INVALID_ARGUMENT, "artifact name is reserved")
-        opened = target.backend.create_new_file(temporary)
+        opened, public_acl_policy = _create_private_publication_file(
+            temporary,
+            target.backend,
+            private_final=private,
+        )
         opened.write_bytes(payload)
         binding = opened.capture_binding()
         if (
             binding.is_directory
             or binding.byte_size != len(payload)
             or binding.sha256 != sha256(payload).hexdigest()
-            or not target.backend.path_matches_binding(temporary, binding)
+            or not _handle_names_path(opened, temporary)
         ):
             raise OwnershipLostError("artifact temporary binding differs")
         target.require_new_destination()
-        return ArtifactTemporary(target=target, owned=opened, binding=binding)
+        if private:
+            _verify_private_acl_before_commit(
+                opened,
+                binding,
+                temporary,
+                target.backend,
+            )
+        elif public_acl_policy is None:
+            raise OwnershipCleanupError("public artifact policy is unavailable")
+        return ArtifactTemporary(
+            target=target,
+            owned=opened,
+            binding=binding,
+            public_acl_policy=public_acl_policy,
+            private=private,
+        )
     except PipelineError as error:
         if opened is not None:
             _discard_retained_artifact(opened, binding, error)
@@ -551,25 +755,47 @@ def _commit_new_artifact(temporary: ArtifactTemporary) -> PublishedArtifact:
         current = temporary.owned.capture_binding()
         if (
             not current.same_identity_and_content(temporary.binding)
-            or not target.backend.path_matches_binding(
-                temporary.binding.path,
-                temporary.binding,
-            )
+            or not _handle_names_path(temporary.owned, temporary.binding.path)
         ):
             raise OwnershipLostError("artifact temporary ownership changed")
+        if temporary.private:
+            _verify_private_acl_before_commit(
+                temporary.owned,
+                temporary.binding,
+                temporary.binding.path,
+                target.backend,
+            )
+        else:
+            if temporary.public_acl_policy is None:
+                raise OwnershipCleanupError("public artifact policy is unavailable")
+            _restore_public_acl_before_commit(
+                temporary.owned,
+                temporary.binding,
+                temporary.public_acl_policy,
+                temporary.binding.path,
+                target.backend,
+            )
         temporary.owned.rename_no_replace(target.destination)
         final_binding = temporary.owned.capture_binding()
         target.require_parent_binding()
         if (
             not final_binding.same_identity_and_content(temporary.binding)
-            or not target.backend.path_matches_binding(target.destination, final_binding)
+            or not _handle_names_path(temporary.owned, target.destination)
         ):
             raise OwnershipLostError("artifact publication ownership changed")
+        if temporary.private:
+            _verify_private_acl_before_commit(
+                temporary.owned,
+                final_binding,
+                target.destination,
+                target.backend,
+            )
         return PublishedArtifact(
             path=target.destination,
             owned=temporary.owned,
             binding=final_binding,
             backend=target.backend,
+            private=temporary.private,
         )
     except DestinationExistsError as error:
         raise PipelineError(
@@ -585,15 +811,21 @@ def _commit_new_artifact(temporary: ArtifactTemporary) -> PublishedArtifact:
         ) from error
 
 
-def _close_published_artifact(artifact: PublishedArtifact) -> None:
-    """Close a successfully committed artifact only after its final binding check."""
+def _require_retained_published_binding(artifact: PublishedArtifact) -> None:
+    """Rebind a final through its retained handle without reopening its name."""
 
     current = artifact.owned.capture_binding()
     if (
         not current.same_identity_and_content(artifact.binding)
-        or not artifact.backend.path_matches_binding(artifact.path, current)
+        or not _handle_names_path(artifact.owned, artifact.path)
     ):
         raise OwnershipLostError("artifact changed before handle release")
+
+
+def _close_published_artifact(artifact: PublishedArtifact) -> None:
+    """Close a successfully committed artifact only after its final binding check."""
+
+    _require_retained_published_binding(artifact)
     artifact.owned.close()
 
 
@@ -605,6 +837,15 @@ def _rollback_published_artifact(
 
     try:
         _discard_retained_artifact(artifact.owned, artifact.binding, original_failure)
+        # A retained-handle delete cannot remove a pathname replacement, and
+        # that is intentional.  Treat any surviving final name as an
+        # unproven rollback rather than silently accepting an unpaired or
+        # possibly passed replacement artifact.
+        if artifact.backend.path_exists(artifact.path):
+            raise PipelineError(
+                ErrorCode.PUBLICATION_ROLLBACK_FAILURE,
+                "published artifact final name survived rollback",
+            )
     except PipelineError as retained_error:
         # A close failure can consume the final handle after a successful
         # no-replace rename. Reopening is safe only when the current pathname
@@ -620,23 +861,397 @@ def _rollback_published_artifact(
             ) from retained_error
 
 
-def publish_new_artifacts(
-    artifacts: Sequence[tuple[Path, bytes]],
+@dataclass
+class PublicationTransaction:
+    """A retained-handle pair staged before a later all-or-nothing commit.
+
+    The streamed output temporary and byte artifact temporary are deliberately
+    staged under their already-leased public parents, but neither final name is
+    exposed until the caller has completed private-workspace cleanup.  The
+    transaction retains every file handle through both no-replace renames and
+    any rollback, which is the authority needed to remove only files created
+    by this invocation.
+    """
+
+    output_target: OutputTargetLease
+    output: PublicationTemporary
+    backend: FileOwnershipBackend
+    artifact: ArtifactTemporary | None = None
+    _published_output: PublishedArtifact | None = None
+    _published_artifact: PublishedArtifact | None = None
+    _committed: bool = False
+    _finished: bool = False
+
+    def _require_output_staging(self) -> None:
+        """Require the hidden streamed DWG to remain exactly what was staged."""
+
+        current = self.output.owned.capture_binding()
+        if (
+            not current.same_identity_and_content(self.output.binding)
+            or not _handle_names_path(
+                self.output.owned,
+                self.output.binding.path,
+            )
+        ):
+            raise OwnershipLostError("publication output temporary changed")
+        self.output_target.require_new_destination()
+
+    @staticmethod
+    def _require_artifact_staging(temporary: ArtifactTemporary) -> None:
+        """Require the hidden artifact to remain bound before any commit."""
+
+        current = temporary.owned.capture_binding()
+        if (
+            not current.same_identity_and_content(temporary.binding)
+            or not _handle_names_path(
+                temporary.owned,
+                temporary.binding.path,
+            )
+        ):
+            raise OwnershipLostError("publication artifact temporary changed")
+        temporary.target.require_new_destination()
+
+    def stage_artifact(
+        self,
+        target: OutputTargetLease,
+        payload: bytes,
+        *,
+        private: bool = False,
+    ) -> ArtifactTemporary:
+        """Flush a payload with an explicit final ACL contract before rename."""
+
+        if self._finished or self._committed or self.artifact is not None:
+            raise PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "publication transaction cannot stage another artifact",
+            )
+        try:
+            self._require_output_staging()
+            if private:
+                _validate_private_artifact_parent(target.parent)
+            self.artifact = _stage_new_artifact(target, payload, private=private)
+            self._require_artifact_staging(self.artifact)
+            return self.artifact
+        except PipelineError:
+            raise
+        except (OSError, OwnershipError) as error:
+            raise PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "publication artifact cannot be staged",
+            ) from error
+
+    def _require_staged_pair(self) -> ArtifactTemporary:
+        """Verify both invisible files and destinations immediately before commit."""
+
+        if self._finished or self._committed or self.artifact is None:
+            raise PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "publication transaction is incomplete",
+            )
+        self._require_output_staging()
+        self._require_artifact_staging(self.artifact)
+        return self.artifact
+
+    def _commit_output(self) -> PublishedArtifact:
+        """Commit the streamed output with the same no-replace proof as artifacts."""
+
+        self._require_output_staging()
+        _restore_public_acl_before_commit(
+            self.output.owned,
+            self.output.binding,
+            self.output.public_acl_policy,
+            self.output.binding.path,
+            self.backend,
+        )
+        self.output.owned.rename_no_replace(self.output_target.destination)
+        # Mark the irreversible rename before asking the backend for another
+        # binding.  If that post-rename inspection itself fails, cleanup still
+        # knows that the retained handle now names a public final and uses the
+        # rollback path rather than treating it as a hidden temporary.
+        self._published_output = PublishedArtifact(
+            path=self.output_target.destination,
+            owned=self.output.owned,
+            binding=self.output.binding,
+            backend=self.backend,
+        )
+        final_binding = self.output.owned.capture_binding()
+        self.output_target.require_parent_binding()
+        if (
+            not final_binding.same_identity_and_content(self.output.binding)
+            or not _handle_names_path(
+                self.output.owned,
+                self.output_target.destination,
+            )
+        ):
+            raise OwnershipLostError("publication output ownership changed")
+        self._published_output.binding = final_binding
+        return self._published_output
+
+    def _commit_artifact(self, temporary: ArtifactTemporary) -> PublishedArtifact:
+        """Commit the verification artifact while recording rename progress."""
+
+        self._require_artifact_staging(temporary)
+        if temporary.private:
+            _validate_private_artifact_parent(temporary.target.parent)
+            _verify_private_acl_before_commit(
+                temporary.owned,
+                temporary.binding,
+                temporary.binding.path,
+                temporary.target.backend,
+            )
+        else:
+            if temporary.public_acl_policy is None:
+                raise OwnershipCleanupError("public artifact policy is unavailable")
+            _restore_public_acl_before_commit(
+                temporary.owned,
+                temporary.binding,
+                temporary.public_acl_policy,
+                temporary.binding.path,
+                temporary.target.backend,
+            )
+        temporary.owned.rename_no_replace(temporary.target.destination)
+        # As with the DWG, retain a provisional final binding before a
+        # post-rename inspection can fail.  Rollback then remains
+        # identity-bound even when a backend reports an error after moving
+        # the hidden file to its public name.
+        self._published_artifact = PublishedArtifact(
+            path=temporary.target.destination,
+            owned=temporary.owned,
+            binding=temporary.binding,
+            backend=temporary.target.backend,
+            private=temporary.private,
+        )
+        final_binding = temporary.owned.capture_binding()
+        temporary.target.require_parent_binding()
+        if (
+            not final_binding.same_identity_and_content(temporary.binding)
+            or not _handle_names_path(
+                temporary.owned,
+                temporary.target.destination,
+            )
+        ):
+            raise OwnershipLostError("publication artifact ownership changed")
+        if temporary.private:
+            _verify_private_acl_before_commit(
+                temporary.owned,
+                final_binding,
+                temporary.target.destination,
+                temporary.target.backend,
+            )
+        self._published_artifact.binding = final_binding
+        return self._published_artifact
+
+    @staticmethod
+    def _require_published(artifact: PublishedArtifact) -> None:
+        """Require a committed final name to retain its owned identity."""
+
+        _require_retained_published_binding(artifact)
+
+    def _cleanup_after_failure(self, original_failure: BaseException) -> None:
+        """Roll back finals and remove only still-owned hidden temporaries."""
+
+        cleanup_failure: PipelineError | None = None
+
+        def record(error: PipelineError) -> None:
+            nonlocal cleanup_failure
+            if cleanup_failure is None:
+                cleanup_failure = error
+
+        if self._published_artifact is not None:
+            try:
+                _rollback_published_artifact(
+                    self._published_artifact,
+                    original_failure,
+                )
+            except PipelineError as error:
+                record(error)
+        elif self.artifact is not None:
+            try:
+                _discard_retained_artifact(
+                    self.artifact.owned,
+                    self.artifact.binding,
+                    original_failure,
+                )
+            except PipelineError as error:
+                record(error)
+
+        if self._published_output is not None:
+            try:
+                _rollback_published_artifact(
+                    self._published_output,
+                    original_failure,
+                )
+            except PipelineError as error:
+                record(error)
+        else:
+            try:
+                _cleanup_temporary_after_failure(
+                    self.output.owned,
+                    self.output.binding,
+                    self.backend,
+                    self.output_target.parent.path,
+                    original_failure,
+                )
+            except PipelineError as error:
+                record(error)
+
+        self._committed = False
+        self._finished = True
+        if cleanup_failure is not None:
+            raise cleanup_failure from original_failure
+
+    def abort(self, original_failure: BaseException | None = None) -> None:
+        """Discard uncommitted stages after a private-workspace failure."""
+
+        if self._finished:
+            return
+        self._cleanup_after_failure(
+            original_failure
+            or PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "publication transaction was aborted",
+            )
+        )
+
+    def commit(
+        self,
+        *,
+        source_binding: Callable[[], None] | None = None,
+    ) -> tuple[PublishedArtifact, PublishedArtifact]:
+        """Publish both finals but retain rollback authority until finalization.
+
+        The DWG is committed first.  A failed verification-artifact commit
+        therefore cannot leave a passed artifact; the first final is removed
+        through its retained identity before this method returns an error.  A
+        successful return is intentionally not the public success point:
+        callers must run all failure-prone post-rename cleanup, then call
+        :meth:`finalize` while these two owned final handles remain live.
+        """
+
+        failure: BaseException | None = None
+        try:
+            artifact = self._require_staged_pair()
+            if source_binding is not None:
+                source_binding()
+            self._published_output = self._commit_output()
+            # The source remains held by the caller through the full pair.
+            # Rechecking here keeps a late source race from authorizing the
+            # verification commit after the DWG has already been renamed.
+            if source_binding is not None:
+                source_binding()
+            self._published_artifact = self._commit_artifact(artifact)
+            self._require_published(self._published_output)
+            self._require_published(self._published_artifact)
+            self._committed = True
+            return self._published_output, self._published_artifact
+        except DestinationExistsError as error:
+            failure = PipelineError(
+                ErrorCode.OUTPUT_EXISTS,
+                "output appeared during publication",
+            )
+            failure.__cause__ = error
+        except PipelineError as error:
+            failure = error
+        except (OSError, OwnershipError) as error:
+            failure = PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "publication transaction failed",
+            )
+            failure.__cause__ = error
+
+        assert failure is not None
+        try:
+            self._cleanup_after_failure(failure)
+        except PipelineError as cleanup_error:
+            raise cleanup_error from failure
+        if failure.__cause__ is not None:
+            raise failure from failure.__cause__
+        raise failure
+
+    def finalize(self) -> tuple[PublishedArtifact, PublishedArtifact]:
+        """Irreversibly release final handles after all rollback gates passed.
+
+        Final handle release is deliberately best-effort after the final
+        retained-handle proofs have passed.  A late OS close-reporting error
+        must not turn a fully published pair into a contradictory failure
+        after rollback authority has already been released.
+        """
+
+        if (
+            self._finished
+            or not self._committed
+            or self._published_output is None
+            or self._published_artifact is None
+        ):
+            raise PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "publication transaction cannot be finalized",
+            )
+        try:
+            self._require_published(self._published_output)
+            self._require_published(self._published_artifact)
+        except PipelineError as error:
+            try:
+                self._cleanup_after_failure(error)
+            except PipelineError as cleanup_error:
+                raise cleanup_error from error
+            raise
+        except (OSError, OwnershipError) as error:
+            failure = PipelineError(
+                ErrorCode.ATOMIC_PUBLISH_FAILED,
+                "published final binding cannot be finalized",
+            )
+            failure.__cause__ = error
+            try:
+                self._cleanup_after_failure(failure)
+            except PipelineError as cleanup_error:
+                raise cleanup_error from failure
+            raise failure from error
+
+        # There are no correctness gates after this point.  Windows normally
+        # closes these handles deterministically; if a close reports late
+        # failure after consuming its native state, retain the consistent
+        # successful result rather than claiming failure with public passed
+        # evidence still present.
+        # Release the DWG before its passed verification artifact.  The normal
+        # case makes both readable immediately; this order also avoids making
+        # passed evidence visible before the primary output's release begins.
+        for artifact in (self._published_output, self._published_artifact):
+            try:
+                artifact.owned.close()
+            except (OSError, OwnershipError):
+                pass
+        self._finished = True
+        return self._published_output, self._published_artifact
+
+
+def publish_artifacts(
+    artifacts: Sequence[ArtifactPublication],
     *,
     backend: FileOwnershipBackend | None = None,
     retain_handles: bool = False,
     existing_parents: Sequence[OutputParentLease] = (),
 ) -> list[PublishedArtifact]:
-    """Atomically publish one or more JSON/Markdown-style byte artifacts.
+    """Atomically publish explicit private/public byte artifacts.
 
     Every payload is first flushed and fsynced into a retained temporary.  No
     final name is committed until all temporary writes have succeeded.  A
     later no-replace commit failure rolls back each earlier final through its
-    own still-open handle, so a command producing JSON and Markdown cannot
-    report a half-published pair.
+    own still-open handle.  Private entries retain the current-user/SYSTEM
+    DACL through their final rename; public entries alone restore the
+    captured parent DACL.  A mixed JSON/Markdown pair is therefore
+    all-or-nothing without making the JSON publicly inheritable.
     """
 
-    destinations = tuple(path for path, _payload in artifacts)
+    if any(
+        not isinstance(artifact, ArtifactPublication)
+        or not isinstance(artifact.path, Path)
+        or not isinstance(artifact.payload, bytes)
+        or not isinstance(artifact.private, bool)
+        for artifact in artifacts
+    ):
+        raise PipelineError(ErrorCode.INVALID_ARGUMENT, "artifact publication is invalid")
+    destinations = tuple(artifact.path for artifact in artifacts)
     target_set = acquire_new_output_target_leases(
         destinations,
         backend=backend,
@@ -647,20 +1262,23 @@ def publish_new_artifacts(
     failure: BaseException | None = None
     parent_closed = False
     try:
-        for target, (_destination, payload) in zip(target_set.targets, artifacts):
-            staged.append(_stage_new_artifact(target, payload))
+        for target, artifact in zip(target_set.targets, artifacts, strict=True):
+            if artifact.private:
+                _validate_private_artifact_parent(target.parent)
+            staged.append(
+                _stage_new_artifact(
+                    target,
+                    artifact.payload,
+                    private=artifact.private,
+                )
+            )
         for temporary in staged:
             published.append(_commit_new_artifact(temporary))
-        # Recheck all final names while every parent lease and final file
-        # handle remains open.  This also catches synthetic backends that
-        # model a parent replacement despite Windows sharing.
+        # Recheck every final through its retained handle.  Private staging
+        # deliberately uses no sharing, so this must not reopen a public
+        # pathname merely to prove the just-renamed identity.
         for artifact in published:
-            current = artifact.owned.capture_binding()
-            if (
-                not current.same_identity_and_content(artifact.binding)
-                or not artifact.backend.path_matches_binding(artifact.path, current)
-            ):
-                raise OwnershipLostError("artifact changed after publication")
+            _require_retained_published_binding(artifact)
 
         # Parent leases must remain held through all final rename checks.  If
         # release itself fails, roll back while the artifact handles still
@@ -708,6 +1326,46 @@ def publish_new_artifacts(
     if failure.__cause__ is not None:
         raise failure from failure.__cause__
     raise failure
+
+
+def publish_new_artifacts(
+    artifacts: Sequence[tuple[Path, bytes]],
+    *,
+    backend: FileOwnershipBackend | None = None,
+    retain_handles: bool = False,
+    existing_parents: Sequence[OutputParentLease] = (),
+) -> list[PublishedArtifact]:
+    """Publish ordinary public artifacts without changing ODA behavior."""
+
+    return publish_artifacts(
+        tuple(
+            ArtifactPublication(path=path, payload=payload, private=False)
+            for path, payload in artifacts
+        ),
+        backend=backend,
+        retain_handles=retain_handles,
+        existing_parents=existing_parents,
+    )
+
+
+def publish_private_artifacts(
+    artifacts: Sequence[tuple[Path, bytes]],
+    *,
+    backend: FileOwnershipBackend | None = None,
+    retain_handles: bool = False,
+    existing_parents: Sequence[OutputParentLease] = (),
+) -> list[PublishedArtifact]:
+    """Publish machine-readable final files with an exact private DACL."""
+
+    return publish_artifacts(
+        tuple(
+            ArtifactPublication(path=path, payload=payload, private=True)
+            for path, payload in artifacts
+        ),
+        backend=backend,
+        retain_handles=retain_handles,
+        existing_parents=existing_parents,
+    )
 
 
 @dataclass(frozen=True)
@@ -862,12 +1520,17 @@ def _copy_for_publication(
     temporary = temporary_parent / f".liang-pingfa-publish-{uuid4().hex}.tmp"
     owned: OwnedPath | None = None
     binding: OwnedPathBinding | None = None
+    public_acl_policy: PublicOutputAclPolicy | None = None
     try:
         if target is not None:
             # The retained parent handle denies a junction/rename replacement;
             # this identity recheck is the fallback for pathname-based create.
             target.require_new_destination()
-        owned = selected_backend.create_new_file(temporary)
+        owned, public_acl_policy = _create_private_publication_file(
+            temporary,
+            selected_backend,
+            private_final=False,
+        )
         # The source bytes come from the already-open staged handle rather
         # than a second path lookup. The source lease denies a replacement or
         # new writer for this whole stream transfer.
@@ -877,13 +1540,18 @@ def _copy_for_publication(
             binding.is_directory
             or binding.sha256 != lease.expectation.sha256
             or binding.byte_size != lease.expectation.byte_size
-            or not selected_backend.path_matches_binding(temporary, binding)
+            or not _handle_names_path(owned, temporary)
         ):
             raise OwnershipLostError("publication temporary content binding differs")
         # Rebind after the destination flush/fsync while the source handle is
         # still retained. This closes the formerly path-only copy race.
         lease.require_binding()
-        return PublicationTemporary(owned=owned, binding=binding)
+        assert public_acl_policy is not None
+        return PublicationTemporary(
+            owned=owned,
+            binding=binding,
+            public_acl_policy=public_acl_policy,
+        )
     except PipelineError:
         failure: BaseException = PipelineError(
             ErrorCode.RE_AUDIT_MISMATCH,
@@ -914,6 +1582,45 @@ def _copy_for_publication(
     finally:
         if not supplied_lease:
             lease.close()
+
+
+def stage_publication_transaction(
+    staged: Path | StagedOutputLease,
+    output_target: OutputTargetLease,
+) -> PublicationTransaction:
+    """Copy verified bytes to a hidden retained temporary without publishing.
+
+    The caller owns ``output_target``'s parent lease and must keep it alive
+    until :meth:`PublicationTransaction.commit` or
+    :meth:`PublicationTransaction.abort` completes.  This split is used when
+    private cleanup is a prerequisite for public visibility.
+    """
+
+    # The target's already-retained parent is the pathname authority, so
+    # staging uses the target's backend for every parent/binding check and
+    # hidden create.
+    selected_backend = output_target.backend
+    try:
+        temporary = _copy_for_publication(
+            staged,
+            output_target.destination,
+            backend=selected_backend,
+            target=output_target,
+        )
+        transaction = PublicationTransaction(
+            output_target=output_target,
+            output=temporary,
+            backend=selected_backend,
+        )
+        transaction._require_output_staging()
+        return transaction
+    except PipelineError:
+        raise
+    except (OSError, OwnershipError) as error:
+        raise PipelineError(
+            ErrorCode.ATOMIC_PUBLISH_FAILED,
+            "publication output cannot be staged",
+        ) from error
 
 
 def _cleanup_temporary_after_failure(
@@ -971,12 +1678,12 @@ def _verify_published_binding(
     destination: Path,
     backend: FileOwnershipBackend,
 ) -> OwnedPathBinding:
-    """Require the renamed handle and final pathname to be the verified bytes."""
+    """Require the renamed handle to be the verified bytes without reopening."""
 
     current = publication.owned.capture_binding()
     if (
         not current.same_identity_and_content(publication.binding)
-        or not backend.path_matches_binding(destination, current)
+        or not _handle_names_path(publication.owned, destination)
     ):
         raise OwnershipLostError("published output ownership changed")
     return current
@@ -1019,11 +1726,12 @@ def publish_no_replace(
 ) -> _Result | None:
     """Publish verified bytes without ever replacing a pre-existing output.
 
-    On Windows the temporary is created with a retained DELETE+read handle
-    that shares only read access.  The final rename uses that same handle with
-    ``FileRenameInfo.ReplaceIfExists = FALSE``.  An injected backend exists
-    solely for synthetic tests; the public production default fails closed
-    away from Windows.
+    On Windows the temporary is created with an exclusive retained handle and
+    a current-user/SYSTEM-only DACL.  Its parent-derived public DACL is
+    restored through that same handle immediately before the final
+    ``FileRenameInfo.ReplaceIfExists = FALSE`` rename.  An injected backend
+    exists solely for synthetic tests; the public production default fails
+    closed away from Windows.
     """
 
     selected_backend = _publication_backend(backend)
@@ -1067,14 +1775,22 @@ def publish_no_replace(
             not publication.owned.capture_binding().same_identity_and_content(
                 publication.binding
             )
-            or not selected_backend.path_matches_binding(
-                publication.binding.path, publication.binding
+            or not _handle_names_path(
+                publication.owned,
+                publication.binding.path,
             )
         ):
             raise OwnershipLostError("publication temporary ownership changed")
         # This is the final staged-output binding check immediately before
         # invoking the irreversible no-replace handle rename.
         lease.require_binding()
+        _restore_public_acl_before_commit(
+            publication.owned,
+            publication.binding,
+            publication.public_acl_policy,
+            publication.binding.path,
+            selected_backend,
+        )
 
         # There is intentionally no path-exists check here. The handle rename
         # is the only final decision, atomically failing when a destination
