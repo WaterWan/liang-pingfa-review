@@ -26,7 +26,11 @@ public static class NativeBridgeProtocolV1
     public const int MaxInventoryResponseBytes = 256 * 1024;
     /// <summary>Outer framed limit for a geometry response carrying escaped JSON.</summary>
     public const int MaxGeometryResponseBytes = 32 * 1024 * 1024;
-    /// <summary>Maximum unescaped canonical geometry JSON inside a response or manifest.</summary>
+    /// <summary>
+    /// Maximum unescaped canonical geometry JSON inside a response or
+    /// manifest, measured in UTF-8 encoded bytes (not UTF-16 characters or
+    /// JSON Schema code points).
+    /// </summary>
     public const int MaxGeometryJsonBytes = 16 * 1024 * 1024;
     /// <summary>Maximum canonical JSON in the fixed two-digest inventory result.</summary>
     public const int MaxInventoryJsonBytes = 64 * 1024;
@@ -170,7 +174,11 @@ public sealed record NativeManifestExecutionResultV1(
     string RollbackClaim,
     IReadOnlyList<NativeOperationResultV1> Operations);
 
-/// <summary>Separate post-save envelope that binds the embedded geometry revision.</summary>
+/// <summary>
+/// Separate post-save envelope that binds the embedded geometry revision.
+/// <paramref name="CanonicalGeometryJson"/> is limited by
+/// <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> UTF-8 bytes.
+/// </summary>
 public sealed record NativeConsoleExportV1(
     string RunId,
     string ManifestId,
@@ -326,7 +334,11 @@ public sealed record NativeInventoryExportV1(
     [property: JsonPropertyName("kind")] NativeWireResultKindV1 Kind,
     [property: JsonPropertyName("inventory_json")] string InventoryJson);
 
-/// <summary>Exact bounded geometry result, whose canonical JSON stays private.</summary>
+/// <summary>
+/// Exact bounded geometry result, whose private canonical JSON must not
+/// exceed <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> UTF-8
+/// bytes before an adapter parses or normalizes it.
+/// </summary>
 public sealed record NativeExactGeometryExportV1(
     [property: JsonPropertyName("kind")] NativeWireResultKindV1 Kind,
     [property: JsonPropertyName("geometry_json")] string GeometryJson);

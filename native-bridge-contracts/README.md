@@ -34,7 +34,10 @@ capabilities, and session/document binding digests must all match the issuing
 session and saved source, including its DWG header signature. Source equality
 alone is not conforming.  v1 accepts at most
 `MaxNativeGeometryEntities` entities and `MaxNativeGeometrySegments` aggregate
-segments; the unescaped geometry JSON cap is `MaxGeometryJsonBytes`, within the
-separate escaped-frame cap `MaxGeometryResponseBytes`. Inventory remains
+segments; the unescaped geometry JSON cap is `MaxGeometryJsonBytes` **UTF-8
+encoded bytes** (not .NET UTF-16 character count or JSON Schema code points),
+within the separate escaped-frame cap `MaxGeometryResponseBytes`. Conforming
+adapters must enforce that byte cap before parsing or normalizing every raw or
+embedded geometry field. Inventory remains
 separate and is capped by `MaxInventoryJsonBytes` and
 `MaxInventoryResponseBytes`.
