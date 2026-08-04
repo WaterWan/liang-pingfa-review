@@ -318,10 +318,15 @@ Remove-Item Env:\LIANG_PINGFA_RUN_GENERATED_ODA
 仅允许固定的只读 health/session/document/inventory/精确几何导出请求，绑定
 进程创建时间、Windows 会话、服务器 PID、nonce/challenge、文档、插件、协议
 和能力。未知方法、额外帧、文档漂移或会话过期都会失败关闭。
+在尚无持久 descriptor 的 prepare 阶段，独立 pre-handshake client 只能按顺序执行
+`health` 后 `get_session`；它不接受占位会话，也不能提前执行 document、inventory
+或 geometry RPC。两项响应及本地进程绑定通过后才构造并完整语义验证一次使用的
+私有 session descriptor。
 每份精确几何还必须与**同一**会话的 ID、完整进程/宿主、适配器/插件版本和指纹、
 完全相等的能力集合、保存源（含头、散列、大小、路径/文件身份）、数据库实例及
 revision 相符，并携带会话/文档 binding digest；只比较源字节绝不充分。v1 的固定
-上限为 2,000 个实体和总计 10,000 条线段，原始 geometry JSON 最多 16 MiB，外层
+上限为 2,000 个实体和总计 10,000 条线段，原始 geometry JSON 最多 16 MiB
+**UTF-8 字节**（不是字符/代码点数；schema `maxLength` 仅为次要约束），外层
 几何响应最多 32 MiB；inventory 是独立的双摘要响应，原始 JSON 最多 64 KiB。
 
 原生计划只允许经审计的 DBTEXT XY 平移、精确辅助覆盖文字删除，以及默认关闭且

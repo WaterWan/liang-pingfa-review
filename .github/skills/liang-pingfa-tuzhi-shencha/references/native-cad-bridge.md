@@ -25,7 +25,11 @@ native-session prepare --pid <PID> --pipe <advertised-local-pipe> --session-out 
 工具绝不枚举“第一个”进程，不扫描注册表或 PATH，不选择当前窗口，也不在
 ODA 与原生通道之间回退。客户端在连接前后绑定 PID、创建时间、Windows
 会话、服务器 PID、nonce/challenge、协议、适配器/插件指纹、能力和已保存
-文档身份。会话短时、一次使用；断开、未知 RPC、重复/错配 ID、额外帧、
+文档身份。持久会话描述符尚未存在时，专用 pre-handshake client 只能严格按
+`health`、`get_session` 的顺序发出这两次 RPC；它不接受占位 descriptor，也不能
+读取 document/inventory/geometry。只有两项响应、challenge transcript、当前已保存
+文档及本地 PID/process binding 全部通过后，才构造、完整语义验证并私有发布一次
+使用的 descriptor。会话短时、一次使用；断开、未知 RPC、重复/错配 ID、额外帧、
 文档切换或能力漂移都会失败关闭。
 `get_session` 的 `challenge_response` 必须是小写 SHA-256：按顺序编码协议
 版本、`liang-pingfa/native-bridge/challenge-response/v1`、session ID、client
@@ -66,7 +70,10 @@ deadline 到达时会调用 `CancelIoEx`、等待取消完成、释放 event 并
 2020-12 schema 迭代、`uniqueItems`、实体/线段和指纹语义检查；这些遍历按固定批次
 checkpoint，超时会报告稳定的 RPC timeout 或 session expired、关闭客户端并释放
 single-flight 锁。v1 固定接受至多 2,000 个实体和全部实体合计 10,000 条线段；
-原始 geometry JSON 上限为 16 MiB，外层 geometry frame 上限为 32 MiB。inventory
+原始 geometry JSON 上限为 16 MiB **UTF-8 字节**，而非 Unicode 代码点/字符数；
+该限制在 bridge、私有导出、audit、manifest、Core Console export 和 readback 的每个
+原始或嵌入 geometry 边界、解析/规范化前执行。JSON Schema 的 `maxLength` 只是次要
+代码点约束。外层 geometry frame 上限为 32 MiB。inventory
 不是 geometry 的替代品，其原始 JSON 上限为 64 KiB、外层 frame 上限为 256 KiB。
 外部 server conformance 必须拒绝远程客户端、使用单一首实例、仅向当前用户和
 SYSTEM 授权的 DACL，并在服务端核验客户端 PID/SID/Windows 会话；项目客户端
