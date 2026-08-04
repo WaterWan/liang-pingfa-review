@@ -14,9 +14,14 @@ from hashlib import sha256
 from pathlib import Path
 import re
 from typing import Any
-import unicodedata
 
-from .canonical import acquire_source_lease, attach_integrity, format_utc, utc_now
+from .canonical import (
+    acquire_source_lease,
+    attach_integrity,
+    format_utc,
+    normalize_nfc_text,
+    utc_now,
+)
 from .errors import ErrorCode, PipelineError
 from .native_bridge import NativeBridgeClient
 from .native_contracts import (
@@ -60,7 +65,7 @@ def native_source_from_lease(lease: Any) -> dict[str, Any]:
         "sha256": binding.sha256,
         "byte_size": binding.byte_size,
         "path_fingerprint": sha256(
-            unicodedata.normalize("NFC", str(lease.path)).encode("utf-8")
+            normalize_nfc_text(str(lease.path)).encode("utf-8")
         ).hexdigest(),
         "file_identity_fingerprint": binding.file_identity_fingerprint,
         "dwg_header_signature": header,

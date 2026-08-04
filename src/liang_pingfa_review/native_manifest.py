@@ -10,8 +10,6 @@ import secrets
 from typing import Any
 
 from .canonical import (
-    attach_integrity,
-    canonical_json_bytes,
     canonical_sha256,
     format_utc,
     parse_utc,
@@ -20,6 +18,8 @@ from .canonical import (
 from .errors import ErrorCode, PipelineError
 from .native_audit import native_audit_binding, require_fresh_native_audit
 from .native_contracts import (
+    attach_native_integrity,
+    canonical_native_contract_bytes,
     canonical_geometry_json_bytes,
     derive_native_target_id,
     derive_native_marker_text,
@@ -449,7 +449,10 @@ def build_native_manifest(
         "operations": private_operations,
         "record_cardinality": PRIVATE_RECORD_CARDINALITY,
     }
-    return validate_native_contract("manifest", attach_integrity(artifact))
+    return validate_native_contract(
+        "manifest",
+        attach_native_integrity("manifest", artifact),
+    )
 
 
 def write_private_manifest(
@@ -462,7 +465,9 @@ def write_private_manifest(
     checked = validate_native_contract("manifest", manifest)
     opened = workspace.create_owned_file(path)
     try:
-        opened.write_bytes(canonical_json_bytes(checked) + b"\n")
+        opened.write_bytes(
+            canonical_native_contract_bytes("manifest", checked) + b"\n"
+        )
         return workspace.seal_owned_file(opened)
     except BaseException:
         try:

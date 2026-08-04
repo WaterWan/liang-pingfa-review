@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 from typing import Any
-import unicodedata
 
 from .atomic_output import (
     PublicationTransaction,
@@ -19,7 +18,7 @@ from .atomic_output import (
     acquire_new_output_target_leases,
     stage_publication_transaction,
 )
-from .canonical import canonical_json_bytes
+from .canonical import canonical_json_bytes, normalize_nfc_text
 from .core_console import run_core_console
 from .errors import ErrorCode, PipelineError
 from .native_audit import native_source_from_lease, require_fresh_native_audit
@@ -97,7 +96,7 @@ def _native_output_description(
         "sha256": current.sha256,
         "byte_size": current.byte_size,
         "path_fingerprint": sha256(
-            unicodedata.normalize("NFC", str(path)).encode("utf-8")
+            normalize_nfc_text(str(path)).encode("utf-8")
         ).hexdigest(),
         "file_identity_fingerprint": current.file_identity_fingerprint,
         "dwg_header_signature": header,
@@ -531,7 +530,7 @@ def _private_dwg_source_from_lease(
             "sha256": binding.sha256,
             "byte_size": binding.byte_size,
             "path_fingerprint": sha256(
-                unicodedata.normalize("NFC", str(final_path)).encode("utf-8")
+                normalize_nfc_text(str(final_path)).encode("utf-8")
             ).hexdigest(),
             "file_identity_fingerprint": binding.file_identity_fingerprint,
             "dwg_header_signature": header,
