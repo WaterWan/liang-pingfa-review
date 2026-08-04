@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/native-bridge-request/v1",
+  "oneOf": [
+    {"$ref": "#/$defs/healthRequest"},
+    {"$ref": "#/$defs/getSessionRequest"},
+    {"$ref": "#/$defs/getDocumentRequest"},
+    {"$ref": "#/$defs/inventoryRequest"},
+    {"$ref": "#/$defs/geometryRequest"}
+  ],
+  "$defs": {
+    "requestId": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "sessionId": {"type": "string", "pattern": "^native-session-[a-f0-9]{32}$"},
+    "nonce": {"type": "string", "minLength": 43, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "sessionOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": {"session_id": {"$ref": "#/$defs/sessionId"}}
+    },
+    "handshake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "client_nonce", "challenge"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/sessionId"},
+        "client_nonce": {"$ref": "#/$defs/nonce"},
+        "challenge": {"$ref": "#/$defs/nonce"}
+      }
+    },
+    "documentBound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "expected_document_revision"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/sessionId"},
+        "expected_document_revision": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "healthRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "method", "params"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "method": {"const": "health"},
+        "params": {"$ref": "#/$defs/sessionOnly"}
+      }
+    },
+    "getSessionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "method", "params"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "method": {"const": "get_session"},
+        "params": {"$ref": "#/$defs/handshake"}
+      }
+    },
+    "getDocumentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "method", "params"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "method": {"const": "get_current_document"},
+        "params": {"$ref": "#/$defs/sessionOnly"}
+      }
+    },
+    "inventoryRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "method", "params"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "method": {"const": "export_inventory"},
+        "params": {"$ref": "#/$defs/documentBound"}
+      }
+    },
+    "geometryRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "method", "params"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "method": {"const": "export_exact_geometry"},
+        "params": {"$ref": "#/$defs/documentBound"}
+      }
+    }
+  }
+}

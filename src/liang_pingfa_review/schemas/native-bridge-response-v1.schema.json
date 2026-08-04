@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/native-bridge-response/v1",
+  "oneOf": [
+    {"$ref": "#/$defs/success"},
+    {"$ref": "#/$defs/failure"}
+  ],
+  "$defs": {
+    "requestId": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "nonce": {"type": "string", "minLength": 43, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+    "capability": {"type": "string", "minLength": 3, "maxLength": 96, "pattern": "^[a-z][a-z0-9._/-]*$"},
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "profile", "version"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "profile": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9A-Za-z._-]+$"}
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "fingerprint"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9A-Za-z._-]+$"},
+        "fingerprint": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product", "release", "runtime", "mode"],
+      "properties": {
+        "product": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "release": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9A-Za-z._-]+$"},
+        "runtime": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "mode": {"const": "full_host"}
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["saved", "path_fingerprint", "file_identity_fingerprint", "sha256", "byte_size", "dwg_header_signature", "database_instance_fingerprint", "revision_fingerprint"],
+      "properties": {
+        "saved": {"const": true},
+        "path_fingerprint": {"$ref": "#/$defs/sha256"},
+        "file_identity_fingerprint": {"$ref": "#/$defs/sha256"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "byte_size": {"type": "integer", "minimum": 0},
+        "dwg_header_signature": {"type": "string", "pattern": "^AC[0-9A-Z]{4}$"},
+        "database_instance_fingerprint": {"$ref": "#/$defs/sha256"},
+        "revision_fingerprint": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol_major", "protocol_minor", "adapter", "plugin", "host", "capabilities"],
+      "properties": {
+        "kind": {"const": "health"},
+        "protocol_major": {"const": 1},
+        "protocol_minor": {"const": 0},
+        "adapter": {"$ref": "#/$defs/adapter"},
+        "plugin": {"$ref": "#/$defs/plugin"},
+        "host": {"$ref": "#/$defs/host"},
+        "capabilities": {"type": "array", "minItems": 2, "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/capability"}}
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "bridge_nonce", "challenge_response", "adapter", "plugin", "host", "capabilities", "current_document"],
+      "properties": {
+        "kind": {"const": "session"},
+        "bridge_nonce": {"$ref": "#/$defs/nonce"},
+        "challenge_response": {"$ref": "#/$defs/sha256"},
+        "adapter": {"$ref": "#/$defs/adapter"},
+        "plugin": {"$ref": "#/$defs/plugin"},
+        "host": {"$ref": "#/$defs/host"},
+        "capabilities": {"type": "array", "minItems": 2, "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/capability"}},
+        "current_document": {"$ref": "#/$defs/document"}
+      }
+    },
+    "documentResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "current_document"],
+      "properties": {"kind": {"const": "document"}, "current_document": {"$ref": "#/$defs/document"}}
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "inventory_json"],
+      "properties": {
+        "kind": {"const": "inventory"},
+        "inventory_json": {"type": "string", "minLength": 2, "maxLength": 65536}
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "geometry_json"],
+      "properties": {
+        "kind": {"const": "geometry"},
+        "geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216}
+      }
+    },
+    "success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "result"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "result": {"oneOf": [{"$ref": "#/$defs/health"}, {"$ref": "#/$defs/session"}, {"$ref": "#/$defs/documentResult"}, {"$ref": "#/$defs/inventory"}, {"$ref": "#/$defs/geometry"}]}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {"enum": ["DOCUMENT_CHANGED", "SESSION_EXPIRED", "SESSION_INVALID", "UNSUPPORTED_METHOD", "EXPORT_REJECTED", "INTERNAL_ERROR"]}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "id", "error"],
+      "properties": {
+        "protocol_version": {"const": "liang-pingfa/native-bridge/v1"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "error": {"$ref": "#/$defs/error"}
+      }
+    }
+  }
+}
