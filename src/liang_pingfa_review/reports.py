@@ -81,3 +81,53 @@ def render_plan_review(_plan: Mapping[str, Any] | None = None) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def render_native_audit_report(_audit: Mapping[str, Any]) -> str:
+    """Render a cardinality-independent native bridge audit summary."""
+
+    return "\n".join(
+        [
+            "# Native bridge read-only audit summary",
+            "",
+            "This optional lane assesses representation evidence only. It does not "
+            "claim structural correctness, CAD-host compatibility, plugin behavior, "
+            "or transaction internals.",
+            "",
+            "The report intentionally omits text, coordinates, handles, layer or "
+            "block names, paths, pipe names, hashes, raw exports, and record counts.",
+            "",
+            "Private machine-readable audit, plan, manifest, and verification "
+            "artifacts explicitly enumerate opaque local records; this public "
+            "summary never repeats their cardinality.",
+            "",
+            "Any later write requires a fresh explicit PID/pipe session, a private "
+            "intent, deterministic plan, copy-only Core Console execution, and "
+            "independent post-save readback verification. No ODA fallback exists.",
+            "",
+        ]
+    )
+
+
+def render_native_plan_review(_plan: Mapping[str, Any]) -> str:
+    """Render a non-authorizing native plan review without private targets."""
+
+    return "\n".join(
+        [
+            "# Native bridge plan review",
+            "",
+            "Only fixed reviewed profiles may appear: DBTEXT translation, "
+            "audited auxiliary overlay deletion, or capability-gated review marker.",
+            "The plan cannot execute arbitrary commands, scripts, layers, blocks, "
+            "dimensions, or reinforcement data changes.",
+            "",
+            "Its private machine-readable counterpart may enumerate opaque "
+            "operations; this review deliberately contains no operation count.",
+            "",
+            "A plan is not authorization by itself. Apply re-exports the explicitly "
+            "selected read-only bridge document, constructs a private one-use "
+            "manifest, works on a private copy only, and publishes only after exact "
+            "readback proves the permitted delta.",
+            "",
+        ]
+    )
