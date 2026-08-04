@@ -10,12 +10,11 @@ from typing import Any
 from .canonical import attach_integrity, canonical_sha256, format_utc, utc_now
 from .errors import ErrorCode, PipelineError
 from .native_contracts import (
+    _embedded_geometry,
     native_container_sequences,
     native_artifact_integrity,
     native_marker_fingerprint,
     PRIVATE_RECORD_CARDINALITY,
-    require_geometry_json_utf8_bytes,
-    strict_native_json,
     translated_geometry_bits,
     validate_native_contract,
 )
@@ -24,13 +23,9 @@ from .ownership import acquire_source_path_lease, platform_backend
 
 
 def _precondition_export(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    raw_geometry = require_geometry_json_utf8_bytes(
+    return _embedded_geometry(
         manifest["preconditions_geometry_json"],
         error=ErrorCode.NATIVE_MANIFEST_INVALID,
-    )
-    return validate_native_contract(
-        "geometry",
-        strict_native_json(raw_geometry),
     )
 
 
@@ -476,11 +471,10 @@ def geometry_from_console_export(
         != checked_result["final_document_binding"]
     ):
         raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "readback binding differs")
-    raw_geometry = require_geometry_json_utf8_bytes(
+    geometry = _embedded_geometry(
         checked["geometry_json"],
         error=ErrorCode.NATIVE_READBACK_INVALID,
     )
-    geometry = validate_native_contract("geometry", strict_native_json(raw_geometry))
     if checked["geometry_sha256"] != canonical_sha256(geometry):
         raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "readback geometry digest differs")
     if (

@@ -18,13 +18,12 @@ import subprocess
 import threading
 from typing import Any, Literal
 
-from .canonical import canonical_json_bytes, strict_json_loads
 from .errors import ErrorCode, PipelineError
 from .native_bridge import (
     NativeInstallationLeases,
     acquire_native_installation_leases,
 )
-from .native_contracts import validate_native_contract
+from .native_contracts import load_native_json_value, validate_native_contract
 from .temporary import PrivateWorkspace
 
 
@@ -930,7 +929,10 @@ def run_core_console(
             ),
             consume=lambda raw_result: validate_native_contract(
                 "console_result" if mode == "write" else "console_export",
-                strict_json_loads(raw_result.decode("utf-8", errors="strict")),
+                load_native_json_value(
+                    "console_result" if mode == "write" else "console_export",
+                    raw_result.decode("utf-8", errors="strict"),
+                ),
             ),
         )
     except PipelineError as error:

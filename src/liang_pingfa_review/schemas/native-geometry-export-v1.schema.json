@@ -174,7 +174,7 @@
         "block_path": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/handle"}},
         "sequence_index": {"type": "integer", "minimum": 0, "maximum": 1000000},
         "layer": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 255}, {"type": "null"}]},
-        "text": {"oneOf": [{"type": "string", "maxLength": 4096}, {"type": "null"}]},
+        "text": {"oneOf": [{"type": "string", "maxLength": 4096, "description": "Canonical NFC text. The 4096 Unicode-code-point bound is enforced before NFC normalization."}, {"type": "null"}]},
         "style": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 255}, {"type": "null"}]},
         "height": {"$ref": "#/$defs/bits"},
         "rotation": {"$ref": "#/$defs/bits"},
