@@ -461,6 +461,11 @@ def verify_dwg(
                     raise PipelineError(
                         ErrorCode.RE_AUDIT_MISMATCH, "output remains actionable"
                     )
+                # Public verification evidence is emitted only after the
+                # private re-audit inventory has no unregistered converter
+                # outputs or replacement entries.  ``__exit__`` repeats this
+                # check while identity-bound cleanup removes the workspace.
+                workspace.require_exact_inventory()
 
             output_targets.targets[0].require_existing_destination()
             _require_output_binding(

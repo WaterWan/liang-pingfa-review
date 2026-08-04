@@ -18,7 +18,9 @@ from .canonical import (
     canonical_sha256,
     load_json_file,
     parse_utc,
+    strict_json_loads,
     utc_now,
+    validate_json_nesting,
     verify_integrity,
 )
 from .errors import ErrorCode, PipelineError
@@ -221,11 +223,9 @@ def schema_for(
     except (OSError, ModuleNotFoundError) as error:
         raise PipelineError(ErrorCode.INTERNAL_ERROR, "packaged schema unavailable") from error
     try:
-        import json
-
-        schema = json.loads(text)
+        schema = strict_json_loads(text)
         Draft202012Validator.check_schema(schema)
-    except (ValueError, SchemaError) as error:
+    except (CanonicalJsonError, RecursionError, ValueError, SchemaError) as error:
         raise PipelineError(ErrorCode.INTERNAL_ERROR, "invalid packaged schema") from error
     return cast(dict[str, Any], schema)
 
@@ -234,10 +234,22 @@ def _validate_schema(kind: ArtifactKind, artifact: Mapping[str, Any]) -> None:
     schema_version = artifact.get("schema_version") if kind == "audit" else None
     if kind == "audit" and not isinstance(schema_version, str):
         raise PipelineError(ErrorCode.AUDIT_SCHEMA_INVALID, "audit schema version missing")
-    validator = Draft202012Validator(
-        schema_for(kind, cast(str | None, schema_version))
-    )
-    errors = sorted(validator.iter_errors(artifact), key=lambda item: list(item.path))
+    try:
+        # Do this before jsonschema's recursive descent even for values that
+        # originated from an in-process API rather than strict_json_loads().
+        validate_json_nesting(artifact)
+        validator = Draft202012Validator(
+            schema_for(kind, cast(str | None, schema_version))
+        )
+        errors = sorted(
+            validator.iter_errors(artifact),
+            key=lambda item: list(item.path),
+        )
+    except (CanonicalJsonError, RecursionError) as error:
+        raise PipelineError(
+            _artifact_error(kind),
+            "JSON Schema validation failed",
+        ) from error
     if errors:
         raise PipelineError(_artifact_error(kind), "JSON Schema validation failed")
 
@@ -961,9 +973,10 @@ def validate_artifact(kind: ArtifactKind, artifact: Any) -> dict[str, Any]:
 
     normalized = _require_mapping(artifact, kind)
     try:
+        validate_json_nesting(normalized)
         if not verify_integrity(normalized):
             raise PipelineError(_artifact_error(kind), "artifact integrity mismatch")
-    except CanonicalJsonError as error:
+    except (CanonicalJsonError, RecursionError) as error:
         raise PipelineError(_artifact_error(kind), "non-canonical artifact") from error
     _validate_schema(kind, normalized)
     try:
@@ -973,7 +986,7 @@ def validate_artifact(kind: ArtifactKind, artifact: Any) -> dict[str, Any]:
             _validate_plan_semantics(normalized)
         else:
             _validate_verification_semantics(normalized)
-    except (CanonicalJsonError, KeyError, TypeError, ValueError) as error:
+    except (CanonicalJsonError, KeyError, RecursionError, TypeError, ValueError) as error:
         raise PipelineError(_artifact_error(kind), "artifact semantic validation failed") from error
     return normalized
 

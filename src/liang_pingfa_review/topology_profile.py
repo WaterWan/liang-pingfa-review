@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from importlib import resources
 from math import floor, hypot, isfinite, ulp
 from pathlib import Path
-import json
 import re
 from typing import Any, Literal, TypeAlias, cast
 import unicodedata
@@ -29,7 +28,12 @@ from ezdxf.enums import TextEntityAlignment
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-from .canonical import canonical_sha256
+from .canonical import (
+    CanonicalJsonError,
+    canonical_sha256,
+    load_bounded_json,
+    strict_json_loads,
+)
 from .errors import ErrorCode, PipelineError
 from .topology_ids import (
     derive_annotation_target_provenance_id,
@@ -919,12 +923,17 @@ def _profile_schema() -> dict[str, Any]:
             .joinpath("beam-topology-profile-v1.schema.json")
             .read_text(encoding="utf-8")
         )
-        import json
-
-        schema = json.loads(text)
+        schema = strict_json_loads(text)
         Draft202012Validator.check_schema(schema)
         return cast(dict[str, Any], schema)
-    except (OSError, ModuleNotFoundError, ValueError, SchemaError) as error:
+    except (
+        CanonicalJsonError,
+        OSError,
+        ModuleNotFoundError,
+        RecursionError,
+        ValueError,
+        SchemaError,
+    ) as error:
         raise PipelineError(
             ErrorCode.INTERNAL_ERROR, "topology profile schema unavailable"
         ) from error
@@ -1028,22 +1037,10 @@ def load_topology_profile(path: Path) -> TopologyProfile:
             raise ValueError("profile too large")
         text = raw.decode("utf-8")
 
-        def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-            result: dict[str, Any] = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError("duplicate profile key")
-                result[key] = value
-            return result
-
-        loaded = json.loads(
-            text,
-            object_pairs_hook=object_pairs,
-            parse_constant=lambda _value: (_ for _ in ()).throw(
-                ValueError("non-finite profile value")
-            ),
-        )
-    except Exception as error:
+        # Layer-name policy canonicalizes NFC itself below, so use the shared
+        # bounded parser without imposing artifact-level NFC rejection first.
+        loaded = load_bounded_json(text)
+    except (CanonicalJsonError, OSError, RecursionError, UnicodeError, ValueError) as error:
         raise _profile_error() from error
     if not isinstance(loaded, Mapping):
         raise _profile_error()
@@ -1052,7 +1049,7 @@ def load_topology_profile(path: Path) -> TopologyProfile:
             Draft202012Validator(_profile_schema()).iter_errors(loaded),
             key=lambda item: list(item.path),
         )
-    except (SchemaError, TypeError, ValueError) as error:
+    except (RecursionError, SchemaError, TypeError, ValueError) as error:
         raise _profile_error() from error
     if errors:
         raise _profile_error()
