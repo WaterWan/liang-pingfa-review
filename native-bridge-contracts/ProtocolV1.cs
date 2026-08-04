@@ -25,9 +25,23 @@ public static class NativeBridgeProtocolV1
     /// A native session is valid only when its RFC 3339 UTC
     /// <c>created_at &lt;= current UTC &lt; expires_at</c> interval is no longer
     /// than this fixed bound. Conforming clients allow no future-clock skew
-    /// and must retain a monotonic deadline after validation.
+    /// and must retain the private preparation-time monotonic deadline after
+    /// validation; they must not create one at handshake or client startup.
     /// </summary>
     public const int MaxSessionLifetimeSeconds = 5 * 60;
+    /// <summary>
+    /// Exact lifetime used by the private GetTickCount64 descriptor binding.
+    /// Uptime values remain decimal strings because GetTickCount64 is an
+    /// unsigned 64-bit value and must not lose precision in JSON.
+    /// </summary>
+    public const int MaxSessionLifetimeMilliseconds =
+        MaxSessionLifetimeSeconds * 1000;
+    /// <summary>
+    /// Private same-boot clock domain persisted in a session descriptor.
+    /// The paired boot identifier makes descriptors invalid after reboot.
+    /// </summary>
+    public const string SessionMonotonicClock =
+        "windows-gettickcount64-ms/v1";
     public const int MaxControlResponseBytes = 256 * 1024;
     /// <summary>Outer framed limit for the fixed two-digest inventory result.</summary>
     public const int MaxInventoryResponseBytes = 256 * 1024;
@@ -67,7 +81,18 @@ public sealed record NativeBridgeSessionContextV1(
     string BridgeNonce,
     NativeHostIdentityV1 Host,
     string DocumentRevisionFingerprint,
-    IReadOnlyList<string> Capabilities);
+    IReadOnlyList<string> Capabilities,
+    NativePrivateSessionLifetimeV1 PrivateLifetime);
+
+/// <summary>
+/// Private same-boot lifetime carried only in a local session descriptor.
+/// It is never a wire response, report, event, or public artifact field.
+/// </summary>
+public sealed record NativePrivateSessionLifetimeV1(
+    [property: JsonPropertyName("monotonic_clock")] string MonotonicClock,
+    [property: JsonPropertyName("monotonic_boot_id")] string MonotonicBootId,
+    [property: JsonPropertyName("monotonic_issued")] string MonotonicIssued,
+    [property: JsonPropertyName("monotonic_expires")] string MonotonicExpires);
 
 /// <summary>Stable full-host identity; no PID, pipe, nonce, or session ID appears here.</summary>
 public sealed record NativeHostIdentityV1(

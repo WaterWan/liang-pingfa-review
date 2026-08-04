@@ -32,8 +32,15 @@ Native session timestamps are whole-second RFC 3339 UTC values. A session is
 valid only for `created_at <= current UTC < expires_at`, with a positive
 lifetime no greater than the fixed five-minute
 `NativeBridgeProtocolV1.MaxSessionLifetimeSeconds` bound. Conforming clients
-allow no future-clock skew and retain a monotonic deadline after validation,
-so wall-clock rollback cannot extend a connected session.
+allow no future-clock skew and retain the one preparation-time private
+`GetTickCount64` deadline after validation, so wall-clock rollback, delayed
+handshake, descriptor storage, or later client construction cannot extend a
+connected session. The signed private descriptor carries strict decimal
+`monotonic_issued`/`monotonic_expires` ticks plus the
+`windows-gettickcount64-ms/v1` clock and Windows boot identifier. It is
+same-boot only: a boot/domain mismatch, a current tick before issuance, or a
+tick at/after expiry fails closed. These fields are never wire DTOs, reports,
+or events.
 
 Private `geometry_json` repeats an exact `NativeGeometryExportBindingV1`:
 protocol, session ID, full process identity, host, adapter/plugin, exact
