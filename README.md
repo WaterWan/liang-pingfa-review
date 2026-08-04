@@ -328,6 +328,13 @@ revision 相符，并携带会话/文档 binding digest；只比较源字节绝�
 上限为 2,000 个实体和总计 10,000 条线段，原始 geometry JSON 最多 16 MiB
 **UTF-8 字节**（不是字符/代码点数；schema `maxLength` 仅为次要约束），外层
 几何响应最多 32 MiB；inventory 是独立的双摘要响应，原始 JSON 最多 64 KiB。
+仅在已定义的精确 schema 路径（bridge `result.geometry_json` /
+`result.inventory_json`、manifest `preconditions_geometry_json`、Core Console
+export `geometry_json`）中，序列化 JSON 字符串才是**外层 opaque carrier**：
+先按收到的精确 codepoint/UTF-8 bytes 绑定和散列并检查字节上限，绝不对整个
+carrier 做 NFC。随后独立解析内部 JSON；内部键和值仍执行深度、重复键、有限数、
+单标量 NFC 上限、schema、语义和同一绝对 deadline 校验。此前已有效的 canonical
+内部 JSON 在这一 v1 澄清下产生相同工件字节/散列，无需静默迁移或版本重解释。
 
 原生计划只允许经审计的 DBTEXT XY 平移、精确辅助覆盖文字删除，以及默认关闭且
 需配置/能力/既有图层样式共同准入的 review marker。没有自由命令、LISP、脚本

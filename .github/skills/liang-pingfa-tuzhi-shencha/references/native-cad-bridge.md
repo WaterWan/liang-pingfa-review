@@ -75,6 +75,14 @@ single-flight 锁。v1 固定接受至多 2,000 个实体和全部实体合计 1
 原始或嵌入 geometry 边界、解析/规范化前执行。JSON Schema 的 `maxLength` 只是次要
 代码点约束。外层 geometry frame 上限为 32 MiB。inventory
 不是 geometry 的替代品，其原始 JSON 上限为 64 KiB、外层 frame 上限为 256 KiB。
+只有 bridge `result.geometry_json` / `result.inventory_json`、manifest
+`preconditions_geometry_json` 和 Core Console export `geometry_json` 这四个精确
+schema 路径的序列化 JSON 值是 outer opaque carrier：先以收到的精确 codepoint/
+UTF-8 bytes 进行字节上限、binding 和 hashing，绝不把整段 carrier 交给 NFC。
+随后才独立解析内部 JSON；内部键和值仍适用深度、重复键、有限数、单标量预 NFC
+上限、canonical NFC、schema、语义和同一绝对 RPC deadline。相同名称的任意嵌套
+攻击者字段不享有该例外。此前有效的 canonical 内部 JSON 保持相同 v1 artifact
+bytes/hash，因此不需要迁移或静默重解释持久工件。
 外部 server conformance 必须拒绝远程客户端、使用单一首实例、仅向当前用户和
 SYSTEM 授权的 DACL，并在服务端核验客户端 PID/SID/Windows 会话；项目客户端
 核验本地管道与 `GetNamedPipeServerProcessId`。这些措施防止意外错连，不把
