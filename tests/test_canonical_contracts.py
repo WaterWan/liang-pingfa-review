@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import copy
 from datetime import timedelta
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
+import liang_pingfa_review.canonical as canonical_module
 from liang_pingfa_review.canonical import (
     CanonicalJsonError,
     MAX_JSON_NESTING_DEPTH,
+    MAX_JSON_STRING_CODEPOINTS,
     attach_integrity,
     canonical_json_bytes,
     load_json_file,
@@ -51,6 +54,92 @@ class CanonicalJsonTests(unittest.TestCase):
             strict_json_loads('{"value":NaN}')
         with self.assertRaises(CanonicalJsonError):
             strict_json_loads('{"value":"e\\u0301"}')
+
+    def test_nfc_work_is_bounded_and_bracketed_by_deadline_checks(self) -> None:
+        """No ordinary scalar can enter NFC above the fixed work ceiling."""
+
+        accepted = "é" * (
+            canonical_module.MAX_JSON_STRING_UTF8_BYTES // len("é".encode("utf-8"))
+        )
+        rejected = accepted + "é"
+        calls: list[int] = []
+        events: list[str] = []
+        original_normalize = canonical_module.unicodedata.normalize
+
+        def observe(form: str, value: str) -> str:
+            calls.append(len(value))
+            events.append("normalize")
+            return original_normalize(form, value)
+
+        with mock.patch.object(
+            canonical_module.unicodedata,
+            "normalize",
+            side_effect=observe,
+        ):
+            parsed = strict_json_loads(
+                json.dumps({"value": accepted}, ensure_ascii=False),
+                deadline_check=events.append,
+            )
+            self.assertEqual(parsed["value"], accepted)
+            with self.assertRaises(CanonicalJsonError):
+                strict_json_loads(
+                    json.dumps({"value": rejected}, ensure_ascii=False),
+                    deadline_check=events.append,
+                )
+
+        self.assertTrue(calls)
+        self.assertLessEqual(max(calls), MAX_JSON_STRING_CODEPOINTS)
+        self.assertNotIn(len(rejected), calls)
+        for index, event in enumerate(events):
+            if event == "normalize":
+                # Every actual NFC call is immediately bracketed. The test
+                # sees one before/after pair for each strict parser pass.
+                self.assertTrue(events[index - 1].startswith("JSON NFC "))
+                self.assertTrue(events[index + 1].startswith("JSON NFC "))
+
+    def test_opaque_path_preserves_exact_carrier_only_at_that_path(self) -> None:
+        """A schema path, not a field name, controls the NFC exception."""
+
+        rules = {("result", "geometry_json"): 16 * 1024 * 1024}
+        carrier = "\u0344" * 64
+        calls: list[int] = []
+        original_normalize = canonical_module.unicodedata.normalize
+
+        def observe(form: str, value: str) -> str:
+            calls.append(len(value))
+            return original_normalize(form, value)
+
+        with mock.patch.object(
+            canonical_module.unicodedata,
+            "normalize",
+            side_effect=observe,
+        ):
+            parsed = strict_json_loads(
+                json.dumps(
+                    {"result": {"geometry_json": carrier}},
+                    ensure_ascii=False,
+                ),
+                opaque_string_rules=rules,
+            )
+            self.assertEqual(parsed["result"]["geometry_json"], carrier)
+            with self.assertRaises(CanonicalJsonError):
+                strict_json_loads(
+                    json.dumps(
+                        {
+                            "result": {
+                                "nested": {
+                                    "geometry_json": "\u0344"
+                                    * (MAX_JSON_STRING_CODEPOINTS + 1)
+                                }
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                    opaque_string_rules=rules,
+                )
+
+        self.assertNotIn(len(carrier), calls)
+        self.assertTrue(all(length <= MAX_JSON_STRING_CODEPOINTS for length in calls))
 
     def test_fixed_nesting_cap_handles_boundaries_without_recursion(self) -> None:
         for depth, accepted in (

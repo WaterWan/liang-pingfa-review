@@ -11,7 +11,6 @@ from math import isfinite
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-import unicodedata
 
 import ezdxf
 from ezdxf import bbox
@@ -21,7 +20,7 @@ from ezdxf.enums import TextEntityAlignment
 from ezdxf.lldxf import validator
 from ezdxf.lldxf.tagwriter import TagCollector
 
-from .canonical import canonical_sha256, normalize_json_value
+from .canonical import canonical_sha256, normalize_json_value, normalize_nfc_text
 from .contracts import ordered_entity_sequence_digest, state_from_manifest
 from .errors import ErrorCode, PipelineError
 from .raw_dxf import (
@@ -58,7 +57,7 @@ _SUPPORTED_LAYER_FLAGS = 1 | 2 | 4 | 16 | 32 | 64
 def _normalized_layer_key(value: str) -> str:
     """Match the profile's NFC/casefolded layer namespace."""
 
-    return unicodedata.normalize("NFC", value).casefold()
+    return normalize_nfc_text(value).casefold()
 
 # Only tool-managed identity/allocation and elapsed-time fields are excluded.
 # Representation, content, coordinate, unit, version, and display settings

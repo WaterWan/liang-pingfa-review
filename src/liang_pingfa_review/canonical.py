@@ -35,6 +35,8 @@ from .ownership import (
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+JsonPath: TypeAlias = tuple[str | int, ...]
+OpaqueJsonStringRules: TypeAlias = Mapping[JsonPath, int]
 _DeadlineCheck: TypeAlias = Callable[[str], None]
 
 SUPPORTED_DWG_VERSIONS: dict[str, str] = {"AC1032": "AC1032/R2018"}
@@ -43,18 +45,26 @@ SUPPORTED_DWG_VERSIONS: dict[str, str] = {"AC1032": "AC1032/R2018"}
 # before any recursive parser, normalizer, serializer, or schema validator
 # receives it. Packaged schemas currently remain far below this 128-level cap.
 MAX_JSON_NESTING_DEPTH: Final[int] = 128
+# No normal JSON scalar may reach ``unicodedata.normalize`` above these
+# limits.  Schema-specific parsers can pass a tighter limit, while explicit
+# opaque embedded-JSON carriers are governed only by their exact path rule.
+MAX_JSON_STRING_CODEPOINTS: Final[int] = 64 * 1024
+MAX_JSON_STRING_UTF8_BYTES: Final[int] = 64 * 1024
 # RPC callers supply an absolute-deadline callback.  These fixed intervals
 # keep every iterative native-response pass interruptible without making
 # ordinary artifact loads pay callback overhead.
 _CANONICAL_NODE_CHECK_INTERVAL: Final[int] = 64
 _CANONICAL_TEXT_CHECK_INTERVAL: Final[int] = 16 * 1024
-_CANONICAL_NFC_MINIMUM_CHECK_CHARACTERS: Final[int] = 4096
 _CANONICAL_SERIALIZATION_CHECK_INTERVAL: Final[int] = 16 * 1024
 _CANONICAL_HASH_CHECK_INTERVAL: Final[int] = 64 * 1024
 
 
 class CanonicalJsonError(ValueError):
     """Raised when a value cannot be represented by the strict JSON profile."""
+
+
+class OpaqueJsonStringError(CanonicalJsonError):
+    """An exact opaque-carrier path failed its pre-NFC boundary check."""
 
 
 class DeadlineCheckpointSampler:
@@ -112,32 +122,152 @@ def _check_deadline(
         deadline_check(stage)
 
 
+def _require_utf8_byte_limit(
+    value: str,
+    *,
+    maximum_bytes: int,
+    deadline_check: _DeadlineCheck | None,
+    stage: str,
+) -> None:
+    """Reject a UTF-8 scalar above a fixed byte limit without a full copy."""
+
+    if maximum_bytes < 0:
+        raise ValueError("JSON UTF-8 byte limit must not be negative")
+    if value.isascii():
+        if len(value) > maximum_bytes:
+            raise CanonicalJsonError("JSON string exceeds the fixed UTF-8 limit")
+        return
+    byte_count = 0
+    try:
+        if len(value) <= _CANONICAL_TEXT_CHECK_INTERVAL:
+            byte_count = len(value.encode("utf-8", errors="strict"))
+        else:
+            for offset in range(
+                0,
+                len(value),
+                _CANONICAL_TEXT_CHECK_INTERVAL,
+            ):
+                _check_deadline(deadline_check, stage)
+                byte_count += len(
+                    value[
+                        offset : offset + _CANONICAL_TEXT_CHECK_INTERVAL
+                    ].encode("utf-8", errors="strict")
+                )
+                if byte_count > maximum_bytes:
+                    raise CanonicalJsonError(
+                        "JSON string exceeds the fixed UTF-8 limit"
+                    )
+            _check_deadline(deadline_check, stage)
+    except UnicodeEncodeError as error:
+        raise CanonicalJsonError("JSON string is not valid Unicode") from error
+    if byte_count > maximum_bytes:
+        raise CanonicalJsonError("JSON string exceeds the fixed UTF-8 limit")
+
+
+def _require_normalizable_string_limits(
+    value: str,
+    *,
+    maximum_string_codepoints: int,
+    maximum_string_utf8_bytes: int,
+    deadline_check: _DeadlineCheck | None,
+) -> None:
+    """Bound one non-opaque scalar before it can reach NFC normalization."""
+
+    if maximum_string_codepoints < 0:
+        raise ValueError("JSON string code-point limit must not be negative")
+    if len(value) > maximum_string_codepoints:
+        raise CanonicalJsonError("JSON string exceeds the fixed code-point limit")
+    _require_utf8_byte_limit(
+        value,
+        maximum_bytes=maximum_string_utf8_bytes,
+        deadline_check=deadline_check,
+        stage="JSON string UTF-8 limit",
+    )
+
+
+def _require_opaque_string_limit(
+    value: Any,
+    *,
+    maximum_utf8_bytes: int,
+    deadline_check: _DeadlineCheck | None,
+) -> str:
+    """Validate an exact embedded-JSON carrier without NFC-normalizing it."""
+
+    if not isinstance(value, str):
+        raise OpaqueJsonStringError("opaque embedded JSON is not a string")
+    try:
+        _require_utf8_byte_limit(
+            value,
+            maximum_bytes=maximum_utf8_bytes,
+            deadline_check=deadline_check,
+            stage="opaque JSON UTF-8 byte limit",
+        )
+    except CanonicalJsonError as error:
+        raise OpaqueJsonStringError(
+            "opaque embedded JSON exceeds its fixed UTF-8 limit"
+        ) from error
+    return value
+
+
 def _nfc(
     value: str,
     *,
     deadline_check: _DeadlineCheck | None = None,
     stage: str = "JSON NFC normalization",
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> str:
-    """Normalize one string after bounded progress probes.
+    """Normalize one bounded non-opaque scalar with bracketing deadlines."""
 
-    ``unicodedata.normalize`` is the authority for Unicode normalization.  A
-    cheap bounded scan before it makes large RPC strings observable to the
-    request timer while retaining byte-for-byte behavior for non-RPC callers.
-    Native geometry's individual text fields are schema-bounded to 4096
-    characters; the scan also covers outer embedded JSON strings.
+    _require_normalizable_string_limits(
+        value,
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+        deadline_check=deadline_check,
+    )
+    # ASCII is already NFC.  Avoiding a needless native call also keeps the
+    # normalizer's mandatory before/after deadline checks focused on the
+    # Unicode work that can actually be expensive.
+    if value.isascii():
+        return value
+    _check_deadline(deadline_check, stage)
+    try:
+        normalized = unicodedata.normalize("NFC", value)
+    except (TypeError, ValueError) as error:
+        raise CanonicalJsonError("JSON string NFC normalization failed") from error
+    _check_deadline(deadline_check, stage)
+    _require_normalizable_string_limits(
+        normalized,
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+        deadline_check=deadline_check,
+    )
+    return normalized
+
+
+def normalize_nfc_text(
+    value: str,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
+) -> str:
+    """Return one bounded NFC text value for non-JSON callers.
+
+    This shares the only native normalizer call site with canonical JSON, so
+    direct text consumers receive the same pre/post deadline checkpoints and
+    scalar limits. Opaque JSON carriers must never call this helper.
     """
 
-    # Short fields are covered by the enclosing iterative node traversal.
-    # A longer scalar receives mandatory entry/exit checks; its maximum
-    # uninterrupted Unicode normalization work remains below the 16 KiB text
-    # interval, without probing every schema-bounded string.
-    if (
-        deadline_check is not None
-        and len(value) > _CANONICAL_NFC_MINIMUM_CHECK_CHARACTERS
-    ):
-        _check_deadline(deadline_check, stage)
-        _check_deadline(deadline_check, stage)
-    return unicodedata.normalize("NFC", value)
+    if not isinstance(value, str):
+        raise CanonicalJsonError("text is not a string")
+    return _nfc(
+        value,
+        deadline_check=deadline_check,
+        stage="text NFC normalization",
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+    )
 
 
 def _is_json_sequence(value: Any) -> bool:
@@ -147,6 +277,52 @@ def _is_json_sequence(value: Any) -> bool:
         value,
         (str, bytes, bytearray),
     )
+
+
+def validate_json_string_limits(
+    value: Any,
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
+) -> None:
+    """Preflight every ordinary JSON string before another consumer can NFC it.
+
+    This intentionally performs no Unicode normalization.  Schema-specific
+    callers use it before their own canonical serializer so an oversized
+    scalar cannot bypass the per-NFC work bound through an in-process API.
+    """
+
+    validate_json_nesting(value, deadline_check=deadline_check)
+    stack = [value]
+    nodes = 0
+    try:
+        while stack:
+            if nodes and nodes % _CANONICAL_NODE_CHECK_INTERVAL == 0:
+                _check_deadline(deadline_check, "JSON string limit preflight")
+            nodes += 1
+            current = stack.pop()
+            if isinstance(current, str):
+                _require_normalizable_string_limits(
+                    current,
+                    maximum_string_codepoints=maximum_string_codepoints,
+                    maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+                    deadline_check=deadline_check,
+                )
+            elif isinstance(current, Mapping):
+                for key, item in current.items():
+                    if isinstance(key, str):
+                        _require_normalizable_string_limits(
+                            key,
+                            maximum_string_codepoints=maximum_string_codepoints,
+                            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+                            deadline_check=deadline_check,
+                        )
+                    stack.append(item)
+            elif _is_json_sequence(current):
+                stack.extend(current)
+    except RecursionError as error:
+        raise CanonicalJsonError("JSON value recursion is unsupported") from error
 
 
 def validate_json_nesting(
@@ -250,17 +426,23 @@ def validate_json_canonical_form(
     value: Any,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> None:
     """Reject non-NFC, duplicate-key, and non-finite JSON values iteratively.
 
     This is deliberately separate from normalization so strict RPC decoding
     can prove canonical input before schema validation.  It is also shared by
     native contract validation, avoiding a second divergent traversal for
-    Unicode, finite-number, and normalized-key checks.
+    Unicode, finite-number, and normalized-key checks.  Only explicit,
+    absolute paths in ``opaque_string_rules`` bypass outer NFC; their UTF-8
+    byte rule is still enforced before any outer normalization can occur.
     """
 
     validate_json_nesting(value, deadline_check=deadline_check)
-    stack = [value]
+    opaque_rules = opaque_string_rules or {}
+    stack: list[tuple[Any, JsonPath]] = [(value, ())]
     nodes = 0
     finite_numbers = 0
     try:
@@ -271,14 +453,24 @@ def validate_json_canonical_form(
             ):
                 _check_deadline(deadline_check, "JSON canonical post-walk")
             nodes += 1
-            current = stack.pop()
+            current, path = stack.pop()
             if isinstance(current, str):
-                if current != _nfc(
-                    current,
-                    deadline_check=deadline_check,
-                    stage="JSON NFC validation",
-                ):
-                    raise CanonicalJsonError("string is not NFC")
+                maximum_opaque_bytes = opaque_rules.get(path)
+                if maximum_opaque_bytes is None:
+                    if current != _nfc(
+                        current,
+                        deadline_check=deadline_check,
+                        stage="JSON NFC validation",
+                        maximum_string_codepoints=maximum_string_codepoints,
+                        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+                    ):
+                        raise CanonicalJsonError("string is not NFC")
+                else:
+                    _require_opaque_string_limit(
+                        current,
+                        maximum_utf8_bytes=maximum_opaque_bytes,
+                        deadline_check=deadline_check,
+                    )
             elif isinstance(current, Mapping):
                 normalized: set[str] = set()
                 for index, (key, item) in enumerate(current.items()):
@@ -296,6 +488,8 @@ def validate_json_canonical_form(
                         key,
                         deadline_check=deadline_check,
                         stage="JSON NFC validation",
+                        maximum_string_codepoints=maximum_string_codepoints,
+                        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
                     )
                     if normalized_key != key:
                         raise CanonicalJsonError("object key is not NFC")
@@ -304,7 +498,15 @@ def validate_json_canonical_form(
                             "duplicate normalized object key"
                         )
                     normalized.add(normalized_key)
-                    stack.append(item)
+                    child_path = path + (normalized_key,)
+                    if (
+                        child_path in opaque_rules
+                        and not isinstance(item, str)
+                    ):
+                        raise OpaqueJsonStringError(
+                            "opaque embedded JSON is not a string"
+                        )
+                    stack.append((item, child_path))
             elif _is_json_sequence(current):
                 for index, item in enumerate(current):
                     if (
@@ -315,7 +517,7 @@ def validate_json_canonical_form(
                             deadline_check,
                             "JSON canonical post-walk",
                         )
-                    stack.append(item)
+                    stack.append((item, path + (index,)))
             elif isinstance(current, float):
                 if (
                     finite_numbers
@@ -337,17 +539,32 @@ def normalize_json_value(
     *,
     deadline_check: _DeadlineCheck | None = None,
     _nesting_already_checked: bool = False,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> JsonValue:
-    """Normalize a strict JSON value, rejecting lossy or ambiguous inputs."""
+    """Normalize a strict JSON value, rejecting lossy or ambiguous inputs.
+
+    Explicit opaque embedded-JSON paths retain their exact string value.
+    Every other string is bounded before and after the one NFC operation.
+    """
 
     if not _nesting_already_checked:
         validate_json_nesting(value, deadline_check=deadline_check)
+    opaque_rules = opaque_string_rules or {}
     pending = object()
     result: list[Any] = [pending]
     # Entries carry a source value and its destination container/slot. The
     # explicit stack avoids a second recursive path after depth validation.
-    stack: list[tuple[Any, dict[str, Any] | list[Any] | None, str | int | None]] = [
-        (value, None, None)
+    stack: list[
+        tuple[
+            Any,
+            dict[str, Any] | list[Any] | None,
+            str | int | None,
+            JsonPath,
+        ]
+    ] = [
+        (value, None, None, ())
     ]
     nodes = 0
     finite_numbers = 0
@@ -371,7 +588,7 @@ def normalize_json_value(
             ):
                 _check_deadline(deadline_check, "JSON normalization")
             nodes += 1
-            current, destination, slot = stack.pop()
+            current, destination, slot, path = stack.pop()
             if current is None or isinstance(current, bool):
                 assign(destination, slot, current)
             elif isinstance(current, int):
@@ -390,19 +607,30 @@ def normalize_json_value(
                     raise CanonicalJsonError("non-finite number")
                 assign(destination, slot, 0.0 if current == 0 else current)
             elif isinstance(current, str):
+                maximum_opaque_bytes = opaque_rules.get(path)
                 assign(
                     destination,
                     slot,
-                    _nfc(
-                        current,
-                        deadline_check=deadline_check,
-                        stage="JSON NFC normalization",
+                    (
+                        _nfc(
+                            current,
+                            deadline_check=deadline_check,
+                            stage="JSON NFC normalization",
+                            maximum_string_codepoints=maximum_string_codepoints,
+                            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+                        )
+                        if maximum_opaque_bytes is None
+                        else _require_opaque_string_limit(
+                            current,
+                            maximum_utf8_bytes=maximum_opaque_bytes,
+                            deadline_check=deadline_check,
+                        )
                     ),
                 )
             elif isinstance(current, Mapping):
                 normalized_mapping: dict[str, Any] = {}
                 assign(destination, slot, normalized_mapping)
-                entries: list[tuple[str, Any]] = []
+                entries: list[tuple[str, Any, JsonPath]] = []
                 for index, (raw_key, raw_value) in enumerate(current.items()):
                     if (
                         index
@@ -418,15 +646,27 @@ def normalize_json_value(
                         raw_key,
                         deadline_check=deadline_check,
                         stage="JSON NFC normalization",
+                        maximum_string_codepoints=maximum_string_codepoints,
+                        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
                     )
                     if key in normalized_mapping:
                         raise CanonicalJsonError("duplicate normalized object key")
                     # Reserve the key before traversing its value so NFC
                     # collisions cannot be obscured by traversal order.
                     normalized_mapping[key] = pending
-                    entries.append((key, raw_value))
-                for key, raw_value in reversed(entries):
-                    stack.append((raw_value, normalized_mapping, key))
+                    child_path = path + (key,)
+                    if (
+                        child_path in opaque_rules
+                        and not isinstance(raw_value, str)
+                    ):
+                        raise OpaqueJsonStringError(
+                            "opaque embedded JSON is not a string"
+                        )
+                    entries.append((key, raw_value, child_path))
+                for key, raw_value, child_path in reversed(entries):
+                    stack.append(
+                        (raw_value, normalized_mapping, key, child_path)
+                    )
             elif _is_json_sequence(current):
                 # Decoded JSON arrays are lists.  Do not duplicate an
                 # attacker-controlled large list merely to reverse it.
@@ -442,7 +682,14 @@ def normalize_json_value(
                             deadline_check,
                             "JSON sequence normalization",
                         )
-                    stack.append((items[index], normalized_sequence, index))
+                    stack.append(
+                        (
+                            items[index],
+                            normalized_sequence,
+                            index,
+                            path + (index,),
+                        )
+                    )
             else:
                 raise CanonicalJsonError(
                     f"unsupported JSON value type: {type(current).__name__}"
@@ -458,11 +705,20 @@ def canonical_json_bytes(
     value: Any,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> bytes:
     """Encode a value with deterministic UTF-8 JSON serialization."""
 
     try:
-        normalized = normalize_json_value(value, deadline_check=deadline_check)
+        normalized = normalize_json_value(
+            value,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_string_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+        )
         if deadline_check is None:
             return json.dumps(
                 normalized,
@@ -494,10 +750,19 @@ def canonical_sha256(
     value: Any,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> str:
     """Return the lowercase SHA-256 of canonical JSON."""
 
-    payload = canonical_json_bytes(value, deadline_check=deadline_check)
+    payload = canonical_json_bytes(
+        value,
+        deadline_check=deadline_check,
+        opaque_string_rules=opaque_string_rules,
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+    )
     if deadline_check is None:
         return sha256(payload).hexdigest()
     digest = sha256()
@@ -564,16 +829,33 @@ def strict_json_loads(
     text: str,
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> JsonValue:
-    """Load canonical JSON while rejecting duplicate keys and non-NFC strings."""
+    """Load canonical JSON while rejecting duplicate keys and non-NFC strings.
+
+    Only exact paths named in ``opaque_string_rules`` are exempt from outer
+    NFC.  Their byte caps are checked after JSON decode and before either
+    canonical traversal can normalize a carrier.
+    """
 
     try:
         loaded = load_bounded_json(text, deadline_check=deadline_check)
-        validate_json_canonical_form(loaded, deadline_check=deadline_check)
+        validate_json_canonical_form(
+            loaded,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_string_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+        )
         return normalize_json_value(
             loaded,
             deadline_check=deadline_check,
             _nesting_already_checked=True,
+            opaque_string_rules=opaque_string_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
         )
     except RecursionError as error:
         raise CanonicalJsonError("JSON validation recursion is unsupported") from error
@@ -592,12 +874,21 @@ def integrity_payload(
     artifact: Mapping[str, Any],
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> dict[str, JsonValue]:
     """Return a normalized artifact body excluding the self-integrity field."""
 
     payload = dict(artifact)
     payload.pop("integrity", None)
-    normalized = normalize_json_value(payload, deadline_check=deadline_check)
+    normalized = normalize_json_value(
+        payload,
+        deadline_check=deadline_check,
+        opaque_string_rules=opaque_string_rules,
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+    )
     if not isinstance(normalized, dict):
         raise CanonicalJsonError("artifact must be an object")
     return normalized
@@ -607,13 +898,28 @@ def attach_integrity(
     artifact: Mapping[str, Any],
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> dict[str, JsonValue]:
     """Return a copy with a canonical self-integrity SHA-256 field."""
 
-    result = integrity_payload(artifact, deadline_check=deadline_check)
+    result = integrity_payload(
+        artifact,
+        deadline_check=deadline_check,
+        opaque_string_rules=opaque_string_rules,
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+    )
     result["integrity"] = {
         "algorithm": "SHA-256",
-        "sha256": canonical_sha256(result, deadline_check=deadline_check),
+        "sha256": canonical_sha256(
+            result,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_string_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+        ),
     }
     return result
 
@@ -622,6 +928,9 @@ def verify_integrity(
     artifact: Mapping[str, Any],
     *,
     deadline_check: _DeadlineCheck | None = None,
+    opaque_string_rules: OpaqueJsonStringRules | None = None,
+    maximum_string_codepoints: int = MAX_JSON_STRING_CODEPOINTS,
+    maximum_string_utf8_bytes: int = MAX_JSON_STRING_UTF8_BYTES,
 ) -> bool:
     """Verify an artifact's self-integrity field without accepting defaults."""
 
@@ -634,8 +943,17 @@ def verify_integrity(
     if not isinstance(actual, str):
         return False
     return actual == canonical_sha256(
-        integrity_payload(artifact, deadline_check=deadline_check),
+        integrity_payload(
+            artifact,
+            deadline_check=deadline_check,
+            opaque_string_rules=opaque_string_rules,
+            maximum_string_codepoints=maximum_string_codepoints,
+            maximum_string_utf8_bytes=maximum_string_utf8_bytes,
+        ),
         deadline_check=deadline_check,
+        opaque_string_rules=opaque_string_rules,
+        maximum_string_codepoints=maximum_string_codepoints,
+        maximum_string_utf8_bytes=maximum_string_utf8_bytes,
     )
 
 

@@ -21,7 +21,6 @@ from math import floor, hypot, isfinite, ulp
 from pathlib import Path
 import re
 from typing import Any, Literal, TypeAlias, cast
-import unicodedata
 
 from ezdxf import bbox
 from ezdxf.enums import TextEntityAlignment
@@ -32,6 +31,7 @@ from .canonical import (
     CanonicalJsonError,
     canonical_sha256,
     load_bounded_json,
+    normalize_nfc_text,
     strict_json_loads,
 )
 from .errors import ErrorCode, PipelineError
@@ -942,7 +942,7 @@ def _profile_schema() -> dict[str, Any]:
 def _normalize_layer_name(value: Any) -> str:
     if not isinstance(value, str):
         raise _profile_error()
-    normalized = unicodedata.normalize("NFC", value).casefold()
+    normalized = normalize_nfc_text(value).casefold()
     if (
         not normalized
         or len(normalized) > MAX_LAYER_NAME_LENGTH
@@ -1619,7 +1619,7 @@ def _record_evidence(record: Any) -> TopologyEntityEvidence | None:
 
 def _record_layer(record: Any) -> str | None:
     try:
-        value = unicodedata.normalize("NFC", str(record.layer_name)).casefold()
+        value = normalize_nfc_text(str(record.layer_name)).casefold()
     except (AttributeError, TypeError, ValueError):
         return None
     return value or None
@@ -1835,7 +1835,7 @@ def _parse_token(candidate: _TextCandidate) -> str | None:
         or "\r" in text
     ):
         return None
-    normalized = unicodedata.normalize("NFC", text)
+    normalized = normalize_nfc_text(text)
     if normalized != text or not _TOKEN_PATTERN.fullmatch(normalized):
         return None
     return normalized
