@@ -11,10 +11,12 @@ from liang_pingfa_review.native_contracts import (
     bits_from_float,
     geometry_document_binding_digest,
     MAX_NATIVE_GEOMETRY_JSON_BYTES,
+    MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS,
     native_geometry_host_binding_digest,
     native_session_binding_digest,
     validate_native_contract,
 )
+from liang_pingfa_review.native_bridge import read_native_session_clock
 from liang_pingfa_review.native_protocol import (
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
@@ -405,11 +407,18 @@ def session(
 ) -> dict[str, Any]:
     current = source_value or source()
     now = datetime.now(UTC)
+    clock = read_native_session_clock()
     artifact = {
         "schema_version": "liang-pingfa/native-bridge-session/v1",
         "session_id": "native-session-0123456789abcdef0123456789abcdef",
         "created_at": format_utc(now),
         "expires_at": format_utc(now + timedelta(minutes=5)),
+        "monotonic_clock": clock.clock,
+        "monotonic_boot_id": clock.boot_id,
+        "monotonic_issued": str(clock.uptime_milliseconds),
+        "monotonic_expires": str(
+            clock.uptime_milliseconds + MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        ),
         "mode": "read_only",
         "pid": 1234,
         "windows_session_id": 1,

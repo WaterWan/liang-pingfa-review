@@ -5,6 +5,7 @@
   "session_rules": [
     "explicit-pid-and-local-pipe-only",
     "read-only-one-use-short-expiry",
+    "preparation-scoped-same-boot-monotonic-lifetime",
     "private-ntfs-session-descriptor-current-user-system-dacl",
     "atomic-claimed-descriptor-before-pipe-use",
     "post-rename-secret-cleanup-through-retained-handle",
