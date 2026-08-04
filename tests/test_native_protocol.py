@@ -1660,14 +1660,13 @@ class NativeProtocolTests(unittest.TestCase):
             clock=exact_clock,
             server_pid=exact["pid"],
         )
-        exact_client = self._clocked_client(
-            clock=exact_clock,
-            descriptor=exact,
-            pipe=exact_pipe,
-        )
         with self.assertRaises(PipelineError) as raised:
-            exact_client.health()
-        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+            self._clocked_client(
+                clock=exact_clock,
+                descriptor=exact,
+                pipe=exact_pipe,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
         self.assertEqual(exact_pipe.frame_count, 0)
 
         near_clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
@@ -1685,6 +1684,61 @@ class NativeProtocolTests(unittest.TestCase):
         )
         self.assertEqual(near_client.health()["kind"], "health")
         self.assertFalse(near_client.invalid)
+
+    def test_wall_clock_rollback_invalidates_connected_session_without_a_frame(self) -> None:
+        """A rollback before creation is terminal even when monotonic time remains."""
+
+        clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        descriptor = self._expiring_session(clock, 60)
+        descriptor["created_at"] = format_utc(clock.current - timedelta(seconds=10))
+        descriptor = attach_integrity(descriptor)
+        pipe = _GeneratedClockedPipe(
+            health_response,
+            clock=clock,
+            server_pid=descriptor["pid"],
+        )
+        client = self._clocked_client(
+            clock=clock,
+            descriptor=descriptor,
+            pipe=pipe,
+        )
+        self.assertEqual(client.health()["kind"], "health")
+        frames_before_rollback = pipe.frame_count
+        clock.current -= timedelta(seconds=20)
+        with self.assertRaises(PipelineError) as raised:
+            client.health()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+        self.assertEqual(pipe.frame_count, frames_before_rollback)
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
+
+    def test_monotonic_session_deadline_survives_non_future_wall_clock_rollback(self) -> None:
+        """Rollback within the wall interval cannot extend the captured deadline."""
+
+        clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
+        descriptor = self._expiring_session(clock, 100)
+        descriptor["created_at"] = format_utc(clock.current - timedelta(seconds=100))
+        descriptor = attach_integrity(descriptor)
+        pipe = _GeneratedClockedPipe(
+            health_response,
+            clock=clock,
+            server_pid=descriptor["pid"],
+        )
+        client = self._clocked_client(
+            clock=clock,
+            descriptor=descriptor,
+            pipe=pipe,
+        )
+        self.assertEqual(client.health()["kind"], "health")
+        frames_before_expiry = pipe.frame_count
+        clock.current -= timedelta(seconds=50)
+        clock.value += 101
+        with self.assertRaises(PipelineError) as raised:
+            client.health()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
+        self.assertEqual(pipe.frame_count, frames_before_expiry)
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
 
     def test_long_method_timeout_cannot_extend_session_deadline(self) -> None:
         clock = _GeneratedClock(datetime(2030, 1, 1, tzinfo=UTC))
@@ -2159,6 +2213,37 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 self.assertTrue(client.invalid)
                 self.assertTrue(pipe.closed)
 
+    def test_future_context_is_rejected_before_pipe_connect_or_frame_write(self) -> None:
+        """Even a one-second future context may not reach the pipe transport."""
+
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+        descriptor = session()
+        for label, created_at in (
+            ("one-second", now + timedelta(seconds=1)),
+            ("thirty-days", now + timedelta(days=30)),
+            ("exactly-expired", now - timedelta(minutes=5)),
+        ):
+            with self.subTest(case=label):
+                pipe = _GeneratedReusablePipe(
+                    lambda request: self._bridge_result(request, descriptor),
+                    server_pid=descriptor["pid"],
+                )
+                with (
+                    mock.patch(
+                        "liang_pingfa_review.native_bridge.utc_now",
+                        return_value=now,
+                    ),
+                    self.assertRaises(PipelineError) as raised,
+                ):
+                    NativeBridgeHandshakeClient(
+                        self._context(descriptor, created_at=created_at),
+                        config=config(),
+                        transport=pipe,
+                    )
+                self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+                self.assertEqual(pipe.frame_count, 0)
+                self.assertFalse(pipe.closed)
+
     def test_session_response_before_health_is_a_terminal_order_error(self) -> None:
         descriptor = session()
         methods: list[str] = []
@@ -2239,11 +2324,6 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 "wrong-pid",
                 {"server_pid": 4321},
                 ErrorCode.NATIVE_PIPE_INVALID,
-            ),
-            (
-                "expired-preparation",
-                {"created_at": datetime.now(UTC) - timedelta(minutes=5)},
-                ErrorCode.NATIVE_SESSION_EXPIRED,
             ),
             (
                 "capability-drift",
@@ -2790,6 +2870,30 @@ class NativeSessionDescriptorTests(unittest.TestCase):
                     backend.path_exists(opened.path),
                     replacement,
                 )
+
+    def test_claim_rejects_re_signed_future_descriptor_after_atomic_claim(self) -> None:
+        """Integrity cannot make a future descriptor usable after persistence."""
+
+        future = session()
+        created = datetime.now(UTC) + timedelta(days=30)
+        future["created_at"] = format_utc(created)
+        future["expires_at"] = format_utc(created + timedelta(minutes=5))
+        future = attach_integrity(future)
+        opened = _GeneratedOwnedSecretFile(
+            self.path,
+            payload=canonical_json_bytes(future) + b"\n",
+        )
+        backend = _GeneratedSessionBackend(self.parent, existing=opened)
+        with ExitStack() as stack:
+            for patcher in self._consume_patches(backend):
+                stack.enter_context(patcher)
+            with self.assertRaises(PipelineError) as raised:
+                with consume_native_session(self.path):
+                    self.fail("future descriptor reached a consumer")
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+        self.assertTrue(opened.renamed)
+        self.assertTrue(opened.delete_requested)
+        self.assertTrue(opened.closed)
 
     def test_claimed_descriptor_basename_is_ascii_casefolded_only(self) -> None:
         """NTFS casing cannot turn a consumed descriptor back into a candidate."""

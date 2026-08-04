@@ -34,6 +34,7 @@ from liang_pingfa_review.canonical import (
 from liang_pingfa_review.errors import ErrorCode, PipelineError
 from liang_pingfa_review.native_audit import build_native_audit
 from liang_pingfa_review.native_contracts import (
+    MAX_NATIVE_SESSION_LIFETIME,
     canonical_geometry_json_bytes,
     MAX_NATIVE_GEOMETRY_ENTITIES,
     MAX_NATIVE_GEOMETRY_JSON_BYTES,
@@ -446,6 +447,70 @@ class NativeContractTests(unittest.TestCase):
         with self.assertRaises(PipelineError) as raised:
             validate_native_contract("session", forged)
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+
+    def test_session_temporal_bounds_reject_re_signed_future_and_boundary_values(self) -> None:
+        """The signed descriptor is usable only in its strict current interval."""
+
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+
+        def signed(created: datetime, expires: datetime) -> dict:
+            candidate = session()
+            candidate["created_at"] = canonical_module.format_utc(created)
+            candidate["expires_at"] = canonical_module.format_utc(expires)
+            return attach_integrity(candidate)
+
+        cases = (
+            (
+                "thirty-days-future",
+                signed(
+                    now + timedelta(days=30),
+                    now + timedelta(days=30) + MAX_NATIVE_SESSION_LIFETIME,
+                ),
+                False,
+            ),
+            (
+                "one-second-future",
+                signed(now + timedelta(seconds=1), now + timedelta(seconds=2)),
+                False,
+            ),
+            (
+                "exactly-now",
+                signed(now, now + MAX_NATIVE_SESSION_LIFETIME),
+                True,
+            ),
+            (
+                "just-expired",
+                signed(now - MAX_NATIVE_SESSION_LIFETIME, now - timedelta(seconds=1)),
+                False,
+            ),
+            (
+                "exactly-expiry",
+                signed(now - MAX_NATIVE_SESSION_LIFETIME, now),
+                False,
+            ),
+            (
+                "fixed-maximum",
+                signed(now, now + MAX_NATIVE_SESSION_LIFETIME),
+                True,
+            ),
+            (
+                "maximum-plus-one-second",
+                signed(now, now + MAX_NATIVE_SESSION_LIFETIME + timedelta(seconds=1)),
+                False,
+            ),
+        )
+        for label, candidate, accepted in cases:
+            with self.subTest(case=label), mock.patch.object(
+                native_contracts_module,
+                "utc_now",
+                return_value=now,
+            ):
+                if accepted:
+                    self.assertEqual(validate_native_contract("session", candidate), candidate)
+                else:
+                    with self.assertRaises(PipelineError) as raised:
+                        validate_native_contract("session", candidate)
+                    self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
 
     def test_session_challenge_response_binds_the_full_versioned_transcript(self) -> None:
         """Re-signed descriptors still cannot alter or replay the handshake."""
