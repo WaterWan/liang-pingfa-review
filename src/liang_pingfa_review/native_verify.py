@@ -12,13 +12,16 @@ from .errors import ErrorCode, PipelineError
 from .native_contracts import (
     _embedded_geometry,
     native_container_sequences,
+    native_execution_stable_host_binding_digest,
     native_artifact_integrity,
     native_marker_fingerprint,
     PRIVATE_RECORD_CARDINALITY,
+    require_active_native_contract,
     translated_geometry_bits,
     validate_native_contract,
 )
 from .native_audit import native_source_from_lease
+from .native_manifest import require_final_output_binding
 from .ownership import acquire_source_path_lease, platform_backend
 
 
@@ -91,6 +94,16 @@ def _require_document_tables_unchanged(
     ):
         if before["document"][key] != after["document"][key]:
             raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "unplanned table/layout/document change")
+
+
+def _require_owners_unchanged(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    """Protect the complete ordered owner record list, including unused owners."""
+
+    if before["owners"] != after["owners"]:
+        raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "protected owner state changed")
 
 
 def _verify_translate(
@@ -220,6 +233,7 @@ def _require_protected_order(
     after_entities: list[Mapping[str, Any]],
     *,
     after_document: Mapping[str, Any],
+    after_owners: list[str],
     delete_handles: set[str],
     marker_handles_by_operation: Mapping[str, str],
     operations: list[Mapping[str, Any]],
@@ -306,6 +320,7 @@ def _require_protected_order(
         {
             "container_sequences": sequences,
             "document_state_digest": after_document["document_state_digest"],
+            "owners": after_owners,
         }
     ) != after_document["protected_order_digest"]:
         raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "protected order digest drift")
@@ -317,10 +332,32 @@ def verify_native_transition(
 ) -> list[dict[str, Any]]:
     """Compare raw before/exported-after geometry against the exact allowlist."""
 
-    checked_manifest = validate_native_contract("manifest", manifest)
+    checked_manifest = require_active_native_contract("manifest", manifest)
     before = _precondition_export(checked_manifest)
-    after = validate_native_contract("geometry", after_export)
+    after = require_active_native_contract("geometry", after_export)
+    require_final_output_binding(
+        checked_manifest,
+        after["source"],
+        error_code=ErrorCode.NATIVE_READBACK_INVALID,
+    )
+    if (
+        native_execution_stable_host_binding_digest(
+            before,
+            checked_manifest["marker_policy_binding"],
+        )
+        != checked_manifest["stable_host_binding_digest"]
+        or native_execution_stable_host_binding_digest(
+            after,
+            checked_manifest["marker_policy_binding"],
+        )
+        != checked_manifest["stable_host_binding_digest"]
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_READBACK_INVALID,
+            "readback stable host/profile/capability binding differs",
+        )
     _require_document_tables_unchanged(before, after)
+    _require_owners_unchanged(before, after)
     before_entities = list(before["entities"])
     after_entities = list(after["entities"])
     before_by_handle = {entity["handle"]: entity for entity in before_entities}
@@ -371,6 +408,7 @@ def verify_native_transition(
         before_entities,
         after_entities,
         after_document=after["document"],
+        after_owners=after["owners"],
         delete_handles=delete_handles,
         marker_handles_by_operation=marker_handles_by_operation,
         operations=operations,
@@ -397,8 +435,8 @@ def validate_console_result(
 ) -> dict[str, Any]:
     """Validate the external transaction claim without treating it as proof."""
 
-    checked_manifest = validate_native_contract("manifest", manifest)
-    checked = validate_native_contract("console_result", result)
+    checked_manifest = require_active_native_contract("manifest", manifest)
+    checked = require_active_native_contract("console_result", result)
     final = checked["final_document_binding"]
     prewrite = checked_manifest["expected_prewrite_revision"]
     transition_policy = checked_manifest["environment"]["write_revision_transition"]
@@ -407,12 +445,18 @@ def validate_console_result(
         or checked["manifest_id"] != checked_manifest["manifest_id"]
         or checked["manifest_integrity_sha256"]
         != native_artifact_integrity(checked_manifest)
+        or checked["manifest_schema_version"] != checked_manifest["schema_version"]
         or checked["nonce"] != checked_manifest["nonce"]
         or checked["final_revision_fingerprint"] != final["revision_fingerprint"]
         or checked["transaction"]
         != {"preflight": "passed", "outcome": "committed", "rollback": "not_required"}
     ):
         raise PipelineError(ErrorCode.NATIVE_CONSOLE_RESULT_INVALID, "console transaction claim differs")
+    require_final_output_binding(
+        checked_manifest,
+        final["output_copy_binding"],
+        error_code=ErrorCode.NATIVE_CONSOLE_RESULT_INVALID,
+    )
     if transition_policy == "save_reopen_changes_revision":
         transition_valid = (
             checked["final_revision_transition"] == "save_reopen_changed"
@@ -458,12 +502,18 @@ def geometry_from_console_export(
 ) -> dict[str, Any]:
     """Validate one fresh readback export emitted by a separate console run."""
 
-    checked_manifest = validate_native_contract("manifest", manifest)
-    checked_result = validate_native_contract("console_result", result)
-    checked = validate_native_contract("console_export", console_export)
+    checked_manifest = require_active_native_contract("manifest", manifest)
+    checked_result = require_active_native_contract("console_result", result)
+    checked = require_active_native_contract("console_export", console_export)
     if (
         checked["run_id"] != run_id
         or checked["manifest_id"] != checked_manifest["manifest_id"]
+        or checked["manifest_integrity_sha256"]
+        != native_artifact_integrity(checked_manifest)
+        or checked["manifest_schema_version"] != checked_manifest["schema_version"]
+        or checked["console_result_integrity_sha256"]
+        != native_artifact_integrity(checked_result)
+        or checked["console_result_schema_version"] != checked_result["schema_version"]
         or checked["nonce"] != checked_manifest["nonce"]
         or checked["final_revision_fingerprint"]
         != checked_result["final_revision_fingerprint"]
@@ -486,8 +536,18 @@ def geometry_from_console_export(
         != checked_result["final_document_binding"]["database_instance_fingerprint"]
         or geometry["source"]
         != checked_result["final_document_binding"]["output_copy_binding"]
+        or native_execution_stable_host_binding_digest(
+            geometry,
+            checked_manifest["marker_policy_binding"],
+        )
+        != checked_manifest["stable_host_binding_digest"]
     ):
         raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "readback geometry revision differs")
+    require_final_output_binding(
+        checked_manifest,
+        geometry["source"],
+        error_code=ErrorCode.NATIVE_READBACK_INVALID,
+    )
     return geometry
 
 
@@ -511,17 +571,43 @@ def build_native_verification(
     after_export: Mapping[str, Any],
     output_description: Mapping[str, Any],
     *,
+    result: Mapping[str, Any],
+    console_export: Mapping[str, Any],
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build evidence only after exact readback passes; it never authorizes edits."""
 
-    checked_manifest = validate_native_contract("manifest", manifest)
-    checked_after = validate_native_contract("geometry", after_export)
+    checked_manifest = require_active_native_contract("manifest", manifest)
+    checked_after = require_active_native_contract("geometry", after_export)
+    checked_result = require_active_native_contract("console_result", result)
+    checked_export = require_active_native_contract("console_export", console_export)
+    if (
+        checked_export["manifest_id"] != checked_manifest["manifest_id"]
+        or checked_export["manifest_integrity_sha256"]
+        != native_artifact_integrity(checked_manifest)
+        or checked_export["console_result_integrity_sha256"]
+        != native_artifact_integrity(checked_result)
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_VERIFICATION_INVALID,
+            "verification input version bindings differ",
+        )
     results = verify_native_transition(checked_manifest, checked_after)
+    try:
+        if any(
+            output_description[key] != checked_after["source"][key]
+            for key in ("format", "sha256", "byte_size", "dwg_header_signature")
+        ):
+            raise ValueError("public staging bytes differ from verified private output")
+    except (KeyError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_VERIFICATION_INVALID,
+            "verification output does not bind readback bytes",
+        ) from error
     current = now or utc_now()
     before = _precondition_export(checked_manifest)
     artifact = {
-        "schema_version": "liang-pingfa/native-verification/v1",
+        "schema_version": "liang-pingfa/native-verification/v2",
         "verification_id": "native-verification-"
         + canonical_sha256(
             {
@@ -533,6 +619,21 @@ def build_native_verification(
         "created_at": format_utc(current),
         "audit_binding": checked_manifest["audit_binding"],
         "plan_binding": checked_manifest["plan_binding"],
+        "manifest_binding": {
+            "manifest_id": checked_manifest["manifest_id"],
+            "manifest_integrity_sha256": native_artifact_integrity(checked_manifest),
+            "manifest_schema_version": checked_manifest["schema_version"],
+        },
+        "console_result_binding": {
+            "run_id": checked_result["run_id"],
+            "result_integrity_sha256": native_artifact_integrity(checked_result),
+            "result_schema_version": checked_result["schema_version"],
+        },
+        "console_export_binding": {
+            "run_id": checked_export["run_id"],
+            "export_integrity_sha256": native_artifact_integrity(checked_export),
+            "export_schema_version": checked_export["schema_version"],
+        },
         "output_binding": native_output_binding(output_description, now=current),
         "transition_digest": canonical_sha256(
             {
@@ -553,6 +654,35 @@ def build_native_verification(
     return validate_native_contract("verification", attach_integrity(artifact))
 
 
+def require_published_output_binding(
+    verification: Mapping[str, Any],
+    output_description: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require the committed public DWG to equal the staged evidence binding."""
+
+    checked = require_active_native_contract("verification", verification)
+    expected = checked["output_binding"]
+    try:
+        if any(
+            output_description[key] != expected[key]
+            for key in (
+                "format",
+                "sha256",
+                "byte_size",
+                "path_fingerprint",
+                "file_identity_fingerprint",
+                "dwg_header_signature",
+            )
+        ):
+            raise ValueError("published output differs from verification evidence")
+    except (KeyError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_VERIFICATION_INVALID,
+            "published native output binding differs",
+        ) from error
+    return checked
+
+
 def verify_native_published_output(
     output_path: Path,
     verification: Mapping[str, Any],
@@ -564,7 +694,7 @@ def verify_native_published_output(
     geometry proof is produced during ``native-apply`` before publication.
     """
 
-    checked = validate_native_contract("verification", verification)
+    checked = require_active_native_contract("verification", verification)
     if __import__("os").name != "nt":
         raise PipelineError(ErrorCode.WINDOWS_PLATFORM_REQUIRED, "native verification is Windows-only")
     backend = platform_backend(require_windows=True)

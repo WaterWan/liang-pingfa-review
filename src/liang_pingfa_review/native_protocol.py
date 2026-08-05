@@ -46,6 +46,19 @@ ALLOWED_METHODS: Final = frozenset(
 
 MAX_REQUEST_BYTES: Final = 64 * 1024
 MAX_CONTROL_RESPONSE_BYTES: Final = 256 * 1024
+# Native Core Console write results share the control-response ceiling.  Keep
+# this protocol value here rather than duplicating a private reader constant:
+# manifests are admitted only when their complete canonical success envelope
+# leaves the fixed safety margin below this hard cap.
+MAX_NATIVE_CONSOLE_RESULT_BYTES: Final = MAX_CONTROL_RESPONSE_BYTES
+MAX_NATIVE_CONSOLE_RESULT_HEADROOM_BYTES: Final = 16 * 1024
+MAX_NATIVE_CONSOLE_RESULT_CANONICAL_BYTES: Final = (
+    MAX_NATIVE_CONSOLE_RESULT_BYTES - MAX_NATIVE_CONSOLE_RESULT_HEADROOM_BYTES
+)
+# A full active-v2 result contains one fixed-width status record per requested
+# operation. 1,024 records are comfortably below the canonical result budget
+# while still covering the validated 623-operation release scenario.
+MAX_NATIVE_OPERATION_COUNT: Final = 1_024
 # Inventory is a fixed two-digest object, not a geometry surrogate.  Its
 # narrow wire ceiling and the geometry envelope below are intentionally sized
 # for the v1 semantic caps rather than transport convenience.
