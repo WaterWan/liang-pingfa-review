@@ -1,0 +1,4 @@
+# Frozen native v1 blobs are compared byte-for-byte against c374e6c.
+src/liang_pingfa_review/schemas/native-*-v1.schema.json text eol=lf
+native-bridge-contracts/ProtocolV1.cs text eol=lf
+native-bridge-contracts/Interfaces.cs text eol=lf

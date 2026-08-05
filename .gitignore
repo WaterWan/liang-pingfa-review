@@ -84,6 +84,13 @@ beam-topology-profile.json
 !/tests/local-fixtures/
 !/tests/local-fixtures/README.md
 
+# Source-free published native v1 compatibility vectors are test data, not
+# local audit/verification output.
+!/tests/fixtures/
+!/tests/fixtures/native-v1/
+!/tests/fixtures/native-v1/audit.json
+!/tests/fixtures/native-v1/verification.json
+
 # Python caches
 __pycache__/
 *.py[cod]
@@ -97,6 +104,10 @@ __pycache__/
 *.egg-info/
 /native-bridge-contracts/bin/
 /native-bridge-contracts/obj/
+/native-bridge-contracts/tests/bin/
+/native-bridge-contracts/tests/obj/
+/native-cad/**/bin/
+/native-cad/**/obj/
 
 # IDE files
 .vscode/
