@@ -54,7 +54,7 @@ def plugin() -> dict[str, str]:
 
 def config() -> dict[str, Any]:
     return {
-        "schema_version": "liang-pingfa/native-adapter-config/v1",
+        "schema_version": "liang-pingfa/native-adapter-config/v2",
         "adapter": adapter(),
         "protocol": {"major": 1, "minor": 0},
         "required_capabilities": [
@@ -233,6 +233,7 @@ def _projection(entity_value: dict[str, Any]) -> dict[str, Any]:
 def geometry(
     entities: list[dict[str, Any]] | None = None,
     *,
+    owners: list[str] | None = None,
     source_value: dict[str, Any] | None = None,
     session_value: dict[str, Any] | None = None,
     session_id: str = "native-session-0123456789abcdef0123456789abcdef",
@@ -313,6 +314,7 @@ def geometry(
         [entity("10")] if entities is None else entities,
         key=lambda item: (*_container(item), item["sequence_index"]),
     )
+    selected_owners = ["AA"] if owners is None else list(owners)
     order = [
         {
             "container": _container(item),
@@ -357,6 +359,7 @@ def geometry(
         "protected_state_digest": canonical_sha256(
             {
                 "document_state_digest": document_state_digest,
+                "owners": selected_owners,
                 "opaque_state_digests": [item["opaque_state_digest"] for item in records],
             }
         ),
@@ -364,16 +367,18 @@ def geometry(
             {
                 "container_sequences": container_order,
                 "document_state_digest": document_state_digest,
+                "owners": selected_owners,
             }
         ),
         **document_state,
         "document_state_digest": document_state_digest,
     }
     artifact = {
-        "schema_version": "liang-pingfa/native-geometry-export/v1",
+        "schema_version": "liang-pingfa/native-geometry-export/v2",
         "source": selected_source,
         "binding": {
             "session_id": session_id,
+            "session_schema_version": "liang-pingfa/native-bridge-session/v2",
             "protocol_version": PROTOCOL_VERSION,
             "protocol_major": PROTOCOL_MAJOR,
             "protocol_minor": PROTOCOL_MINOR,
@@ -384,7 +389,7 @@ def geometry(
             "capabilities": selected_capabilities,
         },
         "document": document,
-        "owners": ["AA"],
+        "owners": selected_owners,
         "entities": records,
     }
     artifact["binding"]["session_binding_digest"] = native_session_binding_digest(
@@ -409,7 +414,8 @@ def session(
     now = datetime.now(UTC)
     clock = read_native_session_clock()
     artifact = {
-        "schema_version": "liang-pingfa/native-bridge-session/v1",
+        "schema_version": "liang-pingfa/native-bridge-session/v2",
+        "config_schema_version": "liang-pingfa/native-adapter-config/v2",
         "session_id": "native-session-0123456789abcdef0123456789abcdef",
         "created_at": format_utc(now),
         "expires_at": format_utc(now + timedelta(minutes=5)),
@@ -470,12 +476,13 @@ def intent(
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
     artifact = {
-        "schema_version": "liang-pingfa/native-edit-intent/v1",
+        "schema_version": "liang-pingfa/native-edit-intent/v2",
         "intent_id": "native-intent-" + digest("intent")[:32],
         "created_at": format_utc(now),
         "audit_binding": {
             "audit_id": audit["audit_id"],
             "audit_integrity_sha256": audit["integrity"]["sha256"],
+            "audit_schema_version": audit["schema_version"],
         },
         "operations": operations,
     }

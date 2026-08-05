@@ -1242,6 +1242,7 @@ class NativeProtocolTests(unittest.TestCase):
                 "kind": "inventory",
                 "inventory_json": canonical_json_bytes(
                     {
+                        "schema_version": "liang-pingfa/native-inventory-export/v2",
                         "document_revision_fingerprint": descriptor[
                             "current_document"
                         ]["revision_fingerprint"],
@@ -2333,7 +2334,11 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         ):
             completed = client.complete_session_descriptor()
         self.assertEqual(methods, ["health", "get_session"])
-        self.assertEqual(completed["schema_version"], "liang-pingfa/native-bridge-session/v1")
+        self.assertEqual(completed["schema_version"], "liang-pingfa/native-bridge-session/v2")
+        self.assertEqual(
+            completed["config_schema_version"],
+            "liang-pingfa/native-adapter-config/v2",
+        )
         self.assertEqual(completed["mode"], "read_only")
         self.assertEqual(completed["current_document"], descriptor["current_document"])
         self.assertEqual(validate_native_contract("session", completed), completed)
@@ -2390,7 +2395,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 side_effect=lambda _value: events.append("pipe"),
             ),
             mock.patch(
-                "liang_pingfa_review.native_bridge.validate_native_contract",
+                "liang_pingfa_review.native_bridge.require_active_native_contract",
                 side_effect=lambda _kind, value: (
                     events.append("config") or value
                 ),
@@ -2415,7 +2420,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 session_clock=clock_reader,
             )
         self.assertEqual(result, {"generated": True})
-        self.assertEqual(events[:4], ["utc", "clock", "pipe", "config"])
+        self.assertEqual(events[:4], ["config", "utc", "clock", "pipe"])
         self.assertEqual(len(contexts), 1)
         context = contexts[0]
         self.assertEqual(context.created_at, created)

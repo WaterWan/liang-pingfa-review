@@ -396,7 +396,7 @@ class NativeContractTests(unittest.TestCase):
         common.assert_not_called()
 
     def test_geometry_limits_match_schema_config_and_csharp_contract(self) -> None:
-        """One v1 capacity is carried through every public contract surface."""
+        """Active v2 carries the conservative capacity through every surface."""
 
         self.assertEqual(
             config()["geometry_limits"],
@@ -419,7 +419,7 @@ class NativeContractTests(unittest.TestCase):
         protocol_dtos = (
             Path(__file__).parents[1]
             / "native-bridge-contracts"
-            / "ProtocolV1.cs"
+            / "ProtocolV2.cs"
         ).read_text(encoding="utf-8")
         for declaration in (
             "MaxNativeGeometryEntities = 2_000",
@@ -428,7 +428,7 @@ class NativeContractTests(unittest.TestCase):
             "MaxInventoryJsonBytes = 64 * 1024",
         ):
             self.assertIn(declaration, protocol_dtos)
-        self.assertIn("measured in UTF-8 encoded bytes", protocol_dtos)
+        self.assertIn("MaxNativeOperations = 1_024", protocol_dtos)
 
         too_many_segments = geometry([entity("10", native_type="LWPOLYLINE")])
         too_many_segments["entities"][0]["segments"] = [
@@ -528,12 +528,12 @@ class NativeContractTests(unittest.TestCase):
         protocol_dtos = (
             Path(__file__).parents[1]
             / "native-bridge-contracts"
-            / "ProtocolV1.cs"
+            / "ProtocolV2.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("MaxSessionLifetimeMilliseconds", protocol_dtos)
         self.assertIn("SessionMonotonicClock", protocol_dtos)
-        self.assertIn("NativePrivateSessionLifetimeV1", protocol_dtos)
-        self.assertIn("NativePrivateSessionLifetimeV1 PrivateLifetime", protocol_dtos)
+        self.assertIn("NativePrivateSessionLifetimeV2", protocol_dtos)
+        self.assertIn("NativePrivateSessionLifetimeV2(", protocol_dtos)
 
         def signed(
             *,
@@ -1267,11 +1267,6 @@ var host = new NativeWireHostV1(
     NativeWireHostModeV1.full_host);
 var document = new NativeCurrentDocumentV1(true, sha, sha, sha, 128, "AC1032", sha, sha);
 var capabilities = new[] { "read.inventory/v1", "read.exact_geometry/v1" };
-var privateLifetime = new NativePrivateSessionLifetimeV1(
-    NativeBridgeProtocolV1.SessionMonotonicClock,
-    new string('d', 32),
-    "1000000",
-    "1300000");
 var responses = new object[]
 {
     new NativeHealthResponseV1(
@@ -1327,9 +1322,7 @@ Console.WriteLine(JsonSerializer.Serialize(new
         [nameof(NativeCurrentDocumentV1)] = Names<NativeCurrentDocumentV1>(),
         [nameof(NativeSessionHandshakeParametersV1)] = Names<NativeSessionHandshakeParametersV1>(),
         [nameof(NativeDocumentBoundParametersV1)] = Names<NativeDocumentBoundParametersV1>(),
-        [nameof(NativePrivateSessionLifetimeV1)] = Names<NativePrivateSessionLifetimeV1>(),
     },
-    private_session_lifetime = privateLifetime,
     responses,
 }));
 
@@ -1426,25 +1419,10 @@ static string[] Names<T>() =>
                 "session_id",
                 "expected_document_revision",
             },
-            "NativePrivateSessionLifetimeV1": {
-                "monotonic_clock",
-                "monotonic_boot_id",
-                "monotonic_issued",
-                "monotonic_expires",
-            },
         }
         self.assertEqual(
             {name: set(properties) for name, properties in payload["shapes"].items()},
             expected_shapes,
-        )
-        self.assertEqual(
-            payload["private_session_lifetime"],
-            {
-                "monotonic_clock": native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK,
-                "monotonic_boot_id": "d" * 32,
-                "monotonic_issued": "1000000",
-                "monotonic_expires": "1300000",
-            },
         )
         for response in payload["responses"]:
             with self.subTest(kind=response.get("result", {}).get("kind", "failure")):
