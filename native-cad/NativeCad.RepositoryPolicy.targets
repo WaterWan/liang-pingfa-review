@@ -1,0 +1,94 @@
+<Project>
+  <!--
+    This file is imported literally and unconditionally as the final element
+    of every native-cad project. Directory.Build files provide defaults, but
+    this target is the non-suppressible checkpoint policy boundary.
+
+    A future reviewed AutoCAD adapter may use only the
+    reviewed-autocad-adapter mode below. It remains subject to this import,
+    cannot use packages/HintPath/tasks/imports, and has only the one explicit
+    reference-name allowance guarded by the reviewed adapter property.
+  -->
+  <PropertyGroup>
+    <_NativeCadPolicyErrorPrefix>NativeCadRepositoryPolicy:</_NativeCadPolicyErrorPrefix>
+
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Protocol'">netstandard2.0</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Protocol'">checkpoint-1-protocol</_ExpectedNativeCadPolicyMode>
+
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Core'">netstandard2.0</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Core'">checkpoint-1-core</_ExpectedNativeCadPolicyMode>
+
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.ApiStubs'">netstandard2.0</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.ApiStubs'">syntax-only-stub</_ExpectedNativeCadPolicyMode>
+
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Core.Tests'">net8.0</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Core.Tests'">checkpoint-1-tests</_ExpectedNativeCadPolicyMode>
+
+    <!-- This is an explicit future policy mode, not an import bypass. -->
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter'">net48</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter'">reviewed-autocad-adapter</_ExpectedNativeCadPolicyMode>
+    <_NativeCadFutureAdapterReferencesAllowed
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter' And '$(NativeCadPolicyMode)' == 'reviewed-autocad-adapter' And '$(LiangPingfaReviewedAutoCadAdapterReferences)' == 'true'">true</_NativeCadFutureAdapterReferencesAllowed>
+  </PropertyGroup>
+
+  <Target Name="EnforceNativeCadRepositoryPolicy"
+          BeforeTargets="Restore;PrepareForBuild;CoreCompile;ResolveReferences;ResolveAssemblyReferences;Pack;Publish">
+    <Error
+      Condition="'$(_ExpectedNativeCadTargetFramework)' == '' Or '$(_ExpectedNativeCadPolicyMode)' == ''"
+      Text="$(_NativeCadPolicyErrorPrefix) project is not in the native-cad policy allowlist." />
+    <Error
+      Condition="'$(TargetFrameworks)' != ''"
+      Text="$(_NativeCadPolicyErrorPrefix) projects must define exactly one TargetFramework." />
+    <Error
+      Condition="'$(TargetFramework)' != '$(_ExpectedNativeCadTargetFramework)'"
+      Text="$(_NativeCadPolicyErrorPrefix) TargetFramework differs from its allowlist value." />
+    <Error
+      Condition="'$(NativeCadPolicyMode)' != '$(_ExpectedNativeCadPolicyMode)'"
+      Text="$(_NativeCadPolicyErrorPrefix) NativeCadPolicyMode differs from its allowlist value." />
+    <Error
+      Condition="$([System.String]::Copy('$(TreatWarningsAsErrors)').ToLowerInvariant()) != 'true'"
+      Text="$(_NativeCadPolicyErrorPrefix) TreatWarningsAsErrors must remain true." />
+    <Error
+      Condition="'$(NativeCadPolicyMode)' == 'syntax-only-stub' And ($([System.String]::Copy('$(IsPackable)').ToLowerInvariant()) != 'false' Or $([System.String]::Copy('$(IsPublishable)').ToLowerInvariant()) != 'false')"
+      Text="$(_NativeCadPolicyErrorPrefix) syntax-only stub mode cannot be packaged or published." />
+  </Target>
+
+  <Target Name="RejectUnapprovedNativeCadDependencies"
+          BeforeTargets="Restore;ProcessFrameworkReferences;PrepareForBuild;ResolveReferences;ResolveAssemblyReferences;CoreCompile;Pack;Publish">
+    <ItemGroup>
+      <!-- netstandard2.0 contributes this SDK-owned implicit reference. -->
+      <_UnapprovedNativeCadPackageReference Include="@(PackageReference)"
+        Condition="'%(PackageReference.Identity)' != 'NETStandard.Library' Or '%(PackageReference.IsImplicitlyDefined)' != 'true'" />
+      <!-- net8.0 contributes only this SDK-owned implicit framework item. -->
+      <_UnapprovedNativeCadFrameworkReference Include="@(FrameworkReference)"
+        Condition="'%(FrameworkReference.Identity)' != 'Microsoft.NETCore.App' Or '%(FrameworkReference.IsImplicitlyDefined)' != 'true'" />
+      <!-- netstandard2.0 resolves framework facades as Reference items. -->
+      <_UnapprovedNativeCadReference Include="@(Reference)"
+        Condition="('%(Reference.NuGetPackageId)' != 'NETStandard.Library' And '%(Reference.NuGetPackageId)' != 'Microsoft.NETCore.App.Ref' And '%(Reference.ReferenceSourceTarget)' != 'ResolveProjectReferences') And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'Autodesk.AutoCAD' Or '%(Reference.Identity)' == 'Autodesk.AutoCAD.DatabaseServices' Or '%(Reference.Identity)' == 'Autodesk.AutoCAD.Runtime'))" />
+      <_NativeCadReferenceWithHintPath Include="@(Reference)"
+        Condition="'%(Reference.HintPath)' != ''" />
+    </ItemGroup>
+    <Error
+      Condition="'@(_UnapprovedNativeCadPackageReference)' != ''"
+      Text="$(_NativeCadPolicyErrorPrefix) projects must not use PackageReference at checkpoint 1." />
+    <Error
+      Condition="'@(_UnapprovedNativeCadFrameworkReference)' != ''"
+      Text="$(_NativeCadPolicyErrorPrefix) projects must not use FrameworkReference at checkpoint 1." />
+    <Error
+      Condition="'@(_UnapprovedNativeCadReference)' != '' Or '@(_NativeCadReferenceWithHintPath)' != ''"
+      Text="$(_NativeCadPolicyErrorPrefix) projects must not use assembly Reference/HintPath at checkpoint 1." />
+    <Error
+      Condition="'$(_NativeCadFutureAdapterReferencesAllowed)' != 'true' And ($([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('autodesk')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('teigha')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('tssd')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('oda')))"
+      Text="$(_NativeCadPolicyErrorPrefix) projects must not reference proprietary CAD assemblies." />
+  </Target>
+</Project>
