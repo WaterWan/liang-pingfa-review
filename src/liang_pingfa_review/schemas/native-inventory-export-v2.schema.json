@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/native-inventory-export/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_revision_fingerprint",
+    "inventory_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "liang-pingfa/native-inventory-export/v2"
+    },
+    "document_revision_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "inventory_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}
