@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>LiangPingfa.NativeCad.Core.Tests</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.Core.Tests</RootNamespace>
+    <NativeCadPolicyMode>checkpoint-1-tests</NativeCadPolicyMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.Protocol\LiangPingfa.NativeCad.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.Core\LiangPingfa.NativeCad.Core.csproj" />
+    <!-- Compile against declarations only; never copy a syntax stub to output. -->
+    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.AutoCAD.ApiStubs\LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj">
+      <Private>false</Private>
+      <CopyLocal>false</CopyLocal>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>

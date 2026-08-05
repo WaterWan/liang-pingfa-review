@@ -1,0 +1,198 @@
+{
+  "fixture_version": "native-cad-v2",
+  "source_free": true,
+  "mutable_write_artifact_versions": {
+    "legacy_manifest": "liang-pingfa/native-edit-manifest/v1",
+    "manifest": "liang-pingfa/native-edit-manifest/v2",
+    "console_result": "liang-pingfa/native-console-result/v2",
+    "console_export": "liang-pingfa/native-console-export/v2",
+    "verification": "liang-pingfa/native-verification/v2"
+  },
+  "canonical_payload": {
+    "z": [
+      true,
+      null
+    ],
+    "a": {
+      "name": "generated",
+      "binary64": "3ff0000000000000"
+    }
+  },
+  "canonical_json": "{\"a\":{\"binary64\":\"3ff0000000000000\",\"name\":\"generated\"},\"z\":[true,null]}",
+  "canonical_sha256": "12c1dd4e8bdcd00d15bebfcad82bc009ecb8d4aed6bb6379475e7709c07679d5",
+  "canonical_vectors": [
+    {
+      "name": "unicode-scalar-key-order",
+      "payload": {
+        "": "bmp-private-use",
+        "𐀀": "linear-b"
+      },
+      "canonical_json": "{\"\":\"bmp-private-use\",\"𐀀\":\"linear-b\"}",
+      "canonical_sha256": "4254113d49c994b1b6187134b107c2af6a8b5e3cb3f08feb1f35b15efecb1bee"
+    },
+    {
+      "name": "control-character-escaping",
+      "payload": {
+        "controls": "\u0000\u0001\b\t\n\f\r\"\\/"
+      },
+      "canonical_json": "{\"controls\":\"\\u0000\\u0001\\b\\t\\n\\f\\r\\\"\\\\/\"}",
+      "canonical_sha256": "9d50bd06762fa2addbcb963933723d5bdd0f8e7411841228cdc7d5c4e0873ac2"
+    },
+    {
+      "name": "nfc-composed-combining",
+      "payload": {
+        "accent": "café",
+        "key-é": "é"
+      },
+      "canonical_json": "{\"accent\":\"café\",\"key-é\":\"é\"}",
+      "canonical_sha256": "ed6944dfe4e25ed2ec0913ee85d6383fc1f1cf46550af60c0e4f8a435e888b9e"
+    },
+    {
+      "name": "astral-values",
+      "payload": {
+        "astral": "😀𐀀",
+        "text": "plain"
+      },
+      "canonical_json": "{\"astral\":\"😀𐀀\",\"text\":\"plain\"}",
+      "canonical_sha256": "d6618a50f5ceee58208aac69f8879a8b9d1c2486e46c177f2917023f1480a8c9"
+    },
+    {
+      "name": "integer-boundaries",
+      "payload": {
+        "int64_min": -9223372036854775808,
+        "int64_max": 9223372036854775807,
+        "uint64_max": 18446744073709551615
+      },
+      "canonical_json": "{\"int64_max\":9223372036854775807,\"int64_min\":-9223372036854775808,\"uint64_max\":18446744073709551615}",
+      "canonical_sha256": "8a1d9f13ffbe884809c5268adbca0d468603507e2782a391e14bded69c71e3bf"
+    },
+    {
+      "name": "nested-objects-and-arrays",
+      "payload": {
+        "z": [
+          true,
+          null,
+          {
+            "": [
+              0,
+              -7,
+              "é"
+            ]
+          }
+        ],
+        "a": {
+          "deep": [
+            {
+              "𐀀": "ok"
+            }
+          ]
+        }
+      },
+      "canonical_json": "{\"a\":{\"deep\":[{\"𐀀\":\"ok\"}]},\"z\":[true,null,{\"\":[0,-7,\"é\"]}]}",
+      "canonical_sha256": "82d86b34e07b0f57898e1165dccdb8630ac6a9100d338662a0b29263d17e565e"
+    }
+  ],
+  "canonical_depth_vectors": [
+    {
+      "name": "empty-arrays-depth-127",
+      "shape": "empty-arrays",
+      "depth": 127,
+      "accepted": true
+    },
+    {
+      "name": "empty-objects-depth-127",
+      "shape": "empty-objects",
+      "depth": 127,
+      "accepted": true
+    },
+    {
+      "name": "mixed-containers-depth-127",
+      "shape": "mixed-containers",
+      "depth": 127,
+      "accepted": true
+    },
+    {
+      "name": "scalar-leaves-depth-127",
+      "shape": "scalar-leaves",
+      "depth": 127,
+      "accepted": true
+    },
+    {
+      "name": "empty-arrays-depth-128",
+      "shape": "empty-arrays",
+      "depth": 128,
+      "accepted": true
+    },
+    {
+      "name": "empty-objects-depth-128",
+      "shape": "empty-objects",
+      "depth": 128,
+      "accepted": true
+    },
+    {
+      "name": "mixed-containers-depth-128",
+      "shape": "mixed-containers",
+      "depth": 128,
+      "accepted": true
+    },
+    {
+      "name": "scalar-leaves-depth-128",
+      "shape": "scalar-leaves",
+      "depth": 128,
+      "accepted": true
+    },
+    {
+      "name": "empty-arrays-depth-129",
+      "shape": "empty-arrays",
+      "depth": 129,
+      "accepted": false
+    },
+    {
+      "name": "empty-objects-depth-129",
+      "shape": "empty-objects",
+      "depth": 129,
+      "accepted": false
+    },
+    {
+      "name": "mixed-containers-depth-129",
+      "shape": "mixed-containers",
+      "depth": 129,
+      "accepted": false
+    },
+    {
+      "name": "scalar-leaves-depth-129",
+      "shape": "scalar-leaves",
+      "depth": 129,
+      "accepted": false
+    }
+  ],
+  "rejected_number_tokens": [
+    "-0",
+    "1.0",
+    "1e-7",
+    "1e0",
+    "18446744073709551616",
+    "-9223372036854775809"
+  ],
+  "binary64_vectors": [
+    {
+      "original": "3ff0000000000000",
+      "delta": "3ff0000000000000",
+      "translated": "4000000000000000"
+    },
+    {
+      "original": "4000000000000000",
+      "delta": "0000000000000000",
+      "translated": "4000000000000000"
+    }
+  ],
+  "limits": {
+    "max_json_nesting_depth": 128,
+    "max_geometry_entities": 2000,
+    "max_geometry_segments": 10000,
+    "max_geometry_json_bytes": 16777216,
+    "max_native_operations": 1024,
+    "max_console_result_bytes": 262144,
+    "max_console_result_canonical_bytes": 245760
+  }
+}
