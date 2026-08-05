@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import argparse
 import ast
+from hashlib import sha256
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tokenize
+import unicodedata
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -32,11 +36,28 @@ REFERENCE_PATHS = (
 MULTI_ANNOTATION_CONTRACT_PATH = Path("tests/contracts/multi-annotation-overlap.json")
 TOPOLOGY_CONTRACT_PATH = Path("tests/contracts/beam-topology-in-situ.json")
 NATIVE_PROTOCOL_CONTRACT_PATH = Path("tests/contracts/native-bridge-protocol.json")
+NATIVE_V1_BASELINE_MAP_PATH = Path("tests/contracts/native-v1-baseline.json")
+NATIVE_V1_FIXTURE_PATHS = frozenset(
+    {
+        f"tests/fixtures/native-v1/{name}.json"
+        for name in (
+            "config",
+            "session",
+            "geometry",
+            "audit",
+            "intent",
+            "plan",
+            "manifest",
+            "console-result",
+            "console-export",
+            "verification",
+        )
+    }
+)
 NATIVE_SCHEMA_PATHS = (
     "native-adapter-config-v1.schema.json",
     "native-bridge-request-v1.schema.json",
     "native-bridge-response-v1.schema.json",
-    "native-inventory-export-v1.schema.json",
     "native-bridge-session-v1.schema.json",
     "native-geometry-export-v1.schema.json",
     "native-audit-v1.schema.json",
@@ -46,14 +67,80 @@ NATIVE_SCHEMA_PATHS = (
     "native-console-result-v1.schema.json",
     "native-console-export-v1.schema.json",
     "native-verification-v1.schema.json",
+    "native-adapter-config-v2.schema.json",
+    "native-inventory-export-v2.schema.json",
+    "native-bridge-session-v2.schema.json",
+    "native-geometry-export-v2.schema.json",
+    "native-audit-v2.schema.json",
+    "native-edit-intent-v2.schema.json",
+    "native-edit-plan-v2.schema.json",
+    "native-edit-manifest-v2.schema.json",
+    "native-console-result-v2.schema.json",
+    "native-console-export-v2.schema.json",
+    "native-verification-v2.schema.json",
+)
+NATIVE_CAD_ROOT = Path("native-cad")
+NATIVE_CAD_GOLDEN_FIXTURE_PATH = (
+    "native-cad/tests/fixtures/native-cad-v2-golden.json"
+)
+NATIVE_CAD_PROJECT_PATHS = (
+    "native-cad/src/LiangPingfa.NativeCad.Protocol/LiangPingfa.NativeCad.Protocol.csproj",
+    "native-cad/src/LiangPingfa.NativeCad.Core/LiangPingfa.NativeCad.Core.csproj",
+    "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj",
+    "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/LiangPingfa.NativeCad.Core.Tests.csproj",
+)
+NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS = {
+    NATIVE_CAD_PROJECT_PATHS[0]: "netstandard2.0",
+    NATIVE_CAD_PROJECT_PATHS[1]: "netstandard2.0",
+    NATIVE_CAD_PROJECT_PATHS[2]: "netstandard2.0",
+    NATIVE_CAD_PROJECT_PATHS[3]: "net8.0",
+}
+NATIVE_CAD_STUB_SOURCE_PATH = (
+    "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/AutodeskApiStubs.cs"
+)
+NATIVE_CAD_STUB_TEST_SOURCE_PATH = (
+    "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/Program.cs"
+)
+NATIVE_CAD_MSBUILD_SUFFIXES = frozenset({".csproj", ".props", ".targets"})
+NATIVE_CAD_POLICY_TARGETS_PATH = "native-cad/NativeCad.RepositoryPolicy.targets"
+NATIVE_CAD_POLICY_IMPORTS = {
+    relative: r"..\..\NativeCad.RepositoryPolicy.targets"
+    for relative in NATIVE_CAD_PROJECT_PATHS
+}
+NATIVE_CAD_POLICY_MODES = {
+    NATIVE_CAD_PROJECT_PATHS[0]: "checkpoint-1-protocol",
+    NATIVE_CAD_PROJECT_PATHS[1]: "checkpoint-1-core",
+    NATIVE_CAD_PROJECT_PATHS[2]: "syntax-only-stub",
+    NATIVE_CAD_PROJECT_PATHS[3]: "checkpoint-1-tests",
+}
+NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_PROJECT = (
+    "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/"
+    "LiangPingfa.NativeCad.AutoCAD.Adapter.csproj"
+)
+NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_CONDITION = (
+    "'$(LiangPingfaReviewedAutoCadAdapterReferences)' == 'true'"
+)
+NATIVE_CAD_GENERATED_DIRECTORIES = frozenset(
+    {
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/bin",
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/obj",
+        "native-cad/src/LiangPingfa.NativeCad.Core/bin",
+        "native-cad/src/LiangPingfa.NativeCad.Core/obj",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/bin",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/obj",
+        "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/bin",
+        "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/obj",
+    }
 )
 NATIVE_PROTOCOL_TEXT_PATHS = frozenset(
     {
         "src/liang_pingfa_review/native_bridge.py",
         "src/liang_pingfa_review/schemas/native-bridge-session-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-session-v2.schema.json",
         "tests/support/mock_native_bridge.py",
         "tests/support/synthetic_native.py",
         "tests/test_native_protocol.py",
+        "tests/fixtures/native-v1/session.json",
     }
 )
 NATIVE_PIPE_LITERAL_CONTEXTS = NATIVE_PROTOCOL_TEXT_PATHS | frozenset(
@@ -166,6 +253,7 @@ READABLE_FORBIDDEN_BEHAVIORS = (
 ALLOWED_FILES = frozenset(
     {
         ".gitignore",
+        ".gitattributes",
         "LICENSE",
         "README.md",
         "pyproject.toml",
@@ -219,7 +307,6 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/schemas/native-adapter-config-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-bridge-request-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-bridge-response-v1.schema.json",
-        "src/liang_pingfa_review/schemas/native-inventory-export-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-bridge-session-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-geometry-export-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-audit-v1.schema.json",
@@ -229,6 +316,17 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/schemas/native-console-result-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-console-export-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-verification-v1.schema.json",
+        "src/liang_pingfa_review/schemas/native-adapter-config-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-inventory-export-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-session-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-geometry-export-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-audit-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-edit-intent-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-edit-plan-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-edit-manifest-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-console-result-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-console-export-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-verification-v2.schema.json",
         "tests/support/__init__.py",
         "tests/support/owned_files.py",
         "tests/support/synthetic_dxf.py",
@@ -251,17 +349,57 @@ ALLOWED_FILES = frozenset(
         "tests/test_native_cli.py",
         "tests/test_native_publication_transaction.py",
         "tests/test_native_real_integration.py",
+        "tests/test_native_result_budget.py",
+        "tests/test_native_v1_compatibility.py",
         "tests/contracts/local-representation-readability.json",
         "tests/contracts/two-stage-overlay-workflow.json",
         "tests/contracts/multi-annotation-overlap.json",
         "tests/contracts/beam-topology-in-situ.json",
         "tests/contracts/native-bridge-protocol.json",
+        "tests/contracts/native-v1-baseline.json",
+        "tests/fixtures/native-v1/config.json",
+        "tests/fixtures/native-v1/session.json",
+        "tests/fixtures/native-v1/geometry.json",
+        "tests/fixtures/native-v1/audit.json",
+        "tests/fixtures/native-v1/intent.json",
+        "tests/fixtures/native-v1/plan.json",
+        "tests/fixtures/native-v1/manifest.json",
+        "tests/fixtures/native-v1/console-result.json",
+        "tests/fixtures/native-v1/console-export.json",
+        "tests/fixtures/native-v1/verification.json",
         "tests/local-fixtures/README.md",
         "native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj",
         "native-bridge-contracts/ProtocolV1.cs",
         "native-bridge-contracts/Interfaces.cs",
+        "native-bridge-contracts/ProtocolV2.cs",
+        "native-bridge-contracts/InterfacesV2.cs",
+        "native-bridge-contracts/tests/LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj",
+        "native-bridge-contracts/tests/Program.cs",
         "native-bridge-contracts/README.md",
         "native-bridge-contracts/LICENSE",
+        "native-cad/Directory.Build.props",
+        "native-cad/Directory.Build.targets",
+        "native-cad/NativeCad.RepositoryPolicy.targets",
+        "native-cad/LiangPingfa.NativeCad.sln",
+        "native-cad/README.md",
+        "native-cad/ADR-0001-sdk-free-transaction-core.md",
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/LiangPingfa.NativeCad.Protocol.csproj",
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/CanonicalJson.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/CanonicalJsonOptions.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/ProtocolV2.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/LiangPingfa.NativeCad.Core.csproj",
+        "native-cad/src/LiangPingfa.NativeCad.Core/CadModel.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/ExactCadExporter.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/InMemoryCadDatabase.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/ManifestExecution.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/ExactReadbackVerifier.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/NativeGeometryJsonV2.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/AutodeskApiStubs.cs",
+        "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/LiangPingfa.NativeCad.Core.Tests.csproj",
+        "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/Program.cs",
+        "native-cad/tests/fixtures/native-cad-v2-golden.json",
+        "tests/test_native_cad_core.py",
     }
 )
 
@@ -275,8 +413,10 @@ CSHARP_GENERATED_DIRECTORIES = frozenset(
     {
         "native-bridge-contracts/bin",
         "native-bridge-contracts/obj",
+        "native-bridge-contracts/tests/bin",
+        "native-bridge-contracts/tests/obj",
     }
-)
+) | NATIVE_CAD_GENERATED_DIRECTORIES
 FORBIDDEN_EXTENSIONS = frozenset(
     {
         ".pdf",
@@ -319,7 +459,19 @@ FORBIDDEN_EXTENSIONS = frozenset(
     }
 )
 TEXT_FILE_SUFFIXES = frozenset(
-    {".md", ".py", ".yml", ".yaml", ".json", ".toml", ".cs", ".csproj"}
+    {
+        ".md",
+        ".py",
+        ".yml",
+        ".yaml",
+        ".json",
+        ".toml",
+        ".cs",
+        ".csproj",
+        ".props",
+        ".targets",
+        ".sln",
+    }
 )
 
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -445,6 +597,8 @@ REQUIRED_GITIGNORE_RULES = (
     "*.native-output.dwg",
     "/native-bridge-contracts/bin/",
     "/native-bridge-contracts/obj/",
+    "/native-cad/**/bin/",
+    "/native-cad/**/obj/",
 )
 SOURCE_SCOPE_SENTENCE = "Verified source scope: 22G101-1 printed pages 1-22 through 1-33."
 BOUNDED_THREAT_MODEL = (
@@ -747,7 +901,17 @@ def _text_safety_issue(
             return f"UNC local path found in {relative}"
     if POSIX_LOCAL_PATH_PATTERN.search(value):
         return f"obvious POSIX local path found in {relative}"
-    if SHA256_PATTERN.search(value):
+    # The one checked source-free golden vector intentionally contains its
+    # expected SHA-256 output. All ordinary repository text remains unable to
+    # carry a 64-hex token, preventing accidental source-hash publication.
+    if (
+        SHA256_PATTERN.search(value)
+        and relative
+        not in (
+            {NATIVE_CAD_GOLDEN_FIXTURE_PATH, NATIVE_V1_BASELINE_MAP_PATH.as_posix()}
+            | NATIVE_V1_FIXTURE_PATHS
+        )
+    ):
         return f"possible source hash found in {relative}"
     return None
 
@@ -1738,6 +1902,9 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
         "actions/setup-dotnet@v4",
         'dotnet-version: "8.0.x"',
         "dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj",
+        "dotnet run --project native-bridge-contracts/tests/LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj -c Release --nologo",
+        "dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo",
+        "dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build",
         "python -m liang_pingfa_review doctor",
         "python -m liang_pingfa_review native-doctor",
     ):
@@ -1766,9 +1933,10 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
     # The SDK creates the exact C# ``bin``/``obj`` paths above.  Validate the
     # tracked allowlist before that build so a generated tree cannot mask a
     # tracked artifact in a fresh checkout.
-    build_command = (
+    build_commands = (
         "dotnet build native-bridge-contracts/"
-        "LiangPingfa.NativeBridge.Contracts.csproj"
+        "LiangPingfa.NativeBridge.Contracts.csproj",
+        "dotnet build native-cad/LiangPingfa.NativeCad.sln",
     )
     tracked_command = "python scripts/validate_skill.py --tracked"
     jobs_section = workflow.split("\njobs:\n", 1)[-1]
@@ -1786,17 +1954,1017 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
             continue
         job = job_match.group("body")
         tracked_index = job.find(tracked_command)
-        build_index = job.find(build_command)
-        if tracked_index < 0 or build_index < 0 or tracked_index > build_index:
+        build_indexes = [job.find(command) for command in build_commands]
+        if (
+            tracked_index < 0
+            or any(index < 0 for index in build_indexes)
+            or any(tracked_index > index for index in build_indexes)
+        ):
             issues.append(
                 "validate workflow must run tracked validation before C# build: "
                 + job_name
             )
 
 
+def _msbuild_local_name(value: str) -> str:
+    """Return an XML local name without accepting namespace-based bypasses."""
+
+    return value.rsplit("}", 1)[-1]
+
+
+def _native_cad_generated_relative(relative: str) -> bool:
+    """Return whether one exact SDK-generated native-CAD path is ignored."""
+
+    return any(
+        relative == generated or relative.startswith(generated + "/")
+        for generated in NATIVE_CAD_GENERATED_DIRECTORIES
+    )
+
+
+def _native_cad_msbuild_paths(root: Path) -> Iterable[tuple[Path, str]]:
+    """Yield every repository-visible native-CAD MSBuild input, not just projects."""
+
+    native_root = root / NATIVE_CAD_ROOT
+    if not native_root.is_dir():
+        return
+    for path in sorted(native_root.rglob("*")):
+        if not path.is_file() or path.suffix.casefold() not in NATIVE_CAD_MSBUILD_SUFFIXES:
+            continue
+        relative = _relative_posix(path, root)
+        if not _native_cad_generated_relative(relative):
+            yield path, relative
+
+
+def _normalized_msbuild_condition(value: str) -> str:
+    """Make exact reviewed-condition comparison insensitive to whitespace only."""
+
+    return "".join(value.split())
+
+
+def _is_exact_native_cad_policy_import(
+    *,
+    relative: str,
+    element: ElementTree.Element,
+    document: ElementTree.Element,
+    parents: dict[ElementTree.Element, ElementTree.Element],
+) -> bool:
+    """Recognize the one literal, final, unconditional policy import only."""
+
+    expected = NATIVE_CAD_POLICY_IMPORTS.get(relative)
+    return (
+        expected is not None
+        and _msbuild_local_name(element.tag) == "Import"
+        and parents.get(element) is document
+        and element.attrib == {"Project": expected}
+        and not (element.text or "").strip()
+    )
+
+
+def _is_future_reviewed_autocad_adapter_block(
+    *,
+    relative: str,
+    element: ElementTree.Element,
+    parents: dict[ElementTree.Element, ElementTree.Element],
+) -> bool:
+    """Recognize only the one future adapter block without exempting files broadly."""
+
+    if relative != NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_PROJECT:
+        return False
+    parent = parents.get(element)
+    if parent is None:
+        return False
+    group = parent
+    if _msbuild_local_name(group.tag) != "ItemGroup":
+        group = parents.get(parent)
+        if group is None or _msbuild_local_name(group.tag) != "ItemGroup":
+            return False
+    if _normalized_msbuild_condition(group.attrib.get("Condition", "")) != (
+        _normalized_msbuild_condition(NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_CONDITION)
+    ):
+        return False
+    # This is intentionally design-only at checkpoint 1: the adapter project
+    # does not exist and every recognized reference still produces a failure
+    # below. If a reviewed future adapter is admitted, only this conditional
+    # proprietary <Reference> item shape may be considered; HintPath, package,
+    # SDK, import, and arbitrary assembly exemptions remain forbidden.
+    return (
+        _msbuild_local_name(element.tag) == "Reference"
+        and element.attrib.get("Include")
+        in {
+            "Autodesk.AutoCAD",
+            "Autodesk.AutoCAD.DatabaseServices",
+            "Autodesk.AutoCAD.Runtime",
+        }
+    )
+
+
+def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
+    """Fail closed for every project, props, and targets dependency surface.
+
+    The checkpoint intentionally has no external package, assembly, import,
+    task, download, network, or restore hook.  Every element is inspected even
+    when hidden behind an MSBuild condition, so a false condition cannot become
+    an allowlist bypass later.
+    """
+
+    native_root = (root / NATIVE_CAD_ROOT).resolve()
+    forbidden_elements = {
+        "PackageReference": "PackageReference",
+        "FrameworkReference": "FrameworkReference",
+        "Reference": "Reference",
+        "HintPath": "HintPath",
+        "Import": "Import",
+        "UsingTask": "UsingTask",
+        "Exec": "Exec",
+        "Download": "download hook",
+        "DownloadFile": "download hook",
+        "PackageDownload": "package download",
+        "WebClient": "network hook",
+        "MSBuild": "MSBuild invocation",
+        "CallTarget": "target invocation",
+        "Copy": "binary copy task",
+    }
+    forbidden_property_prefixes = (
+        "restore",
+        "nuget",
+        "packagesource",
+        "packagedownload",
+    )
+    binary_suffixes = (
+        ".dll",
+        ".exe",
+        ".nupkg",
+        ".snupkg",
+        ".msi",
+        ".zip",
+        ".7z",
+    )
+    network_tokens = (
+        "http://",
+        "https://",
+        "ftp://",
+        "invoke-webrequest",
+        "curl ",
+        "wget ",
+        "dotnet restore",
+    )
+
+    for path, relative in _native_cad_msbuild_paths(root):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            issues.append(f"native CAD MSBuild file is not UTF-8: {relative}")
+            continue
+        if "<!DOCTYPE" in raw.upper():
+            issues.append(f"native CAD MSBuild file forbids DTD declarations: {relative}")
+            continue
+        try:
+            document = ElementTree.fromstring(raw)
+        except ElementTree.ParseError as error:
+            issues.append(f"native CAD MSBuild file is malformed: {relative}: {error}")
+            continue
+        if _msbuild_local_name(document.tag) != "Project":
+            issues.append(f"native CAD MSBuild root must be Project: {relative}")
+            continue
+
+        is_project_file = path.suffix.casefold() == ".csproj"
+        if is_project_file:
+            if relative not in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS:
+                issues.append(
+                    f"native CAD has an unapproved project file: {relative}"
+                )
+            if document.attrib != {"Sdk": "Microsoft.NET.Sdk"}:
+                issues.append(
+                    "native CAD project must use exact root "
+                    f'Project Sdk="Microsoft.NET.Sdk": {relative}'
+                )
+        elif any(
+            _msbuild_local_name(attribute).casefold() == "sdk"
+            for attribute in document.attrib
+        ):
+            issues.append(
+                f"native CAD non-project MSBuild root must not declare an SDK: {relative}"
+            )
+
+        parents = {
+            child: parent
+            for parent in document.iter()
+            for child in parent
+        }
+        target_framework_count = 0
+        for element in document.iter():
+            name = _msbuild_local_name(element.tag)
+            is_exact_policy_import = _is_exact_native_cad_policy_import(
+                relative=relative,
+                element=element,
+                document=document,
+                parents=parents,
+            )
+            is_root = element is document
+            sdk_attributes = tuple(
+                attribute
+                for attribute in element.attrib
+                if _msbuild_local_name(attribute).casefold() == "sdk"
+            )
+            if name.casefold() == "sdk" or (
+                sdk_attributes and not (
+                    is_root
+                    and is_project_file
+                    and sdk_attributes == ("Sdk",)
+                    and document.attrib == {"Sdk": "Microsoft.NET.Sdk"}
+                )
+            ):
+                issues.append(
+                    "native CAD MSBuild file contains a child or secondary SDK "
+                    f"declaration: {relative}"
+                )
+
+            if name in {"TargetFramework", "TargetFrameworks"}:
+                expected_framework = NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.get(
+                    relative
+                )
+                if name == "TargetFrameworks":
+                    issues.append(
+                        "native CAD projects must not define TargetFrameworks: "
+                        + relative
+                    )
+                elif expected_framework is None:
+                    issues.append(
+                        "native CAD TargetFramework definition is only allowed "
+                        f"in an approved project: {relative}"
+                    )
+                else:
+                    target_framework_count += 1
+                    parent = parents.get(element)
+                    if (
+                        parent is None
+                        or _msbuild_local_name(parent.tag) != "PropertyGroup"
+                        or element.attrib.get("Condition") is not None
+                        or parent.attrib.get("Condition") is not None
+                    ):
+                        issues.append(
+                            "native CAD TargetFramework must have one "
+                            f"unconditional authoritative definition: {relative}"
+                        )
+                    if (element.text or "").strip() != expected_framework:
+                        issues.append(
+                            f"native CAD project has wrong target framework: {relative}"
+                        )
+
+            condition = element.attrib.get("Condition")
+            if condition is not None and not condition.strip():
+                issues.append(
+                    f"native CAD MSBuild file has an empty conditional bypass: {relative}"
+                )
+            if (
+                name == "Target"
+                and element.attrib.get("Name")
+                == "RejectUnapprovedNativeCadDependencies"
+                and condition is not None
+            ):
+                issues.append(
+                    "native CAD dependency rejection target must not be conditional: "
+                    + relative
+                )
+            if name in forbidden_elements and not (
+                name == "Import" and is_exact_policy_import
+            ):
+                if _is_future_reviewed_autocad_adapter_block(
+                    relative=relative,
+                    element=element,
+                    parents=parents,
+                ):
+                    issues.append(
+                        "native CAD future AutoCAD adapter reference block is unavailable "
+                        f"at checkpoint 1: {relative}"
+                    )
+                else:
+                    issues.append(
+                        "native CAD MSBuild file contains forbidden "
+                        f"{forbidden_elements[name]}: {relative}"
+                    )
+            if name.casefold().startswith(forbidden_property_prefixes):
+                issues.append(
+                    f"native CAD MSBuild file contains forbidden restore/package property: {relative}"
+                )
+            if name == "Target":
+                target_values = " ".join(
+                    element.attrib.get(attribute, "")
+                    for attribute in (
+                        "Name",
+                        "BeforeTargets",
+                        "AfterTargets",
+                        "DependsOnTargets",
+                    )
+                ).casefold()
+                is_policy_restore_guard = (
+                    element.attrib.get("Name")
+                    in {
+                        "EnforceNativeCadRepositoryPolicy",
+                        "RejectUnapprovedNativeCadDependencies",
+                    }
+                    and "restore" in element.attrib.get("BeforeTargets", "").casefold()
+                )
+                if (
+                    ("restore" in target_values or "nuget" in target_values)
+                    and not is_policy_restore_guard
+                ):
+                    issues.append(
+                        f"native CAD MSBuild file contains forbidden restore target: {relative}"
+                    )
+
+            values = list(element.attrib.values())
+            if element.text:
+                values.append(element.text)
+            for value in values:
+                lowered = value.casefold()
+                if any(token in lowered for token in network_tokens):
+                    issues.append(
+                        f"native CAD MSBuild file contains forbidden network hook: {relative}"
+                    )
+                if any(
+                    lowered.strip().endswith(suffix)
+                    for suffix in binary_suffixes
+                ):
+                    issues.append(
+                        f"native CAD MSBuild file contains forbidden binary asset: {relative}"
+                    )
+
+            if name != "ProjectReference":
+                continue
+            include = element.attrib.get("Include", "")
+            if (
+                not include
+                or "$(" in include
+                or "@(" in include
+                or "%(" in include
+            ):
+                issues.append(
+                    f"native CAD ProjectReference must be a literal repository path: {relative}"
+                )
+                continue
+            referenced = (path.parent / include).resolve()
+            try:
+                referenced.relative_to(native_root)
+            except ValueError:
+                issues.append(
+                    f"native CAD ProjectReference escapes native-cad: {relative}"
+                )
+                continue
+            if referenced.suffix.casefold() != ".csproj" or not referenced.is_file():
+                issues.append(
+                    f"native CAD ProjectReference is not a repository project: {relative}"
+                )
+                continue
+            if _relative_posix(referenced, root) == NATIVE_CAD_PROJECT_PATHS[2]:
+                metadata = {
+                    _msbuild_local_name(child.tag): (child.text or "").strip()
+                    for child in element
+                }
+                if metadata.get("Private", "").casefold() != "false" or (
+                    metadata.get("CopyLocal", "").casefold() != "false"
+                ):
+                    issues.append(
+                        "native CAD syntax-stub ProjectReference must disable copy-local: "
+                        + relative
+                    )
+
+        if is_project_file and relative in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS:
+            if target_framework_count != 1:
+                issues.append(
+                    "native CAD project must have exactly one authoritative "
+                    f"TargetFramework definition: {relative}"
+                )
+
+            direct_imports = [
+                element
+                for element in document
+                if _msbuild_local_name(element.tag) == "Import"
+            ]
+            approved_imports = [
+                element
+                for element in direct_imports
+                if _is_exact_native_cad_policy_import(
+                    relative=relative,
+                    element=element,
+                    document=document,
+                    parents=parents,
+                )
+            ]
+            if len(direct_imports) != 1 or len(approved_imports) != 1:
+                issues.append(
+                    "native CAD project must contain exactly one approved "
+                    f"unconditional policy import: {relative}"
+                )
+            elif list(document)[-1] is not approved_imports[0]:
+                issues.append(
+                    "native CAD policy import must be the final project element: "
+                    + relative
+                )
+
+            expected_mode = NATIVE_CAD_POLICY_MODES[relative]
+            mode_elements = [
+                element
+                for element in document.iter()
+                if _msbuild_local_name(element.tag) == "NativeCadPolicyMode"
+            ]
+            if len(mode_elements) != 1:
+                issues.append(
+                    "native CAD project must define exactly one policy mode: "
+                    + relative
+                )
+            else:
+                mode = mode_elements[0]
+                parent = parents.get(mode)
+                if (
+                    parent is None
+                    or _msbuild_local_name(parent.tag) != "PropertyGroup"
+                    or mode.attrib.get("Condition") is not None
+                    or parent.attrib.get("Condition") is not None
+                    or (mode.text or "").strip() != expected_mode
+                ):
+                    issues.append(
+                        "native CAD project has an invalid policy mode: "
+                        + relative
+                    )
+
+
+def _validate_native_cad_evaluated_target_frameworks(
+    root: Path,
+    issues: list[str],
+) -> None:
+    """Inspect evaluated framework properties when the CI lane opts in.
+
+    Static inspection rejects every repository-visible override source. The
+    explicit CI-only evaluation also catches command-line/environment global
+    properties without making each isolated mutation test spawn four SDK
+    evaluations. The workflow opts in only for its standalone validator step.
+    """
+
+    # These properties can redirect imports or supersede the exact framework
+    # property before a project is evaluated. They are never a supported local
+    # customization surface for this frozen checkpoint.
+    for name in (
+        "TargetFramework",
+        "TargetFrameworks",
+        "DirectoryBuildPropsPath",
+        "DirectoryBuildTargetsPath",
+        "ImportDirectoryBuildProps",
+        "ImportDirectoryBuildTargets",
+        "CustomBeforeMicrosoftCommonProps",
+        "CustomAfterMicrosoftCommonTargets",
+    ):
+        if os.environ.get(name):
+            issues.append(
+                "native CAD environment override is forbidden: " + name
+            )
+
+    if os.environ.get("LPF_VALIDATE_EVALUATED_MSBUILD") != "1":
+        return
+    dotnet = shutil.which("dotnet")
+    if dotnet is None:
+        issues.append(
+            "native CAD evaluated TargetFramework inspection requires dotnet"
+        )
+        return
+
+    for relative, expected in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items():
+        project = root / relative
+        try:
+            completed = subprocess.run(
+                [
+                    dotnet,
+                    "msbuild",
+                    str(project),
+                    "-nologo",
+                    "-getProperty:TargetFramework",
+                    "-getProperty:TargetFrameworks",
+                ],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            issues.append(
+                "native CAD evaluated TargetFramework inspection failed: "
+                + relative
+            )
+            continue
+        if completed.returncode != 0:
+            issues.append(
+                "native CAD evaluated TargetFramework inspection failed: "
+                + relative
+            )
+            continue
+        try:
+            payload = json.loads(completed.stdout)
+            properties = payload["Properties"]
+            target_framework = properties["TargetFramework"]
+            target_frameworks = properties["TargetFrameworks"]
+        except (TypeError, KeyError, json.JSONDecodeError):
+            issues.append(
+                "native CAD evaluated TargetFramework inspection was malformed: "
+                + relative
+            )
+            continue
+        if target_framework != expected or target_frameworks != "":
+            issues.append(
+                "native CAD evaluated TargetFramework differs from its "
+                f"checkpoint-1 allowlist value: {relative}"
+            )
+
+
+def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
+    """Keep checkpoint 1 source-only, generated, and explicitly non-runtime."""
+
+    required_paths = (
+        "native-cad/LiangPingfa.NativeCad.sln",
+        "native-cad/Directory.Build.props",
+        "native-cad/Directory.Build.targets",
+        NATIVE_CAD_POLICY_TARGETS_PATH,
+        "native-cad/README.md",
+        "native-cad/ADR-0001-sdk-free-transaction-core.md",
+        *NATIVE_CAD_PROJECT_PATHS,
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/CanonicalJson.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Protocol/ProtocolV2.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/CadModel.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/ExactCadExporter.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/InMemoryCadDatabase.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/ManifestExecution.cs",
+        "native-cad/src/LiangPingfa.NativeCad.Core/ExactReadbackVerifier.cs",
+        NATIVE_CAD_STUB_SOURCE_PATH,
+        "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/Program.cs",
+        NATIVE_CAD_GOLDEN_FIXTURE_PATH,
+    )
+    for relative in required_paths:
+        if not (root / relative).is_file():
+            issues.append(f"native CAD checkpoint path is missing: {relative}")
+
+    _validate_native_cad_msbuild_files(root, issues)
+    _validate_native_cad_evaluated_target_frameworks(root, issues)
+
+    props = _read_text(root / "native-cad/Directory.Build.props", issues)
+    if props is not None:
+        for required in (
+            "<Nullable>enable</Nullable>",
+            "<TreatWarningsAsErrors>true</TreatWarningsAsErrors>",
+            "<Deterministic>true</Deterministic>",
+            "<GeneratePackageOnBuild>false</GeneratePackageOnBuild>",
+        ):
+            if required not in props:
+                issues.append(f"native CAD build props lack required setting: {required}")
+
+    targets = _read_text(root / NATIVE_CAD_POLICY_TARGETS_PATH, issues)
+    if targets is not None:
+        for required in (
+            "RejectUnapprovedNativeCadDependencies",
+            "EnforceNativeCadRepositoryPolicy",
+            "TreatWarningsAsErrors",
+            "NativeCadPolicyMode",
+            "@(PackageReference)",
+            "@(FrameworkReference)",
+            "@(Reference)",
+            "@(ProjectReference)",
+            "HintPath",
+            "proprietary CAD assemblies",
+        ):
+            if required not in targets:
+                issues.append(
+                    "native CAD build targets must fail closed for dependency items: "
+                    + required
+                )
+
+    expected_frameworks = {
+        relative: f"<TargetFramework>{framework}</TargetFramework>"
+        for relative, framework in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items()
+    }
+    forbidden_project_text = (
+        "packagereference",
+        "<reference",
+        "<hintpath",
+        "teigha",
+        "tssd",
+        "odafileconverter",
+        "realdwg",
+    )
+    for relative, framework in expected_frameworks.items():
+        text = _read_text(root / relative, issues)
+        if text is None:
+            continue
+        if framework not in text:
+            issues.append(f"native CAD project has wrong target framework: {relative}")
+        lowered = text.casefold()
+        for forbidden in forbidden_project_text:
+            if forbidden in lowered:
+                issues.append(
+                    "native CAD project contains forbidden package/proprietary "
+                    f"reference: {relative}"
+                )
+        if relative != NATIVE_CAD_PROJECT_PATHS[2] and "autodesk" in lowered:
+            issues.append(
+                "native CAD non-stub project must not mention a proprietary namespace: "
+                + relative
+            )
+
+    native_root = root / NATIVE_CAD_ROOT
+    if native_root.is_dir():
+        for path in sorted(native_root.rglob("*.cs")):
+            relative = _relative_posix(path, root)
+            if any(
+                relative == generated or relative.startswith(generated + "/")
+                for generated in NATIVE_CAD_GENERATED_DIRECTORIES
+            ):
+                continue
+            text = _read_text(path, issues)
+            if text is None:
+                continue
+            lowered = text.casefold()
+            if relative == NATIVE_CAD_STUB_SOURCE_PATH:
+                for required in (
+                    "SYNTAX-ONLY API STUBS",
+                    "NOT DEPLOYABLE",
+                    "NotSupportedException",
+                    "original project source",
+                ):
+                    if required not in text:
+                        issues.append(
+                            "native CAD API stubs lack syntax-only disclosure: "
+                            + required
+                        )
+                for forbidden in (
+                    "dllimport",
+                    "assembly.load",
+                    "netload",
+                    "packagereference",
+                    "<reference",
+                ):
+                    if forbidden in lowered:
+                        issues.append(
+                            "native CAD API stubs must contain no runtime/proprietary "
+                            f"loading behavior: {forbidden}"
+                        )
+            else:
+                for forbidden in (
+                    "autodesk",
+                    "teigha",
+                    "tssd",
+                    "odafileconverter",
+                    "realdwg",
+                    "packagereference",
+                    "<reference",
+                ):
+                    if (
+                        forbidden == "autodesk"
+                        and relative == NATIVE_CAD_STUB_TEST_SOURCE_PATH
+                    ):
+                        continue
+                    if forbidden in lowered:
+                        issues.append(
+                            "native CAD core/test source contains forbidden proprietary "
+                            f"reference: {relative}"
+                        )
+
+    solution = _read_text(root / "native-cad/LiangPingfa.NativeCad.sln", issues)
+    if solution is not None:
+        for required in (
+            "LiangPingfa.NativeCad.Protocol",
+            "LiangPingfa.NativeCad.Core",
+            "LiangPingfa.NativeCad.AutoCAD.ApiStubs",
+            "LiangPingfa.NativeCad.Core.Tests",
+        ):
+            if required not in solution:
+                issues.append(f"native CAD solution is missing project: {required}")
+        for forbidden in (
+            "AutoCAD.Adapter",
+            "RealHost",
+            "RuntimeAdapter",
+        ):
+            if forbidden.casefold() in solution.casefold():
+                issues.append(
+                    "checkpoint 1 solution must not include a real-host adapter: "
+                    + forbidden
+                )
+
+    stub_project = _read_text(root / NATIVE_CAD_PROJECT_PATHS[2], issues)
+    if stub_project is not None:
+        lowered_stub_project = stub_project.casefold()
+        if (
+            "<outputtype>exe</outputtype>" in lowered_stub_project
+            or "<pack>" in lowered_stub_project
+            or "generatepackageonbuild>true" in lowered_stub_project
+        ):
+            issues.append(
+                "syntax-only API stubs must not be deployment/package output"
+            )
+        for required in (
+            "<IsPackable>false</IsPackable>",
+            "<IsPublishable>false</IsPublishable>",
+            "<GeneratePackageOnBuild>false</GeneratePackageOnBuild>",
+            "<IncludeBuildOutput>false</IncludeBuildOutput>",
+            "RejectSyntaxOnlyStubPack",
+            "RejectSyntaxOnlyStubPublish",
+            "BeforeTargets=\"Pack\"",
+            "BeforeTargets=\"Publish\"",
+            "syntax-only and cannot be packed",
+            "syntax-only and cannot be published",
+        ):
+            if required not in stub_project:
+                issues.append(
+                    "syntax-only API stubs must reject packaging and deployment: "
+                    + required
+                )
+
+    fixture_path = root / NATIVE_CAD_GOLDEN_FIXTURE_PATH
+    fixture_text = _read_text(fixture_path, issues)
+    if fixture_text is not None:
+        try:
+            fixture = json.loads(fixture_text)
+        except json.JSONDecodeError as error:
+            issues.append(f"native CAD golden fixture is invalid JSON: {error.msg}")
+            fixture = None
+        if not isinstance(fixture, dict) or set(fixture) != {
+            "fixture_version",
+            "source_free",
+            "mutable_write_artifact_versions",
+            "canonical_payload",
+            "canonical_json",
+            "canonical_sha256",
+            "canonical_vectors",
+            "canonical_depth_vectors",
+            "rejected_number_tokens",
+            "binary64_vectors",
+            "limits",
+        }:
+            issues.append("native CAD golden fixture has an unexpected shape")
+        elif (
+            fixture["fixture_version"] != "native-cad-v2"
+            or fixture["source_free"] is not True
+            or fixture["mutable_write_artifact_versions"]
+            != {
+                "legacy_manifest": "liang-pingfa/native-edit-manifest/v1",
+                "manifest": "liang-pingfa/native-edit-manifest/v2",
+                "console_result": "liang-pingfa/native-console-result/v2",
+                "console_export": "liang-pingfa/native-console-export/v2",
+                "verification": "liang-pingfa/native-verification/v2",
+            }
+            or not isinstance(fixture["canonical_payload"], dict)
+            or not isinstance(fixture["canonical_json"], str)
+            or not isinstance(fixture["canonical_sha256"], str)
+            or not isinstance(fixture["canonical_vectors"], list)
+            or not isinstance(fixture["canonical_depth_vectors"], list)
+            or not isinstance(fixture["rejected_number_tokens"], list)
+            or not isinstance(fixture["binary64_vectors"], list)
+            or not isinstance(fixture["limits"], dict)
+        ):
+            issues.append("native CAD golden fixture must remain generated and source-free")
+        else:
+            def require_nfc(value: object) -> bool:
+                if isinstance(value, str):
+                    return value == unicodedata.normalize("NFC", value)
+                if isinstance(value, list):
+                    return all(require_nfc(item) for item in value)
+                if isinstance(value, dict):
+                    return all(
+                        isinstance(key, str)
+                        and require_nfc(key)
+                        and require_nfc(item)
+                        for key, item in value.items()
+                    )
+                return value is None or isinstance(value, (bool, int))
+
+            def require_csharp_integer_subset(value: object) -> bool:
+                if value is None or isinstance(value, bool) or isinstance(value, str):
+                    return True
+                if isinstance(value, int):
+                    return -(2**63) <= value <= 2**64 - 1
+                if isinstance(value, list):
+                    return all(require_csharp_integer_subset(item) for item in value)
+                if isinstance(value, dict):
+                    return all(
+                        isinstance(key, str)
+                        and require_csharp_integer_subset(item)
+                        for key, item in value.items()
+                    )
+                return False
+
+            canonical = json.dumps(
+                fixture["canonical_payload"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            expected_hash = sha256(canonical.encode("utf-8")).hexdigest()
+            if (
+                not require_nfc(fixture["canonical_payload"])
+                or not require_csharp_integer_subset(fixture["canonical_payload"])
+                or fixture["canonical_json"] != canonical
+                or fixture["canonical_sha256"] != expected_hash
+            ):
+                issues.append(
+                    "native CAD golden fixture must retain canonical JSON/hash compatibility"
+                )
+            expected_vector_names = {
+                "unicode-scalar-key-order",
+                "control-character-escaping",
+                "nfc-composed-combining",
+                "astral-values",
+                "integer-boundaries",
+                "nested-objects-and-arrays",
+            }
+            vector_names: set[str] = set()
+            for vector in fixture["canonical_vectors"]:
+                if (
+                    not isinstance(vector, dict)
+                    or set(vector)
+                    != {
+                        "name",
+                        "payload",
+                        "canonical_json",
+                        "canonical_sha256",
+                    }
+                    or not isinstance(vector.get("name"), str)
+                    or not isinstance(vector.get("canonical_json"), str)
+                    or not isinstance(vector.get("canonical_sha256"), str)
+                    or not require_nfc(vector.get("payload"))
+                    or not require_csharp_integer_subset(vector.get("payload"))
+                ):
+                    issues.append(
+                        "native CAD canonical vector has an invalid C#-compatible shape"
+                    )
+                    continue
+                name = vector["name"]
+                vector_names.add(name)
+                vector_canonical = json.dumps(
+                    vector["payload"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                if (
+                    vector["canonical_json"] != vector_canonical
+                    or vector["canonical_sha256"]
+                    != sha256(vector_canonical.encode("utf-8")).hexdigest()
+                ):
+                    issues.append(
+                        "native CAD canonical vector bytes/hash are not Python-compatible: "
+                        + name
+                    )
+            if vector_names != expected_vector_names:
+                issues.append(
+                    "native CAD canonical vectors must cover Unicode, controls, NFC, "
+                    "astral values, integer bounds, and nesting"
+                )
+            expected_depth_vector_names = {
+                f"{shape}-depth-{depth}"
+                for shape in (
+                    "empty-arrays",
+                    "empty-objects",
+                    "mixed-containers",
+                    "scalar-leaves",
+                )
+                for depth in (127, 128, 129)
+            }
+            depth_vector_names: set[str] = set()
+            for vector in fixture["canonical_depth_vectors"]:
+                if (
+                    not isinstance(vector, dict)
+                    or set(vector)
+                    != {"name", "shape", "depth", "accepted"}
+                    or not isinstance(vector.get("name"), str)
+                    or vector.get("shape")
+                    not in {
+                        "empty-arrays",
+                        "empty-objects",
+                        "mixed-containers",
+                        "scalar-leaves",
+                    }
+                    or type(vector.get("depth")) is not int
+                    or vector.get("depth") not in {127, 128, 129}
+                    or type(vector.get("accepted")) is not bool
+                    or vector["accepted"] != (vector["depth"] <= 128)
+                ):
+                    issues.append(
+                        "native CAD canonical depth vector has an invalid "
+                        "127/128/129 boundary shape"
+                    )
+                    continue
+                depth_vector_names.add(vector["name"])
+            if depth_vector_names != expected_depth_vector_names:
+                issues.append(
+                    "native CAD canonical depth vectors must cover empty arrays, "
+                    "empty objects, mixed containers, and scalar leaves at "
+                    "depths 127, 128, and 129"
+                )
+            rejected_tokens = fixture["rejected_number_tokens"]
+            if (
+                not all(isinstance(token, str) for token in rejected_tokens)
+                or not {"-0", "1.0", "1e-7"}.issubset(rejected_tokens)
+            ):
+                issues.append(
+                    "native CAD canonical vectors must reject negative zero and floats"
+                )
+            limits = fixture["limits"]
+            if limits != {
+                "max_json_nesting_depth": 128,
+                "max_geometry_entities": 2000,
+                "max_geometry_segments": 10000,
+                "max_geometry_json_bytes": 16 * 1024 * 1024,
+                "max_native_operations": 1024,
+                "max_console_result_bytes": 256 * 1024,
+                "max_console_result_canonical_bytes": 240 * 1024,
+            }:
+                issues.append("native CAD golden fixture limits drifted from frozen v1")
+
+    readme = _read_text(root / "native-cad/README.md", issues)
+    adr = _read_text(root / "native-cad/ADR-0001-sdk-free-transaction-core.md", issues)
+    for name, text in (("native CAD README", readme), ("native CAD ADR", adr)):
+        if text is None:
+            continue
+        for required in (
+            "SDK-free",
+            "not",
+            "runtime",
+        ):
+            if required.casefold() not in text.casefold():
+                issues.append(f"{name} lacks checkpoint boundary wording: {required}")
+    if readme is not None:
+        for required in (
+            "ephemeral syntax artifact",
+            "never be treated as a deployment asset",
+            "nonpackable",
+        ):
+            if required.casefold() not in readme.casefold():
+                issues.append(
+                    "native CAD README lacks syntax-stub deployment boundary: "
+                    + required
+                )
+
+
+def _validate_native_v1_baseline(root: Path, issues: list[str]) -> None:
+    """Fail closed if a published v1 byte surface drifts in place."""
+
+    path = root / NATIVE_V1_BASELINE_MAP_PATH
+    text = _read_text(path, issues)
+    if text is None:
+        return
+    try:
+        baseline = json.loads(text)
+        artifacts = baseline["artifacts"]
+        absent = baseline["absent_from_baseline"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        issues.append("native v1 baseline map is invalid")
+        return
+    if (
+        not isinstance(artifacts, dict)
+        or not isinstance(absent, list)
+        or baseline.get("baseline_commit")
+        != "c374e6c61fffaf6f487dd81544923a3072e293dc"
+        or not isinstance(baseline.get("v1_public_api_signature_sha256"), str)
+        or re.fullmatch(
+            r"[a-f0-9]{64}",
+            baseline["v1_public_api_signature_sha256"],
+        )
+        is None
+    ):
+        issues.append("native v1 baseline map has an unexpected release identity")
+        return
+    for relative, metadata in artifacts.items():
+        if (
+            not isinstance(relative, str)
+            or not isinstance(metadata, dict)
+            or not isinstance(metadata.get("baseline_sha256"), str)
+            or re.fullmatch(r"[a-f0-9]{64}", metadata["baseline_sha256"]) is None
+            or not isinstance(metadata.get("introduced_commit"), str)
+            or re.fullmatch(r"[a-f0-9]{40}", metadata["introduced_commit"]) is None
+        ):
+            issues.append("native v1 baseline map has an invalid artifact entry")
+            continue
+        candidate = root / relative
+        if not candidate.is_file():
+            issues.append(f"frozen native v1 artifact is missing: {relative}")
+            continue
+        if sha256(candidate.read_bytes()).hexdigest() != metadata["baseline_sha256"]:
+            issues.append(f"frozen native v1 artifact hash drifted: {relative}")
+    for relative in absent:
+        if not isinstance(relative, str):
+            issues.append("native v1 baseline map has an invalid absent artifact")
+        elif (root / relative).exists():
+            issues.append(
+                "native v1 artifact was introduced after the frozen release: "
+                + relative
+            )
+
+
 def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
     """Keep the optional native lane SDK-free, strict, redacted, and separate."""
 
+    _validate_native_v1_baseline(root, issues)
     contract_path = root / NATIVE_PROTOCOL_CONTRACT_PATH
     contract_text = _read_text(contract_path, issues)
     if contract_text is None:
@@ -1842,10 +3010,15 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
                 "post-rename-secret-cleanup-through-retained-handle",
                 "atomic-single-flight-configured-deadlines",
                 "overlapped-cancellable-absolute-deadline-io",
+                "published-v1-artifacts-read-only-fresh-v2-session-required",
             }
             required_write_rules = {
-                "fresh-prewrite-binding-never-predicts-final-revision",
-                "final-revision-database-output-copy-readback-bound",
+                "exact-private-prewrite-copy-binding",
+                "actual-final-binding-established-only-post-save",
+                "final-output-path-header-size-identity-constraints",
+                "actual-final-revision-database-output-readback-bound",
+                "published-output-binding-separate-from-private-output",
+                "active-v2-schema-integrity-cross-bindings",
             }
             if (
                 not isinstance(contract["session_rules"], list)
@@ -1859,7 +3032,7 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
                 or not required_write_rules.issubset(set(contract["write_rules"]))
             ):
                 issues.append(
-                    "native protocol contract must retain separate pre/final revision rules"
+                    "native protocol contract must retain prewrite and actual-final binding rules"
                 )
             if (
                 not isinstance(contract["prohibited_output"], list)
@@ -1901,24 +3074,206 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
         if not str(schema.get("$id", "")).startswith("liang-pingfa/native-"):
             issues.append(f"native schema has wrong namespace: {filename}")
 
+    active_schema_ids = {
+        "native-adapter-config-v2.schema.json": "liang-pingfa/native-adapter-config/v2",
+        "native-inventory-export-v2.schema.json": "liang-pingfa/native-inventory-export/v2",
+        "native-bridge-session-v2.schema.json": "liang-pingfa/native-bridge-session/v2",
+        "native-geometry-export-v2.schema.json": "liang-pingfa/native-geometry-export/v2",
+        "native-audit-v2.schema.json": "liang-pingfa/native-audit/v2",
+        "native-edit-intent-v2.schema.json": "liang-pingfa/native-edit-intent/v2",
+        "native-edit-plan-v2.schema.json": "liang-pingfa/native-edit-plan/v2",
+        "native-edit-manifest-v2.schema.json": "liang-pingfa/native-edit-manifest/v2",
+        "native-console-result-v2.schema.json": "liang-pingfa/native-console-result/v2",
+        "native-console-export-v2.schema.json": "liang-pingfa/native-console-export/v2",
+        "native-verification-v2.schema.json": "liang-pingfa/native-verification/v2",
+    }
+    for filename, schema_id in active_schema_ids.items():
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is None:
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            issues.append(f"active native v2 schema is invalid: {filename}")
+            continue
+        if (
+            parsed.get("$id") != schema_id
+            or parsed.get("properties", {}).get("schema_version", {}).get("const")
+            != schema_id
+        ):
+            issues.append(f"active native schema namespace is not explicit v2: {filename}")
+
     manifest_schema = _read_text(
         root
         / "src"
         / "liang_pingfa_review"
         / "schemas"
-        / "native-edit-manifest-v1.schema.json",
+        / "native-edit-manifest-v2.schema.json",
         issues,
     )
-    if manifest_schema is not None and (
-        '"expected_prewrite_revision"' not in manifest_schema
-        or '"expected_final_revision_fingerprint"' in manifest_schema
+    if manifest_schema is not None:
+        try:
+            parsed_manifest_schema = json.loads(manifest_schema)
+            manifest_required = parsed_manifest_schema["required"]
+            manifest_properties = parsed_manifest_schema["properties"]
+            prewrite_required = parsed_manifest_schema["$defs"]["prewriteRevision"][
+                "required"
+            ]
+            audit_binding_required = parsed_manifest_schema["$defs"]["auditBinding"][
+                "required"
+            ]
+            plan_binding_required = parsed_manifest_schema["$defs"]["planBinding"][
+                "required"
+            ]
+            intent_binding_required = parsed_manifest_schema["$defs"]["intentBinding"][
+                "required"
+            ]
+            renewal_required = parsed_manifest_schema["$defs"]["sessionRenewal"][
+                "required"
+            ]
+            final_constraints_required = parsed_manifest_schema[
+                "$defs"
+            ]["finalOutputConstraints"]["required"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append("native manifest schema is structurally invalid")
+        else:
+            if (
+                "expected_prewrite_revision" not in manifest_required
+                or "expected_prewrite_output_copy_binding" not in manifest_required
+                or "final_output_constraints" not in manifest_required
+                or "stable_host_binding_digest" not in manifest_required
+                or "expected_prewrite_output_copy_binding"
+                not in manifest_properties
+                or "final_output_constraints" not in manifest_properties
+                or "stable_host_binding_digest" not in prewrite_required
+                or "audit_schema_version" not in audit_binding_required
+                or "plan_schema_version" not in plan_binding_required
+                or "intent_schema_version" not in intent_binding_required
+                or {
+                    "audited_session_schema_version",
+                    "fresh_session_schema_version",
+                }
+                - set(renewal_required)
+                or {
+                    "authorized_private_path_fingerprint",
+                    "authorized_private_root_fingerprint",
+                    "required_dwg_header_signature",
+                    "required_dwg_version",
+                    "max_byte_size",
+                    "file_identity_transition_policy",
+                }
+                - set(final_constraints_required)
+                or "expected_final_output_copy_binding" in manifest_required
+                or '"expected_final_revision_fingerprint"' in manifest_schema
+            ):
+                issues.append(
+                    "native v2 manifest must bind exact prewrite bytes and "
+                    "final-output constraints without predicting final bytes/revision"
+                )
+
+    for filename, required in (
+        (
+            "native-console-result-v2.schema.json",
+            {"manifest_schema_version"},
+        ),
+        (
+            "native-console-export-v2.schema.json",
+            {
+                "manifest_integrity_sha256",
+                "manifest_schema_version",
+                "console_result_integrity_sha256",
+                "console_result_schema_version",
+            },
+        ),
+        (
+            "native-verification-v2.schema.json",
+            {
+                "manifest_binding",
+                "console_result_binding",
+                "console_export_binding",
+            },
+        ),
     ):
-        issues.append("native manifest schema must bind pre-write state without final prediction")
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is None:
+            continue
+        try:
+            parsed = json.loads(text)
+            missing = required - set(parsed["required"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append(f"native v2 cross-binding schema is invalid: {filename}")
+            continue
+        if missing:
+            issues.append(
+                "native v2 schema lacks required exact cross-version bindings: "
+                + filename
+            )
+
+    for filename in (
+        "native-edit-intent-v2.schema.json",
+        "native-edit-plan-v2.schema.json",
+        "native-edit-manifest-v2.schema.json",
+        "native-console-result-v2.schema.json",
+        "native-verification-v2.schema.json",
+    ):
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is None:
+            continue
+        try:
+            schema = json.loads(text)
+            array_key = (
+                "operation_results"
+                if filename in {
+                    "native-console-result-v2.schema.json",
+                    "native-verification-v2.schema.json",
+                }
+                else "operations"
+            )
+            maximum = schema["properties"][array_key]["maxItems"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append(f"native operation-budget schema is invalid: {filename}")
+            continue
+        if maximum != 1024:
+            issues.append(
+                "native operation/result schemas must share the 1024-item "
+                f"transport-safe cap: {filename}"
+            )
+
+    for filename in (
+        "native-audit-v2.schema.json",
+        "native-edit-plan-v2.schema.json",
+        "native-edit-manifest-v2.schema.json",
+    ):
+        text = _read_text(
+            root / "src" / "liang_pingfa_review" / "schemas" / filename,
+            issues,
+        )
+        if text is None:
+            continue
+        try:
+            schema = json.loads(text)
+        except json.JSONDecodeError:
+            issues.append(f"native stable-host schema is invalid: {filename}")
+            continue
+        if "stable_host_binding_digest" not in schema.get("required", []):
+            issues.append(
+                "native audit/plan/manifest must carry stable host binding: "
+                f"{filename}"
+            )
     cardinality_schemas = (
-        "native-audit-v1.schema.json",
-        "native-edit-plan-v1.schema.json",
-        "native-edit-manifest-v1.schema.json",
-        "native-verification-v1.schema.json",
+        "native-audit-v2.schema.json",
+        "native-edit-plan-v2.schema.json",
+        "native-edit-manifest-v2.schema.json",
+        "native-verification-v2.schema.json",
     )
     for filename in cardinality_schemas:
         text = _read_text(
@@ -1944,9 +3299,9 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
                 f"{filename}"
             )
     for filename in (
-        "native-audit-v1.schema.json",
-        "native-edit-plan-v1.schema.json",
-        "native-edit-manifest-v1.schema.json",
+        "native-audit-v2.schema.json",
+        "native-edit-plan-v2.schema.json",
+        "native-edit-manifest-v2.schema.json",
     ):
         text = _read_text(
             root / "src" / "liang_pingfa_review" / "schemas" / filename,
@@ -1974,8 +3329,8 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
                 f"{filename}"
             )
     for filename in (
-        "native-console-result-v1.schema.json",
-        "native-console-export-v1.schema.json",
+        "native-console-result-v2.schema.json",
+        "native-console-export-v2.schema.json",
     ):
         text = _read_text(
             root / "src" / "liang_pingfa_review" / "schemas" / filename,
@@ -2020,6 +3375,21 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
             "from .oda import" in text or "OdaRunner" in text or "ODA File Converter" in text
         ):
             issues.append(f"native source must not invoke ODA: {filename}")
+    native_contracts_text = _read_text(
+        root / "src/liang_pingfa_review/native_contracts.py",
+        issues,
+    )
+    if native_contracts_text is not None:
+        for required in (
+            "_SUPPORTED_SCHEMA_FILES",
+            "require_active_native_contract",
+            "migrate_native_v1_to_v2",
+            "NATIVE_LEGACY_ARTIFACT_READ_ONLY",
+        ):
+            if required not in native_contracts_text:
+                issues.append(
+                    "native contract dispatch/legacy policy is incomplete: " + required
+                )
 
     contracts_root = root / "native-bridge-contracts"
     project = _read_text(
@@ -2028,6 +3398,8 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
     csharp_files = (
         contracts_root / "ProtocolV1.cs",
         contracts_root / "Interfaces.cs",
+        contracts_root / "ProtocolV2.cs",
+        contracts_root / "InterfacesV2.cs",
         contracts_root / "README.md",
         contracts_root / "LICENSE",
     )
@@ -2078,6 +3450,35 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
         ):
             if required not in interface_dtos:
                 issues.append(f"read-only C# interface lacks wire response DTO: {required}")
+    protocol_v2_dtos = _read_text(contracts_root / "ProtocolV2.cs", issues)
+    if protocol_v2_dtos is not None:
+        for required in (
+            "NativeSourceBindingV2",
+            "NativeFinalOutputConstraintsV2",
+            "NativeManifestExecutionResultV2",
+            "NativeConsoleExportV2",
+            "SessionMonotonicClock",
+            "MaxNativeOperations = 1_024",
+        ):
+            if required not in protocol_v2_dtos:
+                issues.append(f"active v2 C# contracts lack required DTO: {required}")
+    interfaces_v2 = _read_text(contracts_root / "InterfacesV2.cs", issues)
+    if interfaces_v2 is not None:
+        for required in ("IManifestExecutorV2", "IReadbackExporterV2"):
+            if required not in interfaces_v2:
+                issues.append(f"active v2 C# interface is missing: {required}")
+    api_snapshot = _read_text(contracts_root / "tests/Program.cs", issues)
+    if api_snapshot is not None:
+        for required in (
+            "PublicSurfaceHash",
+            "string.Concat(",
+            "SHA256.HashData",
+        ):
+            if required not in api_snapshot:
+                issues.append(
+                    "C# public API reflection snapshot/hash is incomplete: "
+                    + required
+                )
 
     report_source = _read_text(root / "src/liang_pingfa_review/reports.py", issues)
     if report_source is not None and (
@@ -2261,6 +3662,7 @@ def validate_repository(root: Path | str) -> None:
     _validate_beam_topology_contract(repository_root, issues)
     _validate_topology_trace_privacy_schema(repository_root, issues)
     _validate_bounded_oda_contract(repository_root, issues)
+    _validate_native_cad_checkpoint(repository_root, issues)
     _validate_native_bridge_contract(repository_root, issues)
 
     if issues:
@@ -2289,6 +3691,12 @@ def validate_tracked_files(root: Path | str) -> None:
     for raw_path in sorted(path for path in result.stdout.split(b"\0") if path):
         relative = raw_path.decode("utf-8", errors="surrogateescape").replace("\\", "/")
         candidate = repository_root / Path(relative)
+        # ``git ls-files`` still reports a path deleted in the current
+        # working tree until its parent records the deletion. The regular
+        # repository validator has already examined that real tree; do not
+        # treat a removed obsolete contract as a publishable tracked file.
+        if not candidate.exists():
+            continue
         if _has_forbidden_extension(Path(relative)):
             issues.append(f"forbidden tracked artifact extension: {relative}")
         if relative not in ALLOWED_FILES:

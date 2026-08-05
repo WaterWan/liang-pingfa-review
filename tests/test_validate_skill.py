@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 import re
 
@@ -72,6 +74,25 @@ class ValidateSkillTests(unittest.TestCase):
 
     def test_clean_repository_passes(self) -> None:
         validate_skill.validate_repository(self.repository)
+
+    def test_frozen_native_v1_schema_hash_mutation_fails(self) -> None:
+        target = (
+            self.repository
+            / "src/liang_pingfa_review/schemas/native-audit-v1.schema.json"
+        )
+        target.write_bytes(target.read_bytes() + b"\n")
+        self.assert_validation_fails_with(
+            "frozen native v1 artifact hash drifted: "
+            "src/liang_pingfa_review/schemas/native-audit-v1.schema.json"
+        )
+
+    def test_frozen_native_v1_csharp_surface_hash_mutation_fails(self) -> None:
+        target = self.repository / "native-bridge-contracts/ProtocolV1.cs"
+        target.write_bytes(target.read_bytes() + b"\n")
+        self.assert_validation_fails_with(
+            "frozen native v1 artifact hash drifted: "
+            "native-bridge-contracts/ProtocolV1.cs"
+        )
 
     def test_python_literal_unc_decoding_rejects_escaped_bypasses(self) -> None:
         slash = chr(92)
@@ -248,6 +269,402 @@ class ValidateSkillTests(unittest.TestCase):
 
         validate_skill.validate_repository(self.repository)
 
+    def test_native_cad_exact_project_bin_and_obj_are_ignored(self) -> None:
+        generated_files = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Protocol/bin/Release/netstandard2.0/generated.dll",
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core/obj/Release/netstandard2.0/generated.cs",
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/bin/Release/netstandard2.0/generated.dll",
+            self.repository
+            / "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/obj/Release/net8.0/generated.cs",
+        )
+        for generated_file in generated_files:
+            generated_file.parent.mkdir(parents=True, exist_ok=True)
+            generated_file.write_bytes(b"generated")
+
+        validate_skill.validate_repository(self.repository)
+
+    def test_native_cad_unapproved_binary_path_fails(self) -> None:
+        artifact = self.repository / "native-cad/deployment/generated.dll"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"generated")
+
+        self.assert_validation_fails_with(
+            "forbidden artifact extension: native-cad/deployment/generated.dll"
+        )
+
+    def test_native_cad_package_reference_fails(self) -> None:
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        project.write_text(
+            project.read_text(encoding="utf-8").replace(
+                "</Project>",
+                '  <ItemGroup><PackageReference Include="generated" Version="1.0.0" /></ItemGroup>\n'
+                "</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "native CAD project contains forbidden package/proprietary reference: "
+            "native-cad/src/LiangPingfa.NativeCad.Core/LiangPingfa.NativeCad.Core.csproj"
+        )
+
+    def test_native_cad_shared_msbuild_dependency_injections_fail(self) -> None:
+        """Every tracked props/targets file is scanned despite MSBuild conditions."""
+
+        injections = {
+            "PackageReference": (
+                '<ItemGroup><PackageReference Include="generated" Version="1.0.0" /></ItemGroup>'
+            ),
+            "FrameworkReference": (
+                '<ItemGroup><FrameworkReference Include="generated" /></ItemGroup>'
+            ),
+            "Reference": '<ItemGroup><Reference Include="generated" /></ItemGroup>',
+            "HintPath": "<ItemGroup><HintPath>generated.dll</HintPath></ItemGroup>",
+            "Import": '<Import Project="generated.props" />',
+            "UsingTask": (
+                '<UsingTask TaskName="Generated" AssemblyFile="generated.dll" />'
+            ),
+            "Exec": '<Target Name="Generated"><Exec Command="generated" /></Target>',
+        }
+        for filename in ("Directory.Build.props", "Directory.Build.targets"):
+            path = self.repository / "native-cad" / filename
+            original = path.read_text(encoding="utf-8")
+            relative = f"native-cad/{filename}"
+            for kind, injection in injections.items():
+                with self.subTest(file=filename, injection=kind):
+                    path.write_text(
+                        original.replace(
+                            "</Project>",
+                            "  " + injection + "\n</Project>",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.assert_validation_fails_with(
+                        "native CAD MSBuild file contains forbidden "
+                        f"{kind}: {relative}"
+                    )
+                    path.write_text(original, encoding="utf-8")
+
+    def test_native_cad_conditional_package_bypass_fails(self) -> None:
+        """A false condition cannot hide an otherwise forbidden dependency."""
+
+        path = self.repository / "native-cad" / "Directory.Build.props"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(
+            original.replace(
+                "</Project>",
+                "  <ItemGroup Condition=\"'false' == 'true'\">"
+                '<PackageReference Include="generated" Version="1.0.0" />'
+                "</ItemGroup>\n</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD MSBuild file contains forbidden PackageReference: "
+            "native-cad/Directory.Build.props"
+        )
+
+    def test_native_cad_sdk_sources_must_be_exact_and_root_only(self) -> None:
+        """Child, alternate, and conditional SDK declarations cannot bypass policy."""
+
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        original = project.read_text(encoding="utf-8")
+        cases = {
+            "alternate-root": (
+                original.replace(
+                    '<Project Sdk="Microsoft.NET.Sdk">',
+                    '<Project Sdk="Microsoft.NET.Sdk.Web">',
+                    1,
+                ),
+                "native CAD project must use exact root "
+                'Project Sdk="Microsoft.NET.Sdk": '
+                "native-cad/src/LiangPingfa.NativeCad.Core/"
+                "LiangPingfa.NativeCad.Core.csproj",
+            ),
+            "child-sdk-element": (
+                original.replace(
+                    "</Project>",
+                    '  <Sdk Name="Microsoft.NET.Sdk" Version="8.0.0" />\n</Project>',
+                    1,
+                ),
+                "native CAD MSBuild file contains a child or secondary SDK "
+                "declaration: native-cad/src/LiangPingfa.NativeCad.Core/"
+                "LiangPingfa.NativeCad.Core.csproj",
+            ),
+            "conditional-sdk-import": (
+                original.replace(
+                    "</Project>",
+                    '  <Import Project="generated.props" Sdk="Microsoft.NET.Sdk" '
+                    'Condition="\'false\' == \'true\'" />\n</Project>',
+                    1,
+                ),
+                "native CAD MSBuild file contains a child or secondary SDK "
+                "declaration: native-cad/src/LiangPingfa.NativeCad.Core/"
+                "LiangPingfa.NativeCad.Core.csproj",
+            ),
+        }
+        for name, (mutated, expected) in cases.items():
+            with self.subTest(case=name):
+                project.write_text(mutated, encoding="utf-8")
+                self.assert_validation_fails_with(expected)
+                project.write_text(original, encoding="utf-8")
+
+    def test_native_cad_target_framework_props_targets_and_conditions_fail(self) -> None:
+        """Only one unconditional target definition in each approved project exists."""
+
+        for filename in ("Directory.Build.props", "Directory.Build.targets"):
+            path = self.repository / "native-cad" / filename
+            original = path.read_text(encoding="utf-8")
+            path.write_text(
+                original.replace(
+                    "</Project>",
+                    "  <PropertyGroup><TargetFramework>net9.0</TargetFramework>"
+                    "</PropertyGroup>\n</Project>",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            self.assert_validation_fails_with(
+                "native CAD TargetFramework definition is only allowed "
+                f"in an approved project: native-cad/{filename}"
+            )
+
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        original = project.read_text(encoding="utf-8")
+        project.write_text(
+            original.replace(
+                "</Project>",
+                '  <PropertyGroup Condition="\'$(Injected)\' == \'true\'">'
+                "<TargetFramework>net9.0</TargetFramework></PropertyGroup>\n"
+                "</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD TargetFramework must have one unconditional "
+            "authoritative definition: native-cad/src/"
+            "LiangPingfa.NativeCad.Core/LiangPingfa.NativeCad.Core.csproj"
+        )
+
+    def test_native_cad_target_frameworks_multi_target_bypass_fails(self) -> None:
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        project.write_text(
+            project.read_text(encoding="utf-8").replace(
+                "</Project>",
+                "  <PropertyGroup><TargetFrameworks>net8.0;net9.0"
+                "</TargetFrameworks></PropertyGroup>\n</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD projects must not define TargetFrameworks: "
+            "native-cad/src/LiangPingfa.NativeCad.Core/"
+            "LiangPingfa.NativeCad.Core.csproj"
+        )
+
+    def test_native_cad_policy_import_must_be_exact_unconditional_and_final(self) -> None:
+        """The per-project policy import cannot be removed, redirected, or duplicated."""
+
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        original = project.read_text(encoding="utf-8")
+        policy_import = r'<Import Project="..\..\NativeCad.RepositoryPolicy.targets" />'
+        expected = (
+            "native CAD project must contain exactly one approved "
+            "unconditional policy import: native-cad/src/"
+            "LiangPingfa.NativeCad.Core/LiangPingfa.NativeCad.Core.csproj"
+        )
+        cases = {
+            "removed": original.replace(policy_import + "\n", "", 1),
+            "conditional": original.replace(
+                policy_import,
+                policy_import[:-3] + ' Condition="\'$(SkipPolicy)\' == \'true\'" />',
+                1,
+            ),
+            "alternative": original.replace(
+                policy_import,
+                '<Import Project="..\\..\\generated.targets" />',
+                1,
+            ),
+            "duplicate": original.replace(
+                policy_import,
+                policy_import + "\n  " + policy_import,
+                1,
+            ),
+        }
+        for name, mutated in cases.items():
+            with self.subTest(case=name):
+                project.write_text(mutated, encoding="utf-8")
+                self.assert_validation_fails_with(expected)
+                project.write_text(original, encoding="utf-8")
+
+        project.write_text(
+            original.replace(
+                "</Project>",
+                "  <PropertyGroup><Deterministic>true</Deterministic></PropertyGroup>\n"
+                "</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD policy import must be the final project element: "
+            "native-cad/src/LiangPingfa.NativeCad.Core/"
+            "LiangPingfa.NativeCad.Core.csproj"
+        )
+
+    def test_native_cad_environment_target_override_fails(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"DirectoryBuildTargetsPath": "generated.targets"},
+            clear=False,
+        ):
+            self.assert_validation_fails_with(
+                "native CAD environment override is forbidden: "
+                "DirectoryBuildTargetsPath"
+            )
+
+    def test_native_cad_external_project_reference_fails(self) -> None:
+        """Only repository-local literal project references are allowed."""
+
+        path = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "</Project>",
+                '  <ItemGroup><ProjectReference Include="..\\..\\..\\outside.csproj" /></ItemGroup>\n'
+                "</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD ProjectReference escapes native-cad: "
+            "native-cad/src/LiangPingfa.NativeCad.Core/"
+            "LiangPingfa.NativeCad.Core.csproj"
+        )
+
+    def test_native_cad_stub_project_reference_requires_copylocal_false(self) -> None:
+        """A syntax-only stub cannot become a transitive deployment asset."""
+
+        path = (
+            self.repository
+            / "native-cad/tests/LiangPingfa.NativeCad.Core.Tests"
+            / "LiangPingfa.NativeCad.Core.Tests.csproj"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "<Private>false</Private>",
+                "<Private>true</Private>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD syntax-stub ProjectReference must disable copy-local: "
+            "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/"
+            "LiangPingfa.NativeCad.Core.Tests.csproj"
+        )
+
+    def test_native_cad_stub_runtime_disclosure_removal_fails(self) -> None:
+        source = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/AutodeskApiStubs.cs"
+        )
+        source.write_text(
+            source.read_text(encoding="utf-8").replace(
+                "SYNTAX-ONLY API STUBS",
+                "removed syntax disclosure",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "native CAD API stubs lack syntax-only disclosure: SYNTAX-ONLY API STUBS"
+        )
+
+    def test_native_cad_stub_deployment_output_fails(self) -> None:
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs"
+            / "LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj"
+        )
+        project.write_text(
+            project.read_text(encoding="utf-8").replace(
+                "<AssemblyName>",
+                "<OutputType>Exe</OutputType>\n    <AssemblyName>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "syntax-only API stubs must not be deployment/package output"
+        )
+
+    def test_native_cad_stub_publish_guard_removal_fails(self) -> None:
+        project = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs"
+            / "LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj"
+        )
+        project.write_text(
+            project.read_text(encoding="utf-8").replace(
+                "RejectSyntaxOnlyStubPublish",
+                "RemovedSyntaxOnlyStubPublishGuard",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "syntax-only API stubs must reject packaging and deployment: "
+            "RejectSyntaxOnlyStubPublish"
+        )
+
+    def test_native_cad_golden_hash_mutation_fails(self) -> None:
+        fixture = self.repository / validate_skill.NATIVE_CAD_GOLDEN_FIXTURE_PATH
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        payload["canonical_sha256"] = "0" * 64
+        fixture.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "native CAD golden fixture must retain canonical JSON/hash compatibility"
+        )
+
     def test_nested_csharp_bin_and_obj_remain_subject_to_policy(self) -> None:
         for relative in (
             "native-bridge-contracts/tools/bin/generated.dll",
@@ -410,6 +827,115 @@ class ValidateSkillTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         validate_skill.validate_repository(self.repository)
+
+    def test_native_cad_evaluated_target_frameworks_are_frozen(self) -> None:
+        """MSBuild evaluation confirms every project has the one approved TFM."""
+
+        if shutil.which("dotnet") is None:
+            self.skipTest(".NET SDK is unavailable outside the CI build image")
+        for relative, expected in (
+            validate_skill.NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items()
+        ):
+            with self.subTest(project=relative):
+                result = subprocess.run(
+                    [
+                        "dotnet",
+                        "msbuild",
+                        relative,
+                        "-nologo",
+                        "-getProperty:TargetFramework",
+                        "-getProperty:TargetFrameworks",
+                    ],
+                    cwd=self.repository,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                properties = json.loads(result.stdout)["Properties"]
+                self.assertEqual(expected, properties["TargetFramework"])
+                self.assertEqual("", properties["TargetFrameworks"])
+
+    def test_native_cad_build_rejects_framework_reference_and_global_tfm_override(
+        self,
+    ) -> None:
+        """The evaluated fail targets reject items and global-property bypasses."""
+
+        if shutil.which("dotnet") is None:
+            self.skipTest(".NET SDK is unavailable outside the CI build image")
+        core = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Core"
+            / "LiangPingfa.NativeCad.Core.csproj"
+        )
+        core.write_text(
+            core.read_text(encoding="utf-8").replace(
+                "</Project>",
+                "  <ItemGroup><FrameworkReference Include=\"generated\" />"
+                "</ItemGroup>\n</Project>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        rejected_framework = subprocess.run(
+            [
+                "dotnet",
+                "build",
+                str(core),
+                "-c",
+                "Release",
+                "--nologo",
+            ],
+            cwd=self.repository,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertNotEqual(
+            0,
+            rejected_framework.returncode,
+            rejected_framework.stdout + rejected_framework.stderr,
+        )
+        self.assertIn(
+            "must not use FrameworkReference",
+            rejected_framework.stdout + rejected_framework.stderr,
+        )
+
+        protocol = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.Protocol"
+            / "LiangPingfa.NativeCad.Protocol.csproj"
+        )
+        rejected_override = subprocess.run(
+            [
+                "dotnet",
+                "build",
+                str(protocol),
+                "-c",
+                "Release",
+                "--nologo",
+                "-p:TargetFramework=net8.0",
+            ],
+            cwd=self.repository,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertNotEqual(
+            0,
+            rejected_override.returncode,
+            rejected_override.stdout + rejected_override.stderr,
+        )
+        self.assertIn(
+            "TargetFramework differs",
+            rejected_override.stdout + rejected_override.stderr,
+        )
 
     def test_each_ci_job_checks_tracked_files_before_building_contracts(self) -> None:
         workflow = (
