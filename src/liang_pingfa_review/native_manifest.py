@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime, timedelta
+from hashlib import sha256
 import os
 from pathlib import Path
 import secrets
@@ -12,6 +14,7 @@ from typing import Any
 from .canonical import (
     canonical_sha256,
     format_utc,
+    normalize_nfc_text,
     parse_utc,
     utc_now,
 )
@@ -25,12 +28,15 @@ from .native_contracts import (
     derive_native_marker_text,
     geometry_adapter_binding,
     geometry_document_binding,
+    geometry_document_binding_digest,
     native_artifact_integrity,
+    native_execution_stable_host_binding_digest,
     native_host_binding,
     native_marker_fingerprint,
     native_marker_policy_binding,
     PRIVATE_RECORD_CARDINALITY,
     prewrite_revision_binding,
+    require_active_native_contract,
     require_geometry_export_matches_session,
     translated_geometry_bits,
     validate_native_contract,
@@ -39,11 +45,222 @@ from .native_plan import validate_native_plan_against_audit
 from .temporary import PrivateWorkspace
 
 
+MAX_NATIVE_FINAL_OUTPUT_BYTES = 512 * 1024 * 1024
+
+
 def _path_fingerprint(path: Path) -> str:
     """Hash a lexical public target spelling without resolving a user path."""
 
     return canonical_sha256(
         {"output_path": os.path.normcase(os.path.abspath(os.fspath(path)))}
+    )
+
+
+def _private_path_fingerprint(path: Path) -> str:
+    """Fingerprint a private path exactly as its retained file lease does."""
+
+    return sha256(normalize_nfc_text(str(path)).encode("utf-8")).hexdigest()
+
+
+def _private_root_fingerprint(path: Path) -> str:
+    """Fingerprint an authorized private workspace root without storing it."""
+
+    return _private_path_fingerprint(path)
+
+
+def _lexical_path(path: Path) -> Path:
+    """Return an absolute lexical path without resolving a reparse point."""
+
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _same_volume(left: Path, right: Path) -> bool:
+    """Compare only lexical Windows volume roots; callers hold real handles."""
+
+    return os.path.normcase(os.path.splitdrive(os.fspath(left))[0]) == os.path.normcase(
+        os.path.splitdrive(os.fspath(right))[0]
+    )
+
+
+def _private_output_source_binding(
+    private_source_copy: Mapping[str, Any],
+    *,
+    prewrite_source: Mapping[str, Any],
+    private_output_path: Path,
+) -> dict[str, Any]:
+    """Return the exact pre-write private-copy source binding.
+
+    A post-save DWG does not exist yet and therefore cannot be represented
+    here.  This projection binds the file that the console must open before
+    it is permitted to mutate anything.
+    """
+
+    try:
+        binding = {
+            "format": "DWG",
+            "sha256": private_source_copy["sha256"],
+            "byte_size": private_source_copy["byte_size"],
+            "path_fingerprint": private_source_copy["path_fingerprint"],
+            "file_identity_fingerprint": private_source_copy[
+                "file_identity_fingerprint"
+            ],
+            "dwg_header_signature": private_source_copy["dwg_header_signature"],
+        }
+    except (KeyError, TypeError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "private output copy is not bound",
+        ) from error
+    expected_path_fingerprint = _private_path_fingerprint(
+        _lexical_path(private_output_path)
+    )
+    if binding["path_fingerprint"] != expected_path_fingerprint:
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "private output copy path is not exact",
+        )
+    if binding == dict(prewrite_source):
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "private output copy must differ from original source",
+        )
+    return binding
+
+
+def _final_output_constraints(
+    prewrite_output_binding: Mapping[str, Any],
+    *,
+    private_output_path: Path,
+    private_workspace_root: Path,
+) -> dict[str, Any]:
+    """Build constraints for an output whose bytes are unknowable pre-save."""
+
+    private_path = _lexical_path(private_output_path)
+    private_root = _lexical_path(private_workspace_root)
+    try:
+        private_path.relative_to(private_root)
+    except ValueError as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "private output is outside its workspace root",
+        ) from error
+    if not _same_volume(private_path, private_root):
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "private output does not share its workspace volume",
+        )
+    return {
+        "authorized_private_path_fingerprint": prewrite_output_binding[
+            "path_fingerprint"
+        ],
+        "authorized_private_root_fingerprint": _private_root_fingerprint(private_root),
+        "require_same_volume_as_prewrite": True,
+        "require_within_private_root": True,
+        "required_dwg_header_signature": prewrite_output_binding[
+            "dwg_header_signature"
+        ],
+        # The ACxxxx signature is the version token exposed by the safe
+        # source-binding contract. Keep it explicit so adapters cannot claim
+        # header validation while saving another DWG version.
+        "required_dwg_version": prewrite_output_binding["dwg_header_signature"],
+        "max_byte_size": MAX_NATIVE_FINAL_OUTPUT_BYTES,
+        # SaveAs implementations are allowed to atomically replace the
+        # private file, but the replacement remains constrained to this exact
+        # lexical private destination and retained-handle revalidation.
+        "file_identity_transition_policy": "replacement_allowed",
+    }
+
+
+def require_final_output_binding(
+    manifest: Mapping[str, Any],
+    actual_binding: Mapping[str, Any],
+    *,
+    private_output_path: Path | None = None,
+    private_workspace_root: Path | None = None,
+    error_code: ErrorCode = ErrorCode.NATIVE_READBACK_INVALID,
+) -> dict[str, Any]:
+    """Require an actual post-save binding to satisfy v2 constraints.
+
+    ``actual_binding`` is intentionally supplied by a retained file handle or
+    a console/readback envelope after save.  The helper never derives a final
+    hash, byte size, identity, or revision from the prewrite input.
+    """
+
+    try:
+        checked_manifest = require_active_native_contract("manifest", manifest)
+    except PipelineError as error:
+        if error.code == ErrorCode.NATIVE_LEGACY_ARTIFACT_READ_ONLY:
+            raise
+        raise PipelineError(error_code, "native manifest is invalid") from error
+    try:
+        actual = dict(actual_binding)
+        prewrite = checked_manifest["expected_prewrite_output_copy_binding"]
+        constraints = checked_manifest["final_output_constraints"]
+        if (
+            actual["format"] != "DWG"
+            or actual["path_fingerprint"]
+            != constraints["authorized_private_path_fingerprint"]
+            or actual["dwg_header_signature"]
+            != constraints["required_dwg_header_signature"]
+            or actual["dwg_header_signature"] != constraints["required_dwg_version"]
+            or not isinstance(actual["byte_size"], int)
+            or actual["byte_size"] < 6
+            or actual["byte_size"] > constraints["max_byte_size"]
+            or not isinstance(actual["sha256"], str)
+            or not isinstance(actual["file_identity_fingerprint"], str)
+        ):
+            raise ValueError("actual output violates constrained binding")
+        if (
+            constraints["file_identity_transition_policy"] == "same_identity_required"
+            and actual["file_identity_fingerprint"]
+            != prewrite["file_identity_fingerprint"]
+        ):
+            raise ValueError("private output identity replacement is forbidden")
+        # Every currently allowlisted operation changes bytes. Revisions are
+        # checked by result/readback validators; this gate rejects the former
+        # generated-copy loophole before public staging.
+        if checked_manifest["operations"] and actual["sha256"] == prewrite["sha256"]:
+            raise ValueError("mutating manifest produced unchanged DWG bytes")
+        if private_output_path is not None:
+            actual_path = _lexical_path(private_output_path)
+            if _private_path_fingerprint(actual_path) != actual["path_fingerprint"]:
+                raise ValueError("actual output path fingerprint differs")
+            if private_workspace_root is None:
+                raise ValueError("private root is required with private output path")
+            private_root = _lexical_path(private_workspace_root)
+            if (
+                _private_root_fingerprint(private_root)
+                != constraints["authorized_private_root_fingerprint"]
+            ):
+                raise ValueError("private workspace root differs")
+            try:
+                actual_path.relative_to(private_root)
+            except ValueError as error:
+                raise ValueError("actual output escaped private root") from error
+            if (
+                constraints["require_same_volume_as_prewrite"]
+                and not _same_volume(actual_path, private_root)
+            ):
+                raise ValueError("actual output crossed private volume")
+    except (KeyError, TypeError, ValueError) as error:
+        raise PipelineError(error_code, "actual final output binding is invalid") from error
+    return actual
+
+
+def _private_prewrite_export(
+    fresh_export: Mapping[str, Any],
+    prewrite_output_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Retarget exact audited geometry at the private copy before execution."""
+
+    private_export = deepcopy(dict(fresh_export))
+    private_export["source"] = dict(prewrite_output_binding)
+    private_export["binding"]["document_binding_digest"] = geometry_document_binding_digest(
+        private_export
+    )
+    return validate_native_contract(
+        "geometry",
+        attach_native_integrity("geometry", private_export),
     )
 
 
@@ -65,6 +282,11 @@ def _require_fresh_export_matches_audit(
         or checked_session["process"]["executable_fingerprint"]
         != audit["host_executable_fingerprint"]
         or native_host_binding(checked_session, config) != audit["native_host_binding"]
+        or native_execution_stable_host_binding_digest(
+            checked_export,
+            native_marker_policy_binding(config),
+        )
+        != audit["stable_host_binding_digest"]
     ):
         raise PipelineError(
             ErrorCode.NATIVE_CAPABILITY_MISMATCH,
@@ -260,6 +482,11 @@ def _marker_destinations(
             ErrorCode.NATIVE_MANIFEST_INVALID,
             "marker container is not direct Modelspace",
         )
+    if owner_handle not in export["owners"]:
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "marker owner is not a pre-existing declared Modelspace owner",
+        )
     first_index = max(int(entity["sequence_index"]) for entity in direct) + 1
     return [
         {
@@ -285,13 +512,15 @@ def build_native_manifest(
     *,
     private_source_copy: Mapping[str, Any],
     output_path: Path,
+    private_output_path: Path | None = None,
+    private_workspace_root: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Create a private manifest only after exact fresh state equality."""
 
     checked_audit = require_fresh_native_audit(audit, now=now)
-    checked_intent = validate_native_contract("intent", intent)
-    checked_config = validate_native_contract("config", config)
+    checked_intent = require_active_native_contract("intent", intent)
+    checked_config = require_active_native_contract("config", config)
     checked_plan = validate_native_plan_against_audit(
         checked_audit,
         checked_intent,
@@ -315,23 +544,61 @@ def build_native_manifest(
         fresh_session,
         checked_config,
     )
+    stable_host_binding_digest = native_execution_stable_host_binding_digest(
+        checked_export,
+        current_marker_policy,
+    )
     _require_config_matches_export(checked_config, checked_export)
     if (
         checked_audit["host_executable_fingerprint"] == "unavailable"
         or checked_session["process"]["executable_fingerprint"] == "unavailable"
         or checked_plan["native_host_binding"] != checked_audit["native_host_binding"]
+        or checked_plan["stable_host_binding_digest"]
+        != checked_audit["stable_host_binding_digest"]
+        or stable_host_binding_digest
+        != checked_audit["stable_host_binding_digest"]
     ):
         raise PipelineError(
             ErrorCode.NATIVE_CAPABILITY_MISMATCH,
             "native manifest requires an audited compatible host",
         )
     source = checked_audit["source"]
+    selected_private_output_path = private_output_path or output_path
+    selected_private_workspace_root = (
+        private_workspace_root or selected_private_output_path.parent
+    )
     if (
         private_source_copy.get("sha256") != source["sha256"]
         or private_source_copy.get("byte_size") != source["byte_size"]
         or not isinstance(private_source_copy.get("file_identity_fingerprint"), str)
     ):
         raise PipelineError(ErrorCode.NATIVE_MANIFEST_INVALID, "private source copy is not bound")
+    normalized_private_source_copy = dict(private_source_copy)
+    # Source-free core fixtures do not own a real workspace, so they may omit
+    # path/header metadata. Production passes the retained copy's exact values
+    # and the comparison below rejects a substituted private destination.
+    normalized_private_source_copy.setdefault(
+        "path_fingerprint",
+        _private_path_fingerprint(_lexical_path(selected_private_output_path)),
+    )
+    normalized_private_source_copy.setdefault(
+        "dwg_header_signature",
+        checked_export["source"]["dwg_header_signature"],
+    )
+    expected_prewrite_output_copy_binding = _private_output_source_binding(
+        normalized_private_source_copy,
+        prewrite_source=source,
+        private_output_path=selected_private_output_path,
+    )
+    final_output_constraints = _final_output_constraints(
+        expected_prewrite_output_copy_binding,
+        private_output_path=selected_private_output_path,
+        private_workspace_root=selected_private_workspace_root,
+    )
+    prewrite_export = _private_prewrite_export(
+        checked_export,
+        expected_prewrite_output_copy_binding,
+    )
     plan_operations = {
         operation["operation_id"]: operation for operation in checked_plan["operations"]
     }
@@ -340,7 +607,7 @@ def build_native_manifest(
     )
     marker_destinations = iter(
         _marker_destinations(
-            checked_export,
+            prewrite_export,
             marker_policy=checked_audit["marker_policy_binding"],
             marker_count=sum(
                 operation["kind"] == "create_review_marker"
@@ -350,7 +617,7 @@ def build_native_manifest(
     )
     private_operations: list[dict[str, Any]] = []
     fresh_by_target = {
-        derive_native_target_id(entity): entity for entity in checked_export["entities"]
+        derive_native_target_id(entity): entity for entity in prewrite_export["entities"]
     }
     for intent_operation in sorted_intent_operations:
         operation_id = intent_operation["operation_id"]
@@ -394,37 +661,48 @@ def build_native_manifest(
         )
     manifest_expires = min(current + timedelta(minutes=5), session_expires)
     raw_geometry = canonical_geometry_json_bytes(
-        checked_export,
+        prewrite_export,
         error=ErrorCode.NATIVE_MANIFEST_INVALID,
     ).decode("utf-8")
     artifact = {
-        "schema_version": "liang-pingfa/native-edit-manifest/v1",
+        "schema_version": "liang-pingfa/native-edit-manifest/v2",
         "manifest_id": "native-manifest-" + secrets.token_hex(16),
         "created_at": format_utc(current),
         "expires_at": format_utc(manifest_expires),
         "consumed": False,
         "nonce": secrets.token_urlsafe(32),
-        "audit_binding": native_audit_binding(checked_audit),
+        "audit_binding": {
+            **native_audit_binding(checked_audit),
+            "audit_schema_version": checked_audit["schema_version"],
+        },
         "plan_binding": {
             "plan_id": checked_plan["plan_id"],
             "plan_integrity_sha256": native_artifact_integrity(checked_plan),
+            "plan_schema_version": checked_plan["schema_version"],
         },
         "intent_binding": {
             "intent_id": checked_intent["intent_id"],
             "intent_integrity_sha256": native_artifact_integrity(checked_intent),
+            "intent_schema_version": checked_intent["schema_version"],
         },
         "native_host_binding": checked_audit["native_host_binding"],
+        "stable_host_binding_digest": stable_host_binding_digest,
         "marker_policy_binding": checked_audit["marker_policy_binding"],
         "session_renewal": {
             "audited_session_binding": checked_audit["session_binding_digest"],
             "fresh_session_binding": checked_export["binding"][
                 "session_binding_digest"
             ],
+            "audited_session_schema_version": checked_audit[
+                "session_schema_version"
+            ],
+            "fresh_session_schema_version": checked_session["schema_version"],
             "native_host_binding": checked_audit["native_host_binding"],
             "expires_at": checked_session["expires_at"],
         },
         "source": source,
-        "private_source_copy": dict(private_source_copy),
+        "expected_prewrite_output_copy_binding": expected_prewrite_output_copy_binding,
+        "final_output_constraints": final_output_constraints,
         "output_target_path_fingerprint": _path_fingerprint(output_path),
         "environment": {
             "core_console_fingerprint": checked_config["core_console"]["sha256"],
@@ -440,12 +718,13 @@ def build_native_manifest(
             "capabilities_digest": canonical_sha256(checked_export["binding"]["capabilities"]),
         },
         "expected_prewrite_revision": prewrite_revision_binding(
-            checked_export,
+            prewrite_export,
             native_host_binding_value=checked_audit["native_host_binding"],
+            stable_host_binding_digest=stable_host_binding_digest,
             audited_semantic_state_digest=native_artifact_integrity(checked_audit),
         ),
         "preconditions_geometry_json": raw_geometry,
-        "preconditions_geometry_sha256": canonical_sha256(checked_export),
+        "preconditions_geometry_sha256": canonical_sha256(prewrite_export),
         "operations": private_operations,
         "record_cardinality": PRIVATE_RECORD_CARDINALITY,
     }
@@ -462,7 +741,7 @@ def write_private_manifest(
 ) -> Path:
     """Write an immutable manifest only through a workspace-owned handle."""
 
-    checked = validate_native_contract("manifest", manifest)
+    checked = require_active_native_contract("manifest", manifest)
     opened = workspace.create_owned_file(path)
     try:
         opened.write_bytes(
@@ -484,7 +763,7 @@ def require_fresh_native_manifest(
 ) -> dict[str, Any]:
     """Reject an expired or externally altered one-use manifest before launch."""
 
-    checked = validate_native_contract("manifest", manifest)
+    checked = require_active_native_contract("manifest", manifest)
     current = now or utc_now()
     try:
         created = parse_utc(checked["created_at"])

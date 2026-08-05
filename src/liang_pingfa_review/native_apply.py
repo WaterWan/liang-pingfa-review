@@ -27,9 +27,10 @@ from .native_bridge import (
     NativeInstallationLeases,
     acquire_native_installation_leases,
 )
-from .native_contracts import validate_native_contract
+from .native_contracts import require_active_native_contract
 from .native_manifest import (
     build_native_manifest,
+    require_final_output_binding,
     require_fresh_native_manifest,
     write_private_manifest,
 )
@@ -37,6 +38,7 @@ from .native_plan import validate_native_plan_against_audit
 from .native_verify import (
     build_native_verification,
     geometry_from_console_export,
+    require_published_output_binding,
     validate_console_result,
     verify_native_transition,
 )
@@ -138,6 +140,8 @@ def _copy_source_to_private_dwg(
     try:
         opened.write_chunks(source_lease.read_chunks())
         binding = opened.capture_binding()
+        final_path = opened.final_path()
+        header = opened.read_prefix(6).decode("ascii", errors="strict")
         workspace.seal_owned_file(opened)
     except BaseException:
         try:
@@ -145,12 +149,20 @@ def _copy_source_to_private_dwg(
         except BaseException:
             pass
         raise
-    if binding.sha256 is None or binding.byte_size is None:
+    if (
+        binding.sha256 is None
+        or binding.byte_size is None
+        or _DWG_HEADER.fullmatch(header) is None
+    ):
         raise PipelineError(ErrorCode.NATIVE_MANIFEST_INVALID, "private source copy is unbound")
     return destination, {
         "sha256": binding.sha256,
         "byte_size": binding.byte_size,
+        "path_fingerprint": sha256(
+            normalize_nfc_text(str(final_path)).encode("utf-8")
+        ).hexdigest(),
         "file_identity_fingerprint": binding.file_identity_fingerprint,
+        "dwg_header_signature": header,
     }
 
 
@@ -211,11 +223,11 @@ def native_apply(
 ) -> NativeApplyResult:
     """Perform the fixed copy-only native flow; no ODA path is ever invoked."""
 
-    if os.name != "nt":
-        raise PipelineError(ErrorCode.WINDOWS_PLATFORM_REQUIRED, "native apply is Windows-only")
-    checked_config = validate_native_contract("config", config)
+    # Version gates precede the platform gate so a v1 artifact never receives
+    # an accidental execution-looking failure mode on non-Windows hosts.
+    checked_config = require_active_native_contract("config", config)
     checked_audit = require_fresh_native_audit(audit)
-    checked_intent = validate_native_contract("intent", intent)
+    checked_intent = require_active_native_contract("intent", intent)
     checked_plan = validate_native_plan_against_audit(
         checked_audit,
         checked_intent,
@@ -224,6 +236,8 @@ def native_apply(
     )
     if confirm_plan != checked_plan["plan_id"]:
         raise PipelineError(ErrorCode.NATIVE_OPERATION_INVALID, "native plan confirmation differs")
+    if os.name != "nt":
+        raise PipelineError(ErrorCode.WINDOWS_PLATFORM_REQUIRED, "native apply is Windows-only")
     output_targets = _validate_apply_targets(
         source_path, output_path, verification_path
     )
@@ -242,7 +256,7 @@ def native_apply(
             raise PipelineError(ErrorCode.NATIVE_DOCUMENT_CHANGED, "native source differs from audit")
         with PrivateWorkspace(prefix="liang-pingfa-native-apply-") as workspace:
             private_dwg, private_copy = _copy_source_to_private_dwg(source_lease, workspace)
-            checked_session = validate_native_contract("session", session)
+            checked_session = require_active_native_contract("session", session)
             if checked_session["process"]["executable_fingerprint"] == "unavailable":
                 raise PipelineError(
                     ErrorCode.NATIVE_CAPABILITY_MISMATCH,
@@ -259,6 +273,8 @@ def native_apply(
                 checked_config,
                 private_source_copy=private_copy,
                 output_path=output_targets.targets[0].destination,
+                private_output_path=private_dwg,
+                private_workspace_root=workspace.path,
             )
             manifest_path = write_private_manifest(
                 workspace,
@@ -266,6 +282,29 @@ def native_apply(
                 manifest,
             )
             require_fresh_native_manifest(manifest)
+            # Preflight the exact retained private input before the console
+            # starts. A source copy that was replaced or altered after the
+            # manifest was sealed cannot become an implicit write target.
+            prewrite_dwg = workspace.open_validated_external_file_read_lease(
+                private_dwg,
+                allow_replacement=False,
+            )
+            try:
+                _, prewrite_source = _private_dwg_source_from_lease(
+                    workspace,
+                    private_dwg,
+                    prewrite_dwg,
+                )
+                if (
+                    prewrite_source
+                    != manifest["expected_prewrite_output_copy_binding"]
+                ):
+                    raise PipelineError(
+                        ErrorCode.NATIVE_DOCUMENT_CHANGED,
+                        "private prewrite DWG differs from manifest binding",
+                    )
+            finally:
+                prewrite_dwg.close()
             write_outcome = run_core_console(
                 workspace=workspace,
                 private_dwg=private_dwg,
@@ -283,12 +322,25 @@ def native_apply(
                 # size, header, and the Core Console result binding.
                 saved_dwg = workspace.open_validated_external_file_read_lease(
                     private_dwg,
-                    allow_replacement=True,
+                    allow_replacement=(
+                        manifest["final_output_constraints"][
+                            "file_identity_transition_policy"
+                        ]
+                        == "replacement_allowed"
+                    ),
+                    allow_content_change=True,
                 )
                 saved_binding, saved_source = _private_dwg_source_from_lease(
                     workspace,
                     private_dwg,
                     saved_dwg,
+                )
+                require_final_output_binding(
+                    manifest,
+                    saved_source,
+                    private_output_path=private_dwg,
+                    private_workspace_root=workspace.path,
+                    error_code=ErrorCode.NATIVE_READBACK_INVALID,
                 )
                 write_result = validate_console_result(
                     manifest,
@@ -306,7 +358,13 @@ def native_apply(
                 workspace.adopt_external_file(
                     private_dwg,
                     opened=saved_dwg,
-                    allow_replacement=True,
+                    allow_replacement=(
+                        manifest["final_output_constraints"][
+                            "file_identity_transition_policy"
+                        ]
+                        == "replacement_allowed"
+                    ),
+                    allow_content_change=True,
                     expected_binding=saved_binding,
                 )
                 # Keep this exact validated handle through the independent
@@ -338,6 +396,8 @@ def native_apply(
                     private_dwg,
                     saved_dwg,
                     after_export,
+                    manifest=manifest,
+                    private_workspace_root=workspace.path,
                     expected_final_document_binding=write_result[
                         "final_document_binding"
                     ],
@@ -362,6 +422,21 @@ def native_apply(
                     saved_dwg,
                     expected_binding=saved_binding,
                 )
+                require_final_output_binding(
+                    manifest,
+                    saved_source,
+                    private_output_path=private_dwg,
+                    private_workspace_root=workspace.path,
+                    error_code=ErrorCode.NATIVE_READBACK_INVALID,
+                )
+                if (
+                    saved_source
+                    != write_result["final_document_binding"]["output_copy_binding"]
+                ):
+                    raise PipelineError(
+                        ErrorCode.NATIVE_READBACK_INVALID,
+                        "private output drifted after readback",
+                    )
                 publication = stage_publication_transaction(
                     _staged_private_dwg_lease(
                         workspace,
@@ -382,6 +457,8 @@ def native_apply(
                     manifest,
                     after_export,
                     output_description,
+                    result=write_result,
+                    console_export=readback_outcome.artifact,
                 )
                 publication.stage_artifact(
                     output_targets.targets[1],
@@ -410,12 +487,24 @@ def native_apply(
         # Phase 5: make the pair visible through no-replace renames.  The
         # source lease remains live through commit and any retained-handle
         # rollback performed by the transaction.
-        publication.commit(
+        published_output, _published_verification = publication.commit(
             source_binding=lambda: _require_native_source_unchanged(
                 source_lease,
                 checked_audit["source"],
             ),
         )
+        # The verification JSON was prepared while the invisible staged
+        # output handle was retained. Rebind after both no-replace renames so
+        # the artifact demonstrably names the actual public DWG bytes, not
+        # merely a planned destination.
+        published_description = _native_output_description(
+            published_output.path,
+            published_output.owned,
+            published_output.binding,
+            published_output.backend,
+            final_name_visible=True,
+        )
+        require_published_output_binding(verification, published_description)
         post_rename_failure = _close_post_rename_resources(
             client=client,
             source_lease=source_lease,
@@ -578,16 +667,25 @@ def _require_readback_matches_private_copy(
     opened: OwnedPath,
     export: Mapping[str, Any],
     *,
+    manifest: Mapping[str, Any],
+    private_workspace_root: Path,
     expected_final_document_binding: Mapping[str, Any],
     expected_binding: OwnedPathBinding,
 ) -> tuple[OwnedPathBinding, dict[str, Any]]:
-    """Bind readback evidence to the saved private copy before publication."""
+    """Bind readback evidence to the retained actual saved copy before publish."""
 
     binding, expected_source = _private_dwg_source_from_lease(
         workspace,
         private_dwg,
         opened,
         expected_binding=expected_binding,
+    )
+    require_final_output_binding(
+        manifest,
+        expected_source,
+        private_output_path=private_dwg,
+        private_workspace_root=private_workspace_root,
+        error_code=ErrorCode.NATIVE_READBACK_INVALID,
     )
     if (
         export["source"] != expected_source
