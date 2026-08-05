@@ -109,6 +109,46 @@ def _fresh_export(before: dict, fresh_session: dict) -> dict:
     )
 
 
+def _actual_output_binding(manifest: dict) -> dict:
+    """Derive deterministic generated post-save bytes, never a prediction."""
+
+    prewrite = manifest["expected_prewrite_output_copy_binding"]
+    return {
+        "format": "DWG",
+        "sha256": canonical_sha256(
+            {
+                "generated_actual_output": prewrite["sha256"],
+                "operations": manifest["operations"],
+            }
+        ),
+        "byte_size": prewrite["byte_size"] + 1,
+        "path_fingerprint": prewrite["path_fingerprint"],
+        "file_identity_fingerprint": canonical_sha256(
+            {
+                "generated_actual_identity": prewrite[
+                    "file_identity_fingerprint"
+                ],
+                "operations": manifest["operations"],
+            }
+        ),
+        "dwg_header_signature": prewrite["dwg_header_signature"],
+    }
+
+
+def _final_export(
+    manifest: dict,
+    entities: list[dict],
+    **kwargs: object,
+) -> dict:
+    """Build generated readback evidence from an observed constrained output."""
+
+    return geometry(
+        entities,
+        source_value=_actual_output_binding(manifest),
+        **kwargs,
+    )
+
+
 class NativeAuditPlanTests(unittest.TestCase):
     """Test generated mocks only; no drawing, SDK, or plugin is used."""
 
@@ -239,7 +279,8 @@ class NativeAuditPlanTests(unittest.TestCase):
             "maximum": [bits_from_float(6), bits_from_float(0), bits_from_float(0)],
         }
         _rehash_entity(changed)
-        after = geometry(
+        after = _final_export(
+            manifest,
             [changed],
             database_instance=digest("final-database"),
             revision=digest("final-revision"),
@@ -251,7 +292,7 @@ class NativeAuditPlanTests(unittest.TestCase):
         unplanned["text"] = "tampered"
         _rehash_entity(unplanned)
         with self.assertRaises(PipelineError) as raised:
-            verify_native_transition(manifest, geometry([unplanned]))
+            verify_native_transition(manifest, _final_export(manifest, [unplanned]))
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
 
     def test_exact_delete_readback_allows_only_the_audited_target_absence(self) -> None:
@@ -289,7 +330,7 @@ class NativeAuditPlanTests(unittest.TestCase):
             },
             output_path=__import__("pathlib").Path("generated-delete.dwg"),
         )
-        result = verify_native_transition(manifest, geometry([]))
+        result = verify_native_transition(manifest, _final_export(manifest, []))
         self.assertEqual(result[0]["kind"], "delete_auxiliary_overlay_text")
 
     def test_marker_requires_exact_operation_derived_record(self) -> None:
@@ -327,7 +368,7 @@ class NativeAuditPlanTests(unittest.TestCase):
             output_path=__import__("pathlib").Path("generated-marker.dwg"),
         )
         marker = _marker_from_operation(manifest["operations"][0], "20")
-        after = geometry([before["entities"][0], marker])
+        after = _final_export(manifest, [before["entities"][0], marker])
         self.assertEqual(
             verify_native_transition(manifest, after)[0]["kind"],
             "create_review_marker",
@@ -338,7 +379,7 @@ class NativeAuditPlanTests(unittest.TestCase):
         with self.assertRaises(PipelineError) as raised:
             verify_native_transition(
                 manifest,
-                geometry([before["entities"][0], malformed]),
+                _final_export(manifest, [before["entities"][0], malformed]),
             )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
 
@@ -652,6 +693,56 @@ class NativeAuditPlanTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_DOCUMENT_CHANGED)
 
+    def test_final_readback_requires_stable_host_binding_but_allows_new_session(self) -> None:
+        """Session/PID/database churn is allowed; stable execution drift is not."""
+
+        before, _audit, _intent, _plan, manifest = self._translation_workflow()
+        changed = deepcopy(before["entities"][0])
+        changed["position"] = [bits_from_float(6), bits_from_float(0), bits_from_float(0)]
+        changed["bounds"] = {
+            "minimum": list(changed["position"]),
+            "maximum": list(changed["position"]),
+        }
+        _rehash_entity(changed)
+        renewed = _renewed_session(session(), "e")
+        valid_new_session = _final_export(
+            manifest,
+            [changed],
+            session_value=renewed,
+            database_instance=digest("new-readback-database"),
+            revision=digest("new-readback-revision"),
+        )
+        self.assertTrue(verify_native_transition(manifest, valid_new_session))
+
+        mutations = (
+            lambda value: value["adapter"].update({"profile": "other-profile"}),
+            lambda value: value["adapter"].update({"version": "2.0.0"}),
+            lambda value: value["plugin"].update({"version": "2.0.0"}),
+            lambda value: value["host"].update({"runtime": "other-runtime"}),
+            lambda value: value["process"].update(
+                {"executable_fingerprint": "e" * 64}
+            ),
+            lambda value: value["capabilities"].append("read.extra/v1"),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                drifted = deepcopy(renewed)
+                mutation(drifted)
+                drifted = attach_integrity(drifted)
+                after = _final_export(
+                    manifest,
+                    [changed],
+                    session_value=drifted,
+                    database_instance=digest("drifted-readback-database"),
+                    revision=digest("drifted-readback-revision"),
+                )
+                with self.assertRaises(PipelineError) as raised:
+                    verify_native_transition(manifest, after)
+                self.assertEqual(
+                    raised.exception.code,
+                    ErrorCode.NATIVE_READBACK_INVALID,
+                )
+
     def test_sequence_and_container_changes_fail_after_recomputed_integrity(self) -> None:
         before = geometry(
             [
@@ -707,7 +798,7 @@ class NativeAuditPlanTests(unittest.TestCase):
             deepcopy(before_by_handle["20"]),
             deepcopy(before_by_handle["30"]),
         ]
-        self.assertTrue(verify_native_transition(manifest, geometry(base_after)))
+        self.assertTrue(verify_native_transition(manifest, _final_export(manifest, base_after)))
         for handle, sequence in (("11", 2), ("20", 1), ("30", 1)):
             with self.subTest(handle=handle):
                 mutated = deepcopy(base_after)
@@ -719,7 +810,7 @@ class NativeAuditPlanTests(unittest.TestCase):
                 mutated[target_index]["sequence_index"] = sequence
                 _rehash_entity(mutated[target_index])
                 with self.assertRaises(PipelineError) as raised:
-                    verify_native_transition(manifest, geometry(mutated))
+                    verify_native_transition(manifest, _final_export(manifest, mutated))
                 self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
         reordered_container = deepcopy(base_after)
         paperspace_index = next(
@@ -730,7 +821,10 @@ class NativeAuditPlanTests(unittest.TestCase):
         reordered_container[paperspace_index]["space"]["layout_handle"] = "DD"
         _rehash_entity(reordered_container[paperspace_index])
         with self.assertRaises(PipelineError) as raised:
-            verify_native_transition(manifest, geometry(reordered_container))
+            verify_native_transition(
+                manifest,
+                _final_export(manifest, reordered_container),
+            )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
 
     def test_multiple_markers_are_bijective_and_modelspace_local(self) -> None:
@@ -784,7 +878,10 @@ class NativeAuditPlanTests(unittest.TestCase):
         ]
         first = _marker_from_operation(operations[0], "30")
         second = _marker_from_operation(operations[1], "31")
-        after = geometry([before["entities"][0], first, second, before["entities"][1]])
+        after = _final_export(
+            manifest,
+            [before["entities"][0], first, second, before["entities"][1]],
+        )
         self.assertEqual(
             [result["operation_id"] for result in verify_native_transition(manifest, after)],
             [operation["operation_id"] for operation in manifest["operations"]],
@@ -804,7 +901,10 @@ class NativeAuditPlanTests(unittest.TestCase):
                 with self.assertRaises(PipelineError) as raised:
                     verify_native_transition(
                         manifest,
-                        geometry([before["entities"][0], *additions, before["entities"][1]]),
+                        _final_export(
+                            manifest,
+                            [before["entities"][0], *additions, before["entities"][1]],
+                        ),
                     )
                 self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
         wrong_container = deepcopy(first)
@@ -814,7 +914,10 @@ class NativeAuditPlanTests(unittest.TestCase):
         with self.assertRaises(PipelineError) as raised:
             verify_native_transition(
                 manifest,
-                geometry([before["entities"][0], second, before["entities"][1], wrong_container]),
+                _final_export(
+                    manifest,
+                    [before["entities"][0], second, before["entities"][1], wrong_container],
+                ),
             )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
         wrong_order_first = deepcopy(first)
@@ -828,7 +931,8 @@ class NativeAuditPlanTests(unittest.TestCase):
         with self.assertRaises(PipelineError) as raised:
             verify_native_transition(
                 manifest,
-                geometry(
+                _final_export(
+                    manifest,
                     [
                         before["entities"][0],
                         wrong_order_first,
@@ -848,17 +952,19 @@ class NativeAuditPlanTests(unittest.TestCase):
             "maximum": [bits_from_float(6), bits_from_float(0), bits_from_float(0)],
         }
         _rehash_entity(changed)
-        after = geometry(
+        after = _final_export(
+            manifest,
             [changed],
             database_instance=digest("final-database"),
             revision=digest("final-revision"),
         )
         write_run = "native-run-" + "4" * 32
         result = {
-            "schema_version": "liang-pingfa/native-console-result/v1",
+            "schema_version": "liang-pingfa/native-console-result/v2",
             "run_id": write_run,
             "manifest_id": manifest["manifest_id"],
             "manifest_integrity_sha256": manifest["integrity"]["sha256"],
+            "manifest_schema_version": manifest["schema_version"],
             "nonce": manifest["nonce"],
             "final_revision_fingerprint": after["document"]["revision_fingerprint"],
             "final_revision_transition": "save_reopen_changed",
@@ -904,9 +1010,15 @@ class NativeAuditPlanTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_CONSOLE_RESULT_INVALID)
         read_run = "native-run-" + "5" * 32
         exported = {
-            "schema_version": "liang-pingfa/native-console-export/v1",
+            "schema_version": "liang-pingfa/native-console-export/v2",
             "run_id": read_run,
             "manifest_id": manifest["manifest_id"],
+            "manifest_integrity_sha256": manifest["integrity"]["sha256"],
+            "manifest_schema_version": manifest["schema_version"],
+            "console_result_integrity_sha256": checked_result["integrity"][
+                "sha256"
+            ],
+            "console_result_schema_version": checked_result["schema_version"],
             "nonce": manifest["nonce"],
             "final_revision_fingerprint": after["document"]["revision_fingerprint"],
             "final_document_binding": {
@@ -951,7 +1063,7 @@ class NativeAuditPlanTests(unittest.TestCase):
         forged_output_binding = deepcopy(exported)
         forged_output_binding["final_document_binding"]["output_copy_binding"][
             "file_identity_fingerprint"
-        ] = "f" * 64
+        ] = "e" * 64
         forged_output_binding = attach_integrity(forged_output_binding)
         with self.assertRaises(PipelineError) as raised:
             geometry_from_console_export(
@@ -962,7 +1074,8 @@ class NativeAuditPlanTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
 
-        stale_geometry = geometry(
+        stale_geometry = _final_export(
+            manifest,
             [changed],
             database_instance=after["document"]["database_instance_fingerprint"],
             revision="f" * 64,
@@ -985,14 +1098,129 @@ class NativeAuditPlanTests(unittest.TestCase):
             manifest,
             after,
             {
-                **source(),
+                **after["source"],
                 "file_identity_fingerprint": "e" * 64,
                 "path_fingerprint": "d" * 64,
             },
+            result=checked_result,
+            console_export=exported,
         )
         self.assertTrue(verification["passed"])
         self.assertEqual(verification["record_cardinality"], "explicit_private")
         self.assertTrue(verification["non_claims"]["external_transaction_claim_unproven"])
+
+    def test_final_output_source_transition_is_constrained_not_predicted(self) -> None:
+        """The private input binds exactly; the final output is constrained."""
+
+        before, _audit, _intent, _plan, manifest = self._translation_workflow()
+        changed = deepcopy(before["entities"][0])
+        changed["position"] = [bits_from_float(6), bits_from_float(0), bits_from_float(0)]
+        changed["bounds"] = {
+            "minimum": list(changed["position"]),
+            "maximum": list(changed["position"]),
+        }
+        _rehash_entity(changed)
+        after = _final_export(
+            manifest,
+            [changed],
+            database_instance=digest("transition-final-database"),
+            revision=digest("transition-final-revision"),
+        )
+        run_id = "native-run-" + "d" * 32
+        base = {
+            "schema_version": "liang-pingfa/native-console-result/v2",
+            "run_id": run_id,
+            "manifest_id": manifest["manifest_id"],
+            "manifest_integrity_sha256": manifest["integrity"]["sha256"],
+            "manifest_schema_version": manifest["schema_version"],
+            "nonce": manifest["nonce"],
+            "final_revision_fingerprint": after["document"]["revision_fingerprint"],
+            "final_revision_transition": "save_reopen_changed",
+            "final_document_binding": {
+                "database_instance_fingerprint": after["document"][
+                    "database_instance_fingerprint"
+                ],
+                "revision_fingerprint": after["document"]["revision_fingerprint"],
+                "output_copy_binding": after["source"],
+            },
+            "transaction": {
+                "preflight": "passed",
+                "outcome": "committed",
+                "rollback": "not_required",
+            },
+            "operation_results": [
+                {
+                    "operation_id": operation["operation_id"],
+                    "status": "applied",
+                    "postcondition_digest": canonical_sha256(operation),
+                }
+                for operation in manifest["operations"]
+            ],
+        }
+        result = attach_integrity(base)
+        self.assertEqual(
+            result,
+            validate_console_result(manifest, result, run_id=run_id),
+        )
+        self.assertNotEqual(
+            manifest["expected_prewrite_revision"]["source_binding"],
+            _actual_output_binding(manifest),
+        )
+
+        unchanged = deepcopy(base)
+        unchanged["final_document_binding"]["output_copy_binding"] = manifest[
+            "expected_prewrite_revision"
+        ]["source_binding"]
+        unchanged = attach_integrity(unchanged)
+        with self.assertRaises(PipelineError) as raised:
+            validate_console_result(manifest, unchanged, run_id=run_id)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_CONSOLE_RESULT_INVALID)
+
+        for field, value in (
+            (
+                "sha256",
+                manifest["expected_prewrite_output_copy_binding"]["sha256"],
+            ),
+            (
+                "byte_size",
+                manifest["final_output_constraints"]["max_byte_size"] + 1,
+            ),
+            ("path_fingerprint", "e" * 64),
+            ("dwg_header_signature", "AC1027"),
+        ):
+            with self.subTest(field=field):
+                partial = deepcopy(base)
+                partial["final_document_binding"]["output_copy_binding"][field] = value
+                partial = attach_integrity(partial)
+                with self.assertRaises(PipelineError) as raised:
+                    validate_console_result(manifest, partial, run_id=run_id)
+                self.assertEqual(
+                    raised.exception.code,
+                    ErrorCode.NATIVE_CONSOLE_RESULT_INVALID,
+                )
+
+        allowed_replacement = deepcopy(base)
+        allowed_replacement["final_document_binding"]["output_copy_binding"][
+            "file_identity_fingerprint"
+        ] = "e" * 64
+        allowed_replacement = attach_integrity(allowed_replacement)
+        self.assertEqual(
+            allowed_replacement,
+            validate_console_result(
+                manifest,
+                allowed_replacement,
+                run_id=run_id,
+            ),
+        )
+
+        swapped_manifest = deepcopy(manifest)
+        swapped_manifest["final_output_constraints"][
+            "authorized_private_path_fingerprint"
+        ] = manifest["source"]["path_fingerprint"]
+        swapped_manifest = attach_integrity(swapped_manifest)
+        with self.assertRaises(PipelineError) as raised:
+            validate_native_contract("manifest", swapped_manifest)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_MANIFEST_INVALID)
 
     def test_explicit_plugin_revision_preservation_requires_its_transition_enum(self) -> None:
         preserving_config = config()
@@ -1042,10 +1270,11 @@ class NativeAuditPlanTests(unittest.TestCase):
         prewrite = manifest["expected_prewrite_revision"]
         result = attach_integrity(
             {
-                "schema_version": "liang-pingfa/native-console-result/v1",
+                "schema_version": "liang-pingfa/native-console-result/v2",
                 "run_id": "native-run-" + "a" * 32,
                 "manifest_id": manifest["manifest_id"],
                 "manifest_integrity_sha256": manifest["integrity"]["sha256"],
+                "manifest_schema_version": manifest["schema_version"],
                 "nonce": manifest["nonce"],
                 "final_revision_fingerprint": prewrite["revision_fingerprint"],
                 "final_revision_transition": "preserved_by_plugin_capability",
@@ -1054,7 +1283,7 @@ class NativeAuditPlanTests(unittest.TestCase):
                         "database_instance_fingerprint"
                     ],
                     "revision_fingerprint": prewrite["revision_fingerprint"],
-                    "output_copy_binding": prewrite["source_binding"],
+                    "output_copy_binding": _actual_output_binding(manifest),
                 },
                 "transaction": {
                     "preflight": "passed",

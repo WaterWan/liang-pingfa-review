@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import io
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -24,6 +26,62 @@ from liang_pingfa_review.errors import ErrorCode, PipelineError
 from liang_pingfa_review.native_bridge import native_doctor_status
 from liang_pingfa_review.temporary import PrivateWorkspace
 from tests.support.synthetic_native import config, digest, geometry
+
+
+class GeneratedMockCoreConsoleTests(unittest.TestCase):
+    """The generated stand-in must not hide copy-only write behavior."""
+
+    def test_write_mode_changes_private_dwg_for_each_operation_kind(self) -> None:
+        script = Path(__file__).with_name("support") / "mock_core_console.py"
+        operations = (
+            {"operation_id": "native-operation-" + "a" * 24, "kind": "translate_dbtext"},
+            {
+                "operation_id": "native-operation-" + "b" * 24,
+                "kind": "delete_auxiliary_overlay_text",
+            },
+            {
+                "operation_id": "native-operation-" + "c" * 24,
+                "kind": "create_review_marker",
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for operation in operations:
+                with self.subTest(kind=operation["kind"]):
+                    case_root = root / operation["kind"]
+                    case_root.mkdir()
+                    private_dwg = case_root / "private.dwg"
+                    manifest = case_root / "manifest.json"
+                    result = case_root / "native-console-result.json"
+                    original = b"AC1032generated-mock-input"
+                    private_dwg.write_bytes(original)
+                    manifest.write_text(
+                        json.dumps({"operations": [operation]}),
+                        encoding="utf-8",
+                    )
+                    environment = {
+                        **os.environ,
+                        "LIANG_PINGFA_NATIVE_MANIFEST": str(manifest),
+                        "LIANG_PINGFA_NATIVE_RESULT": str(result),
+                        "LIANG_PINGFA_TEST_CONSOLE_PAYLOAD": "{}",
+                    }
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(script),
+                            "/i",
+                            str(private_dwg),
+                            "/s",
+                            "generated.scr",
+                        ],
+                        env=environment,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertNotEqual(original, private_dwg.read_bytes())
+                    self.assertTrue(private_dwg.read_bytes().startswith(b"AC1032"))
+                    self.assertEqual("{}", result.read_text(encoding="utf-8"))
 
 
 class _FakeComponentLeases:
@@ -140,11 +198,21 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                         exported = geometry()
                         payload = attach_integrity(
                             {
-                                "schema_version": "liang-pingfa/native-console-export/v1",
+                                "schema_version": "liang-pingfa/native-console-export/v2",
                                 "run_id": self._environment[
                                     "LIANG_PINGFA_NATIVE_RUN_ID"
                                 ],
                                 "manifest_id": "native-manifest-" + "a" * 32,
+                                "manifest_integrity_sha256": digest("manifest"),
+                                "manifest_schema_version": (
+                                    "liang-pingfa/native-edit-manifest/v2"
+                                ),
+                                "console_result_integrity_sha256": digest(
+                                    "console-result"
+                                ),
+                                "console_result_schema_version": (
+                                    "liang-pingfa/native-console-result/v2"
+                                ),
                                 "nonce": "a" * 43,
                                 "final_revision_fingerprint": exported["document"][
                                     "revision_fingerprint"
@@ -167,10 +235,13 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                     else:
                         payload = attach_integrity(
                             {
-                            "schema_version": "liang-pingfa/native-console-result/v1",
+                            "schema_version": "liang-pingfa/native-console-result/v2",
                             "run_id": self._environment["LIANG_PINGFA_NATIVE_RUN_ID"],
                             "manifest_id": "native-manifest-" + "a" * 32,
                             "manifest_integrity_sha256": digest("manifest"),
+                            "manifest_schema_version": (
+                                "liang-pingfa/native-edit-manifest/v2"
+                            ),
                             "nonce": "a" * 43,
                             "final_revision_fingerprint": digest("revision"),
                             "final_revision_transition": "save_reopen_changed",
@@ -274,7 +345,7 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                     mode="write",
                     component_leases=components,
                 )
-            self.assertEqual(outcome.artifact["schema_version"], "liang-pingfa/native-console-result/v1")
+            self.assertEqual(outcome.artifact["schema_version"], "liang-pingfa/native-console-result/v2")
             command = seen["command"]
             self.assertEqual(command[1:3], ["/i", str(drawing)])
             self.assertEqual(command[3], "/s")
@@ -382,7 +453,7 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                 )
             self.assertEqual(
                 outcome.artifact["schema_version"],
-                "liang-pingfa/native-console-export/v1",
+                "liang-pingfa/native-console-export/v2",
             )
             self.assertEqual(seen["timeout"], 8)
 
