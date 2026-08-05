@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>LiangPingfa.NativeCad.Protocol</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.Protocol</RootNamespace>
+    <Description>SDK-free canonical v1 protocol subset.</Description>
+    <NativeCadPolicyMode>checkpoint-1-protocol</NativeCadPolicyMode>
+  </PropertyGroup>
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>
