@@ -12,6 +12,7 @@ from .native_contracts import (
     native_artifact_integrity,
     native_marker_policy_binding,
     PRIVATE_RECORD_CARDINALITY,
+    require_active_native_contract,
     validate_native_contract,
 )
 
@@ -90,8 +91,8 @@ def generate_native_plan(
     """Generate the only acceptable redacted plan for a private native intent."""
 
     checked_audit = require_fresh_native_audit(audit, now=now)
-    checked_intent = validate_native_contract("intent", intent)
-    checked_config = validate_native_contract("config", config)
+    checked_intent = require_active_native_contract("intent", intent)
+    checked_config = require_active_native_contract("config", config)
     marker_policy_binding = native_marker_policy_binding(checked_config)
     if checked_audit["marker_policy_binding"] != marker_policy_binding:
         raise PipelineError(
@@ -103,7 +104,11 @@ def generate_native_plan(
             ErrorCode.NATIVE_CAPABILITY_MISMATCH,
             "native write planning requires a host executable fingerprint",
         )
-    if checked_intent["audit_binding"] != native_audit_binding(checked_audit):
+    expected_audit_binding = {
+        **native_audit_binding(checked_audit),
+        "audit_schema_version": checked_audit["schema_version"],
+    }
+    if checked_intent["audit_binding"] != expected_audit_binding:
         raise PipelineError(ErrorCode.NATIVE_ARTIFACT_MISMATCH, "native intent audit binding differs")
     operations: list[dict[str, Any]] = []
     for intent_operation in sorted(
@@ -149,11 +154,18 @@ def generate_native_plan(
         "file_identity_fingerprint": source["file_identity_fingerprint"],
     }
     common = {
-        "audit_binding": native_audit_binding(checked_audit),
+        "audit_binding": {
+            **native_audit_binding(checked_audit),
+            "audit_schema_version": checked_audit["schema_version"],
+        },
         "intent_sha256": native_artifact_integrity(checked_intent),
+        "intent_schema_version": checked_intent["schema_version"],
         "source_binding": source_binding,
         "adapter_binding": _plan_adapter_binding(checked_audit),
         "native_host_binding": checked_audit["native_host_binding"],
+        "stable_host_binding_digest": checked_audit[
+            "stable_host_binding_digest"
+        ],
         "marker_policy_binding": checked_audit["marker_policy_binding"],
         # The audit integrity already binds this field, but carrying the
         # validated geometry/document digest explicitly prevents later plan
@@ -169,7 +181,7 @@ def generate_native_plan(
     }
     plan_id = "native-plan-" + canonical_sha256(common)[:32]
     artifact = {
-        "schema_version": "liang-pingfa/native-edit-plan/v1",
+        "schema_version": "liang-pingfa/native-edit-plan/v2",
         "plan_id": plan_id,
         # Determinism means a plan is time-independent while the audit itself
         # remains inside its short fixed validity interval.
@@ -190,7 +202,7 @@ def validate_native_plan_against_audit(
     """Reject stale, hand-authored, wrong-intent, or profile-drifted plans."""
 
     expected = generate_native_plan(audit, intent, config, now=now)
-    checked = validate_native_contract("plan", plan)
+    checked = require_active_native_contract("plan", plan)
     if canonical_sha256(expected) != canonical_sha256(checked):
         raise PipelineError(ErrorCode.NATIVE_ARTIFACT_MISMATCH, "native plan is not deterministic")
     return checked

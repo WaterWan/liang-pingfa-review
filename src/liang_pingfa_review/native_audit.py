@@ -30,9 +30,11 @@ from .native_contracts import (
     geometry_adapter_binding,
     geometry_document_binding,
     native_artifact_integrity,
+    native_execution_stable_host_binding_digest,
     native_host_binding,
     native_marker_policy_binding,
     PRIVATE_RECORD_CARDINALITY,
+    require_active_native_contract,
     require_geometry_export_matches_session,
     validate_native_contract,
 )
@@ -114,7 +116,7 @@ def build_native_audit(
         export,
         error=ErrorCode.NATIVE_GEOMETRY_INVALID,
     )
-    checked_config = validate_native_contract("config", config)
+    checked_config = require_active_native_contract("config", config)
     checked_export, checked_session = require_geometry_export_matches_session(
         export,
         session,
@@ -122,6 +124,7 @@ def build_native_audit(
     )
     source = checked_export["source"]
     checked_native_host_binding = native_host_binding(checked_session, checked_config)
+    marker_policy_binding = native_marker_policy_binding(checked_config)
     records: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     for entity in checked_export["entities"]:
@@ -150,7 +153,10 @@ def build_native_audit(
             )
     current = now or utc_now()
     artifact = {
-        "schema_version": "liang-pingfa/native-audit/v1",
+        "schema_version": "liang-pingfa/native-audit/v2",
+        "config_schema_version": checked_config["schema_version"],
+        "session_schema_version": checked_session["schema_version"],
+        "geometry_schema_version": checked_export["schema_version"],
         "audit_id": "native-audit-" + sha256(
             (
                 checked_export["document"]["complete_geometry_digest"]
@@ -167,6 +173,10 @@ def build_native_audit(
             "executable_fingerprint"
         ],
         "native_host_binding": checked_native_host_binding,
+        "stable_host_binding_digest": native_execution_stable_host_binding_digest(
+            checked_export,
+            marker_policy_binding,
+        ),
         # These are taken from the exact tuple the shared gate validated,
         # rather than recomputed from independently accepted inputs.
         "session_binding_digest": checked_export["binding"]["session_binding_digest"],
@@ -179,7 +189,7 @@ def build_native_audit(
             "layer_fingerprint": checked_export["document"]["marker_layer_fingerprint"],
             "style_fingerprint": checked_export["document"]["marker_style_fingerprint"],
         },
-        "marker_policy_binding": native_marker_policy_binding(checked_config),
+        "marker_policy_binding": marker_policy_binding,
         "records": sorted(records, key=lambda item: item["target_id"]),
         "findings": sorted(findings, key=lambda item: item["finding_id"]),
         # This private machine-readable artifact enumerates opaque records and
@@ -196,7 +206,7 @@ def require_fresh_native_audit(
 ) -> dict[str, Any]:
     """Require a current integrity-checked native audit before planning/writing."""
 
-    checked = validate_native_contract("audit", audit)
+    checked = require_active_native_contract("audit", audit)
     current = now or utc_now()
     try:
         created = __import__(
@@ -226,7 +236,7 @@ def bound_native_audit(
     client: NativeBridgeClient | None = None
     try:
         source = native_source_from_lease(source_lease)
-        checked_session = validate_native_contract("session", session)
+        checked_session = require_active_native_contract("session", session)
         client = NativeBridgeClient(checked_session, config=config)
         export = client.export_exact_geometry()
         audit = build_native_audit(
