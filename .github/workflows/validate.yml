@@ -26,7 +26,9 @@ jobs:
       - name: Install project
         run: python -m pip install .
       - name: Validate repository
-        run: python scripts/validate_skill.py
+        run: |
+          $env:LPF_VALIDATE_EVALUATED_MSBUILD = "1"
+          python scripts/validate_skill.py
       - name: Check forbidden tracked artifacts
         run: python scripts/validate_skill.py --tracked
       - name: Run full Windows suite including native handle tests
@@ -35,6 +37,12 @@ jobs:
         run: python -m compileall -q src tests scripts
       - name: Build SDK-free native bridge contracts
         run: dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj -c Release --nologo
+      - name: Verify frozen and active C# API surfaces
+        run: dotnet run --project native-bridge-contracts/tests/LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj -c Release --nologo
+      - name: Build SDK-free native CAD transaction core
+        run: dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo
+      - name: Run generated native CAD core tests
+        run: dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build
       - name: Check CLI help
         run: |
           python -m liang_pingfa_review --help
