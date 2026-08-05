@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/native-console-export/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "manifest_id",
+    "nonce",
+    "final_revision_fingerprint",
+    "final_document_binding",
+    "geometry_json",
+    "geometry_sha256",
+    "integrity",
+    "manifest_integrity_sha256",
+    "manifest_schema_version",
+    "console_result_integrity_sha256",
+    "console_result_schema_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "liang-pingfa/native-console-export/v2"
+    },
+    "run_id": {
+      "$ref": "#/$defs/runId"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/manifestId"
+    },
+    "nonce": {
+      "$ref": "#/$defs/nonce"
+    },
+    "final_revision_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "final_document_binding": {
+      "$ref": "#/$defs/finalDocumentBinding"
+    },
+    "geometry_json": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 16777216,
+      "description": "Opaque serialized geometry JSON carrier at this exact console-export path. Its exact UTF-8 bytes are capped at 16777216 before outer NFC; separately parsed inner JSON remains canonical/NFC and schema-validated. maxLength is a secondary Unicode code-point bound."
+    },
+    "geometry_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "integrity": {
+      "$ref": "#/$defs/integrity"
+    },
+    "manifest_integrity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "manifest_schema_version": {
+      "const": "liang-pingfa/native-edit-manifest/v2"
+    },
+    "console_result_integrity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "console_result_schema_version": {
+      "const": "liang-pingfa/native-console-result/v2"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^native-run-[a-f0-9]{32}$"
+    },
+    "manifestId": {
+      "type": "string",
+      "pattern": "^native-manifest-[a-f0-9]{32}$"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "sha256",
+        "byte_size",
+        "path_fingerprint",
+        "file_identity_fingerprint",
+        "dwg_header_signature"
+      ],
+      "properties": {
+        "format": {
+          "const": "DWG"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "path_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "file_identity_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dwg_header_signature": {
+          "type": "string",
+          "pattern": "^AC[0-9A-Z]{4}$"
+        }
+      }
+    },
+    "finalDocumentBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "database_instance_fingerprint",
+        "revision_fingerprint",
+        "output_copy_binding"
+      ],
+      "properties": {
+        "database_instance_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "revision_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "output_copy_binding": {
+          "$ref": "#/$defs/source"
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "sha256"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "SHA-256"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}
