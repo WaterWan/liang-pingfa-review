@@ -1,0 +1,66 @@
+{
+  "absent_from_baseline": [
+    "src/liang_pingfa_review/schemas/native-inventory-export-v1.schema.json"
+  ],
+  "artifacts": {
+    "native-bridge-contracts/Interfaces.cs": {
+      "baseline_sha256": "23c9f52a6ac5bbf4b48e8c4ff1095a0994185d2871b1c35cb26576aa786249f5",
+      "introduced_commit": "40b25ecd9048739423bc643682418ca795062afa"
+    },
+    "native-bridge-contracts/ProtocolV1.cs": {
+      "baseline_sha256": "d228dba3da1fe127d503fa49dcfcfabc54e773e467d98e85c436725632648010",
+      "introduced_commit": "40b25ecd9048739423bc643682418ca795062afa"
+    },
+    "src/liang_pingfa_review/schemas/native-adapter-config-v1.schema.json": {
+      "baseline_sha256": "eff8f02973fd380d116d6526d5fa9f78220041bdc1c25c46a4d4d4608fdc418a",
+      "introduced_commit": "f91c4aed8cd1346e4c09515a7f6a8ef8df20138b"
+    },
+    "src/liang_pingfa_review/schemas/native-audit-v1.schema.json": {
+      "baseline_sha256": "82339a764ae1b512d1f4f237350f2c68da9bf359e83082756acd7e229ea4b6fa",
+      "introduced_commit": "03e2e0de83d6b85a510b7e9d83a8645ba837aad3"
+    },
+    "src/liang_pingfa_review/schemas/native-bridge-request-v1.schema.json": {
+      "baseline_sha256": "f34c023ac29c63cb8a959cfce39ae911a5e29527237e45758564e42358850a44",
+      "introduced_commit": "f91c4aed8cd1346e4c09515a7f6a8ef8df20138b"
+    },
+    "src/liang_pingfa_review/schemas/native-bridge-response-v1.schema.json": {
+      "baseline_sha256": "527fcc1ac3b05680d4cbe3354036859ecdf4fa7b65d3c0a93fcafc75e196649f",
+      "introduced_commit": "f91c4aed8cd1346e4c09515a7f6a8ef8df20138b"
+    },
+    "src/liang_pingfa_review/schemas/native-bridge-session-v1.schema.json": {
+      "baseline_sha256": "e3090189c0ad98d50360fea82f3d5a83d4aee90717ec53eb2a552bfebf4c3808",
+      "introduced_commit": "f91c4aed8cd1346e4c09515a7f6a8ef8df20138b"
+    },
+    "src/liang_pingfa_review/schemas/native-console-export-v1.schema.json": {
+      "baseline_sha256": "c3d529fdc498ae204ef31605e0deebce4369990451d7aba7f1a8114d630dc9e3",
+      "introduced_commit": "8a67fe3affeeb53a7545f81ee34bfda921b97179"
+    },
+    "src/liang_pingfa_review/schemas/native-console-result-v1.schema.json": {
+      "baseline_sha256": "e34a89bb6207489ac229add971e5b592e2463842e5ffa08ecbb4ecbcf07e6b9f",
+      "introduced_commit": "8a67fe3affeeb53a7545f81ee34bfda921b97179"
+    },
+    "src/liang_pingfa_review/schemas/native-edit-intent-v1.schema.json": {
+      "baseline_sha256": "47366be6def87c434e96643da322e7b11ae6f43832f9d42417abb8bad438b555",
+      "introduced_commit": "03e2e0de83d6b85a510b7e9d83a8645ba837aad3"
+    },
+    "src/liang_pingfa_review/schemas/native-edit-manifest-v1.schema.json": {
+      "baseline_sha256": "f37f71089112b7c3837f7e9bbb25bd731d5f043341e76ecda54f0dd954cdbd96",
+      "introduced_commit": "8a67fe3affeeb53a7545f81ee34bfda921b97179"
+    },
+    "src/liang_pingfa_review/schemas/native-edit-plan-v1.schema.json": {
+      "baseline_sha256": "5b0e8601f89dac8ccbdf06b2422477a4f4c0660fa52707b5d1bdf5a40fbc2efd",
+      "introduced_commit": "03e2e0de83d6b85a510b7e9d83a8645ba837aad3"
+    },
+    "src/liang_pingfa_review/schemas/native-geometry-export-v1.schema.json": {
+      "baseline_sha256": "a407d8dee863bcb104338ac1305bf49c7e63bff29f5a827fae8fc2650c927242",
+      "introduced_commit": "f91c4aed8cd1346e4c09515a7f6a8ef8df20138b"
+    },
+    "src/liang_pingfa_review/schemas/native-verification-v1.schema.json": {
+      "baseline_sha256": "f896e15264fae0bb5c2ebec0524b56f1cad14154aa2a7279f8230d59a26ddaeb",
+      "introduced_commit": "8a67fe3affeeb53a7545f81ee34bfda921b97179"
+    }
+  },
+  "baseline_commit": "c374e6c61fffaf6f487dd81544923a3072e293dc",
+  "description": "Published native v1 release surface frozen at c374e6c. Inventory v1 and the native-cad executable core were introduced after this release and are intentionally absent from the v1 baseline.",
+  "v1_public_api_signature_sha256": "d2c375a5439439c756fe84deb48378f8e9ff66cb6274716318fa408ff2df8e53"
+}
