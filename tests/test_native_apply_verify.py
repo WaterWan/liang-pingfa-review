@@ -1,4 +1,4 @@
-"""Generated-mock native copy-only apply/readback orchestration tests."""
+"""Generated-mock native apply/readback orchestration tests."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from liang_pingfa_review.native_contracts import (
 )
 from liang_pingfa_review.native_plan import generate_native_plan
 from liang_pingfa_review.native_protocol import derive_challenge_response
+from liang_pingfa_review.native_verify import verify_native_published_output
 from liang_pingfa_review.ownership import (
     OwnershipCleanupError,
     OwnershipLostError,
@@ -206,6 +207,20 @@ class NativeApplyVerifyTests(unittest.TestCase):
         finally:
             opened.close()
 
+    @staticmethod
+    def _mutate_private_dwg(kwargs: dict[str, object], manifest: dict) -> None:
+        """Simulate one deterministic Core Console SaveAs with changed bytes."""
+
+        private_dwg = Path(kwargs["private_dwg"])
+        before = private_dwg.read_bytes()
+        mutation = canonical_sha256(
+            {
+                "mock_core_console": "native-edit-v2",
+                "operations": manifest["operations"],
+            }
+        ).encode("ascii")
+        private_dwg.write_bytes(before + b"\nLPF-MOCK-NATIVE-EDIT:" + mutation)
+
     def _fake_console(
         self,
         after: dict,
@@ -213,8 +228,10 @@ class NativeApplyVerifyTests(unittest.TestCase):
         sidecar_name: str | None = None,
         before_write_result=None,
         before_readback_result=None,
+        captured_artifacts: list[tuple[str, dict]] | None = None,
     ):
         counter = [0]
+        write_artifact: list[dict | None] = [None]
 
         def run(**kwargs: object) -> CoreConsoleOutcome:
             counter[0] += 1
@@ -224,14 +241,16 @@ class NativeApplyVerifyTests(unittest.TestCase):
             )
             run_id = "native-run-" + str(counter[0]) * 32
             if kwargs["mode"] == "write":
+                self._mutate_private_dwg(kwargs, manifest)
                 if before_write_result is not None:
                     before_write_result(kwargs)
                 output_copy_binding = self._private_output_source(kwargs)
                 result = {
-                    "schema_version": "liang-pingfa/native-console-result/v1",
+                    "schema_version": "liang-pingfa/native-console-result/v2",
                     "run_id": run_id,
                     "manifest_id": manifest["manifest_id"],
                     "manifest_integrity_sha256": manifest["integrity"]["sha256"],
+                    "manifest_schema_version": manifest["schema_version"],
                     "nonce": manifest["nonce"],
                     "final_revision_fingerprint": after["document"][
                         "revision_fingerprint"
@@ -261,6 +280,7 @@ class NativeApplyVerifyTests(unittest.TestCase):
                     ],
                 }
                 artifact = attach_integrity(result)
+                write_artifact[0] = artifact
             else:
                 if before_readback_result is not None:
                     before_readback_result(kwargs)
@@ -270,11 +290,23 @@ class NativeApplyVerifyTests(unittest.TestCase):
                     "document_binding_digest"
                 ] = geometry_document_binding_digest(output_export)
                 output_export = attach_integrity(output_export)
+                if write_artifact[0] is None:
+                    raise AssertionError("generated readback lacks a write result")
                 artifact = attach_integrity(
                     {
-                        "schema_version": "liang-pingfa/native-console-export/v1",
+                        "schema_version": "liang-pingfa/native-console-export/v2",
                         "run_id": run_id,
                         "manifest_id": manifest["manifest_id"],
+                        "manifest_integrity_sha256": manifest["integrity"][
+                            "sha256"
+                        ],
+                        "manifest_schema_version": manifest["schema_version"],
+                        "console_result_integrity_sha256": write_artifact[0][
+                            "integrity"
+                        ]["sha256"],
+                        "console_result_schema_version": write_artifact[0][
+                            "schema_version"
+                        ],
                         "nonce": manifest["nonce"],
                         "final_revision_fingerprint": output_export["document"][
                             "revision_fingerprint"
@@ -296,6 +328,8 @@ class NativeApplyVerifyTests(unittest.TestCase):
                 (Path(kwargs["workspace"].path) / sidecar_name).write_bytes(  # type: ignore[index,union-attr]
                     b"generated-unregistered-sidecar"
                 )
+            if captured_artifacts is not None:
+                captured_artifacts.append((kwargs["mode"], deepcopy(artifact)))
             return CoreConsoleOutcome(
                 run_id=run_id,
                 artifact=artifact,
@@ -308,6 +342,7 @@ class NativeApplyVerifyTests(unittest.TestCase):
         output = self.root / "output.dwg"
         verification = self.root / "verification.json"
         component_leases = _FakeComponentLeases()
+        captured_artifacts: list[tuple[str, dict]] = []
         with (
             mock.patch(
                 "liang_pingfa_review.native_apply.acquire_native_installation_leases",
@@ -319,7 +354,10 @@ class NativeApplyVerifyTests(unittest.TestCase):
             ),
             mock.patch(
                 "liang_pingfa_review.native_apply.run_core_console",
-                side_effect=self._fake_console(self.after),
+                side_effect=self._fake_console(
+                    self.after,
+                    captured_artifacts=captured_artifacts,
+                ),
             ) as console,
         ):
             result = native_apply(
@@ -337,8 +375,122 @@ class NativeApplyVerifyTests(unittest.TestCase):
         self.assertTrue(output.is_file())
         self.assertTrue(verification.is_file())
         self.assertTrue(result.verification["passed"])
-        self.assertEqual(output.read_bytes(), self.source_path.read_bytes())
+        self.assertEqual(
+            b"AC1032generated-native-source",
+            self.source_path.read_bytes(),
+        )
+        self.assertNotEqual(output.read_bytes(), self.source_path.read_bytes())
+        published_verification = load_json_file(verification)
+        self.assertEqual(["write", "readback"], [item[0] for item in captured_artifacts])
+        write_binding = captured_artifacts[0][1]["final_document_binding"][
+            "output_copy_binding"
+        ]
+        readback_binding = captured_artifacts[1][1]["final_document_binding"][
+            "output_copy_binding"
+        ]
+        self.assertEqual(write_binding, readback_binding)
+        self.assertEqual(
+            write_binding["sha256"],
+            published_verification["output_binding"]["sha256"],
+        )
+        self.assertEqual(
+            write_binding["byte_size"],
+            published_verification["output_binding"]["byte_size"],
+        )
+        self.assertEqual(result.verification, published_verification)
+        self.assertEqual(
+            published_verification,
+            verify_native_published_output(output, published_verification),
+        )
+        self.assertEqual(
+            [{"operation_id": self.intent["operations"][0]["operation_id"], "kind": "translate_dbtext", "verified": True}],
+            published_verification["operation_results"],
+        )
         self.assertTrue(component_leases.closed)
+
+    def test_unchanged_mutating_write_publishes_nothing(self) -> None:
+        """Translate/delete/marker manifests reject copy-only output bytes."""
+
+        output = self.root / "unchanged-output.dwg"
+        verification = self.root / "unchanged-verification.json"
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_apply.acquire_native_installation_leases",
+                return_value=_FakeComponentLeases(),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.NativeBridgeClient",
+                self._fake_bridge(),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.run_core_console",
+                side_effect=self._fake_console(self.after),
+            ),
+            mock.patch.object(self, "_mutate_private_dwg", return_value=None),
+            self.assertRaises(PipelineError) as raised,
+        ):
+            native_apply(
+                self.source_path,
+                self.apply_session,
+                self.audit,
+                self.plan,
+                self.intent,
+                self.config,
+                confirm_plan=self.plan["plan_id"],
+                output_path=output,
+                verification_path=verification,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
+        self.assertFalse(output.exists())
+        self.assertFalse(verification.exists())
+
+    def test_post_commit_public_binding_mismatch_rolls_back_pair(self) -> None:
+        """The private verification artifact must bind final public DWG bytes."""
+
+        output = self.root / "publication-mismatch-output.dwg"
+        verification = self.root / "publication-mismatch-verification.json"
+        original_description = apply_module._native_output_description
+
+        def forged_public_description(*args: object, **kwargs: object) -> dict:
+            description = original_description(*args, **kwargs)
+            if kwargs.get("final_name_visible") is True:
+                description = dict(description)
+                description["sha256"] = "0" * 64
+            return description
+
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_apply.acquire_native_installation_leases",
+                return_value=_FakeComponentLeases(),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.NativeBridgeClient",
+                self._fake_bridge(),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.run_core_console",
+                side_effect=self._fake_console(self.after),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply._native_output_description",
+                side_effect=forged_public_description,
+            ),
+            self.assertRaises(PipelineError) as raised,
+        ):
+            native_apply(
+                self.source_path,
+                self.apply_session,
+                self.audit,
+                self.plan,
+                self.intent,
+                self.config,
+                confirm_plan=self.plan["plan_id"],
+                output_path=output,
+                verification_path=verification,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_VERIFICATION_INVALID)
+        self.assertFalse(output.exists())
+        self.assertFalse(verification.exists())
 
     def test_external_saved_dwg_owner_dacl_failures_publish_nothing(self) -> None:
         """Post-save validation rejects broad, untrusted, or unreadable ACLs."""
@@ -412,8 +564,8 @@ class NativeApplyVerifyTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertFalse(verification.exists())
 
-    def test_safe_external_replacement_requires_exact_result_binding(self) -> None:
-        """A contract-authorized save replacement is adopted only when bound."""
+    def test_forbidden_external_replacement_publishes_nothing(self) -> None:
+        """A same-identity manifest rejects a post-launch replacement."""
 
         output = self.root / "replacement-output.dwg"
         verification = self.root / "replacement-verification.json"
@@ -424,6 +576,15 @@ class NativeApplyVerifyTests(unittest.TestCase):
             temporary = private_dwg.with_name("generated-save-replacement.tmp")
             temporary.write_bytes(replacement)
             os.replace(temporary, private_dwg)
+
+        original_manifest_builder = apply_module.build_native_manifest
+
+        def same_identity_manifest(*args: object, **kwargs: object) -> dict:
+            manifest = original_manifest_builder(*args, **kwargs)
+            manifest["final_output_constraints"][
+                "file_identity_transition_policy"
+            ] = "same_identity_required"
+            return attach_integrity(manifest)
 
         with (
             mock.patch(
@@ -441,8 +602,13 @@ class NativeApplyVerifyTests(unittest.TestCase):
                     before_write_result=replace_before_result,
                 ),
             ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.build_native_manifest",
+                side_effect=same_identity_manifest,
+            ),
+            self.assertRaises(PipelineError) as raised,
         ):
-            result = native_apply(
+            native_apply(
                 self.source_path,
                 self.apply_session,
                 self.audit,
@@ -453,9 +619,63 @@ class NativeApplyVerifyTests(unittest.TestCase):
                 output_path=output,
                 verification_path=verification,
             )
-        self.assertTrue(result.verification["passed"])
-        self.assertEqual(output.read_bytes(), replacement)
-        self.assertTrue(verification.is_file())
+        self.assertIn(
+            raised.exception.code,
+            {
+                ErrorCode.NATIVE_CONSOLE_RESULT_INVALID,
+                ErrorCode.NATIVE_READBACK_INVALID,
+                ErrorCode.PUBLICATION_CLEANUP_FAILURE,
+            },
+        )
+        self.assertFalse(output.exists())
+        self.assertFalse(verification.exists())
+
+    def test_same_identity_policy_allows_in_place_mutating_save(self) -> None:
+        """Identity policy must not accidentally reject changed same-file bytes."""
+
+        output = self.root / "same-identity-output.dwg"
+        verification = self.root / "same-identity-verification.json"
+        original_manifest_builder = apply_module.build_native_manifest
+
+        def same_identity_manifest(*args: object, **kwargs: object) -> dict:
+            manifest = original_manifest_builder(*args, **kwargs)
+            manifest["final_output_constraints"][
+                "file_identity_transition_policy"
+            ] = "same_identity_required"
+            return attach_integrity(manifest)
+
+        with (
+            mock.patch(
+                "liang_pingfa_review.native_apply.acquire_native_installation_leases",
+                return_value=_FakeComponentLeases(),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.NativeBridgeClient",
+                self._fake_bridge(),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.run_core_console",
+                side_effect=self._fake_console(self.after),
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_apply.build_native_manifest",
+                side_effect=same_identity_manifest,
+            ),
+        ):
+            native_apply(
+                self.source_path,
+                self.apply_session,
+                self.audit,
+                self.plan,
+                self.intent,
+                self.config,
+                confirm_plan=self.plan["plan_id"],
+                output_path=output,
+                verification_path=verification,
+            )
+        self.assertTrue(output.exists())
+        self.assertTrue(verification.exists())
+        self.assertNotEqual(self.source_path.read_bytes(), output.read_bytes())
 
     def test_unbound_external_replacement_publishes_nothing(self) -> None:
         """A saved filename alone cannot authorize a replacement DWG."""
