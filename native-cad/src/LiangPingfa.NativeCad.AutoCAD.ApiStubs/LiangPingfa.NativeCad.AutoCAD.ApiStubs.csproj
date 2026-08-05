@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>LiangPingfa.NativeCad.AutoCAD.ApiStubs</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.AutoCAD.ApiStubs</RootNamespace>
+    <Description>SYNTAX-ONLY, non-deployable original API declarations for a future adapter.</Description>
+    <!-- Compilation artifacts exist only long enough for syntax checks. -->
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <GeneratePublishDependencyFile>false</GeneratePublishDependencyFile>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <NativeCadPolicyMode>syntax-only-stub</NativeCadPolicyMode>
+  </PropertyGroup>
+  <Target Name="RejectSyntaxOnlyStubPack" BeforeTargets="Pack">
+    <Error Text="LiangPingfa.NativeCad.AutoCAD.ApiStubs is syntax-only and cannot be packed or deployed." />
+  </Target>
+  <Target Name="RejectSyntaxOnlyStubPublish" BeforeTargets="Publish">
+    <Error Text="LiangPingfa.NativeCad.AutoCAD.ApiStubs is syntax-only and cannot be published or deployed." />
+  </Target>
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>
