@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>LiangPingfa.NativeCad.Core</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.Core</RootNamespace>
+    <Description>SDK-free vendor-neutral generated CAD transaction core.</Description>
+    <NativeCadPolicyMode>checkpoint-1-core</NativeCadPolicyMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LiangPingfa.NativeCad.Protocol\LiangPingfa.NativeCad.Protocol.csproj" />
+  </ItemGroup>
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>
