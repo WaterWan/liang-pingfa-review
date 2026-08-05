@@ -22,7 +22,7 @@
     "output_target_path_fingerprint": {"$ref": "#/$defs/sha256"},
     "environment": {"$ref": "#/$defs/environment"},
     "expected_prewrite_revision": {"$ref": "#/$defs/prewriteRevision"},
-    "preconditions_geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216, "description": "Opaque serialized geometry JSON carrier at this exact manifest path. Its exact UTF-8 bytes are capped at 16777216 before outer NFC; separately parsed inner JSON remains canonical/NFC and schema-validated. maxLength is a secondary Unicode code-point bound."},
+    "preconditions_geometry_json": {"type": "string", "minLength": 2, "maxLength": 16777216},
     "preconditions_geometry_sha256": {"$ref": "#/$defs/sha256"},
     "operations": {"type": "array", "minItems": 1, "maxItems": 2000, "items": {"oneOf": [{"$ref": "#/$defs/translate"}, {"$ref": "#/$defs/delete"}, {"$ref": "#/$defs/marker"}]}},
     "record_cardinality": {"const": "explicit_private"},
