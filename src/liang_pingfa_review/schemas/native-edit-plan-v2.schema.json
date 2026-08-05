@@ -1,0 +1,431 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/native-edit-plan/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "plan_id",
+    "created_at",
+    "audit_binding",
+    "intent_sha256",
+    "source_binding",
+    "adapter_binding",
+    "native_host_binding",
+    "stable_host_binding_digest",
+    "marker_policy_binding",
+    "geometry_document_binding_digest",
+    "protected_state_digest",
+    "operation_profiles",
+    "operations",
+    "record_cardinality",
+    "integrity",
+    "intent_schema_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "liang-pingfa/native-edit-plan/v2"
+    },
+    "plan_id": {
+      "$ref": "#/$defs/planId"
+    },
+    "created_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "audit_binding": {
+      "$ref": "#/$defs/auditBinding"
+    },
+    "intent_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_binding": {
+      "$ref": "#/$defs/sourceBinding"
+    },
+    "adapter_binding": {
+      "$ref": "#/$defs/adapterBinding"
+    },
+    "native_host_binding": {
+      "$ref": "#/$defs/sha256"
+    },
+    "stable_host_binding_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "marker_policy_binding": {
+      "$ref": "#/$defs/markerPolicyBinding"
+    },
+    "geometry_document_binding_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "protected_state_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "operation_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "translate_dbtext/v1",
+          "delete_auxiliary_overlay_text/v1",
+          "create_review_marker/v1"
+        ]
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    },
+    "record_cardinality": {
+      "const": "explicit_private"
+    },
+    "integrity": {
+      "$ref": "#/$defs/integrity"
+    },
+    "intent_schema_version": {
+      "const": "liang-pingfa/native-edit-intent/v2"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^native-plan-[a-f0-9]{32}$"
+    },
+    "auditId": {
+      "type": "string",
+      "pattern": "^native-audit-[a-f0-9]{32}$"
+    },
+    "targetId": {
+      "type": "string",
+      "pattern": "^native-target-[a-f0-9]{24}$"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^native-operation-[a-f0-9]{24}$"
+    },
+    "auditBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_id",
+        "audit_integrity_sha256",
+        "audit_schema_version"
+      ],
+      "properties": {
+        "audit_id": {
+          "$ref": "#/$defs/auditId"
+        },
+        "audit_integrity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "audit_schema_version": {
+          "const": "liang-pingfa/native-audit/v2"
+        }
+      }
+    },
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "path_fingerprint",
+        "file_identity_fingerprint"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "path_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "file_identity_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "adapterBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_id",
+        "adapter_profile",
+        "adapter_version",
+        "plugin_id",
+        "plugin_version",
+        "plugin_fingerprint",
+        "host_executable_fingerprint",
+        "protocol_major",
+        "protocol_minor",
+        "capabilities_digest"
+      ],
+      "properties": {
+        "adapter_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "adapter_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "plugin_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "plugin_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "plugin_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "host_executable_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "protocol_major": {
+          "const": 1
+        },
+        "protocol_minor": {
+          "const": 0
+        },
+        "capabilities_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "markerPolicyBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "profile",
+        "profile_enabled",
+        "enabled",
+        "plugin_capability",
+        "layer",
+        "style",
+        "layer_fingerprint",
+        "style_fingerprint",
+        "height_bits",
+        "rotation_bits",
+        "text_prefix",
+        "text_derivation_version",
+        "geometry_defaults"
+      ],
+      "properties": {
+        "policy_version": {
+          "const": "marker-policy/v1"
+        },
+        "profile": {
+          "const": "create_review_marker/v1"
+        },
+        "profile_enabled": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "plugin_capability": {
+          "type": "boolean"
+        },
+        "layer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "style": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "layer_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "style_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "height_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "rotation_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "text_prefix": {
+          "const": "LPF-REVIEW-"
+        },
+        "text_derivation_version": {
+          "const": "operation-id-suffix/v1"
+        },
+        "geometry_defaults": {
+          "$ref": "#/$defs/markerGeometryDefaults"
+        }
+      }
+    },
+    "markerGeometryDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "space_kind",
+        "block_path",
+        "overlay_evidence"
+      ],
+      "properties": {
+        "space_kind": {
+          "const": "modelspace"
+        },
+        "block_path": {
+          "type": "array",
+          "maxItems": 0,
+          "items": false
+        },
+        "overlay_evidence": {
+          "$ref": "#/$defs/markerOverlayEvidence"
+        }
+      }
+    },
+    "markerOverlayEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_content",
+        "left_panel",
+        "corresponding_right_absent",
+        "visible_interference",
+        "unsupported_data"
+      ],
+      "properties": {
+        "unique_content": {
+          "const": false
+        },
+        "left_panel": {
+          "const": false
+        },
+        "corresponding_right_absent": {
+          "const": false
+        },
+        "visible_interference": {
+          "const": false
+        },
+        "unsupported_data": {
+          "const": true
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "kind",
+        "profile",
+        "target_id",
+        "expected_before_geometry_fingerprint",
+        "expected_before_opaque_state_digest",
+        "allowed_delta_digest",
+        "postcondition"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/operationId"
+        },
+        "kind": {
+          "enum": [
+            "translate_dbtext",
+            "delete_auxiliary_overlay_text",
+            "create_review_marker"
+          ]
+        },
+        "profile": {
+          "enum": [
+            "translate_dbtext/v1",
+            "delete_auxiliary_overlay_text/v1",
+            "create_review_marker/v1"
+          ]
+        },
+        "target_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/targetId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_before_geometry_fingerprint": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_before_opaque_state_digest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allowed_delta_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "postcondition": {
+          "enum": [
+            "translated-exactly",
+            "target-absent",
+            "one-derived-marker"
+          ]
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "sha256"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "SHA-256"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}
