@@ -23,12 +23,18 @@ from .native_bridge import (
     NativeInstallationLeases,
     acquire_native_installation_leases,
 )
-from .native_contracts import load_native_json_value, validate_native_contract
+from .native_contracts import (
+    load_native_json_value,
+    require_active_native_contract,
+)
+from .native_protocol import MAX_NATIVE_CONSOLE_RESULT_BYTES
 from .temporary import PrivateWorkspace
 
 
 _MAX_CONSOLE_STREAM_BYTES = 64 * 1024
-_MAX_CONSOLE_RESULT_BYTES = 256 * 1024
+# Retain the private spelling for compatibility with focused launcher tests,
+# but keep the public protocol constant authoritative.
+_MAX_CONSOLE_RESULT_BYTES = MAX_NATIVE_CONSOLE_RESULT_BYTES
 _MAX_CONSOLE_EXPORT_BYTES = 32 * 1024 * 1024
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -794,9 +800,9 @@ def run_core_console(
 ) -> CoreConsoleOutcome:
     """Run one bounded external console process against one private DWG only."""
 
+    checked = require_active_native_contract("config", config)
     if os.name != "nt":
         raise PipelineError(ErrorCode.WINDOWS_PLATFORM_REQUIRED, "Core Console is Windows-only")
-    checked = validate_native_contract("config", config)
     owned_component_leases = component_leases is None
     leases = component_leases or acquire_native_installation_leases(checked)
     installations = leases.paths
@@ -927,7 +933,7 @@ def run_core_console(
                 if mode == "write"
                 else _MAX_CONSOLE_EXPORT_BYTES
             ),
-            consume=lambda raw_result: validate_native_contract(
+            consume=lambda raw_result: require_active_native_contract(
                 "console_result" if mode == "write" else "console_export",
                 load_native_json_value(
                     "console_result" if mode == "write" else "console_export",

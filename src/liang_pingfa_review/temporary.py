@@ -433,13 +433,16 @@ class PrivateWorkspace:
         path: Path,
         *,
         allow_replacement: bool,
+        allow_content_change: bool = False,
     ) -> OwnedPath:
         """Lease a known external-save target only after private validation.
 
         A write-mode Core Console is the sole caller allowed to replace its
-        pre-registered DWG.  Readback callers must retain the same exact
-        identity; both paths receive a read-only sharing lease before any
-        bytes, header, result, or publication path can inspect the file.
+        pre-registered DWG. A same-identity save may still change content, so
+        callers explicitly opt into that narrower transition without thereby
+        allowing an identity replacement. Both paths receive a read-only
+        sharing lease before any bytes, header, result, or publication path
+        can inspect the file.
         """
 
         normalized = self._normalize_child(path)
@@ -453,11 +456,18 @@ class PrivateWorkspace:
         try:
             opened = self._backend.open_existing_file_read_lease(normalized)
             binding = self._validate_opened_private_file(normalized, opened)
-            if (
-                not allow_replacement
-                and not binding.same_identity_and_content(previous)
-            ):
-                raise OwnershipLostError("external workspace file replacement is not allowed")
+            if not allow_replacement:
+                if binding.identity != previous.identity:
+                    raise OwnershipLostError(
+                        "external workspace file identity replacement is not allowed"
+                    )
+                if (
+                    not allow_content_change
+                    and not binding.same_identity_and_content(previous)
+                ):
+                    raise OwnershipLostError(
+                        "external workspace file content change is not allowed"
+                    )
             return opened
         except (OSError, OwnershipError) as error:
             if opened is not None:
@@ -694,6 +704,7 @@ class PrivateWorkspace:
         *,
         opened: OwnedPath | None = None,
         allow_replacement: bool = False,
+        allow_content_change: bool = False,
         expected_binding: OwnedPathBinding | None = None,
     ) -> Path:
         """Refresh one known private file after an approved external process.
@@ -701,8 +712,9 @@ class PrivateWorkspace:
         Most workspace files are immutable after their creator seals them.
         Native Core Console is the narrow exception: it is intentionally
         allowed to save only the already registered private DWG copy. A
-        caller must opt in to replacement explicitly, and only after its
-        retained read lease has proven trusted owner, exact private DACL,
+        caller must opt in to replacement explicitly; a same-identity content
+        transition is a separate explicit opt-in. Both modes require a
+        retained read lease proving trusted owner, exact private DACL,
         regular-file identity, and stable bytes. It never adopts an unknown
         sidecar or a path outside the private root.
         """
@@ -723,11 +735,18 @@ class PrivateWorkspace:
                 opened,
                 expected_binding=expected_binding,
             )
-            if (
-                not allow_replacement
-                and not binding.same_identity_and_content(previous)
-            ):
-                raise OwnershipLostError("external workspace file replacement is not allowed")
+            if not allow_replacement:
+                if binding.identity != previous.identity:
+                    raise OwnershipLostError(
+                        "external workspace file identity replacement is not allowed"
+                    )
+                if (
+                    not allow_content_change
+                    and not binding.same_identity_and_content(previous)
+                ):
+                    raise OwnershipLostError(
+                        "external workspace file content change is not allowed"
+                    )
         except (OSError, OwnershipError) as error:
             raise _cleanup_pipeline_error(error) from error
         finally:
