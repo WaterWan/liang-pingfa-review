@@ -56,6 +56,9 @@ from .ownership import (
 from .native_protocol import (
     CONNECT_TIMEOUT_SECONDS,
     CONSOLE_TIMEOUT_SECONDS,
+    MAX_NATIVE_CONSOLE_RESULT_BYTES,
+    MAX_NATIVE_CONSOLE_RESULT_CANONICAL_BYTES,
+    MAX_NATIVE_OPERATION_COUNT,
     METHOD_TIMEOUT_CONFIG_KEYS,
     METHOD_TIMEOUT_SECONDS,
     PROTOCOL_MAJOR,
@@ -99,19 +102,97 @@ _NATIVE_SESSION_UPTIME_PATTERN: Final = re.compile(r"^(?:0|[1-9][0-9]{0,19})$")
 _NATIVE_SESSION_BOOT_ID_PATTERN: Final = re.compile(r"^[a-f0-9]{32}$")
 
 _SCHEMA_FILES: dict[NativeSchemaKind, str] = {
-    "config": "native-adapter-config-v1.schema.json",
+    # The wire protocol is genuinely frozen at v1.  Its envelopes do not
+    # acquire session-lifetime or write-authorization fields.
     "request": "native-bridge-request-v1.schema.json",
     "response": "native-bridge-response-v1.schema.json",
-    "inventory": "native-inventory-export-v1.schema.json",
-    "session": "native-bridge-session-v1.schema.json",
-    "geometry": "native-geometry-export-v1.schema.json",
-    "audit": "native-audit-v1.schema.json",
-    "intent": "native-edit-intent-v1.schema.json",
-    "plan": "native-edit-plan-v1.schema.json",
-    "manifest": "native-edit-manifest-v1.schema.json",
-    "console_result": "native-console-result-v1.schema.json",
-    "console_export": "native-console-export-v1.schema.json",
-    "verification": "native-verification-v1.schema.json",
+    # Every active persisted/native-workflow artifact uses an explicit v2
+    # namespace.  v1 files are retained only by _SUPPORTED_SCHEMA_FILES for
+    # legacy validation, reporting, and deliberately narrow migration.
+    "config": "native-adapter-config-v2.schema.json",
+    "inventory": "native-inventory-export-v2.schema.json",
+    "session": "native-bridge-session-v2.schema.json",
+    "geometry": "native-geometry-export-v2.schema.json",
+    "audit": "native-audit-v2.schema.json",
+    "intent": "native-edit-intent-v2.schema.json",
+    "plan": "native-edit-plan-v2.schema.json",
+    "manifest": "native-edit-manifest-v2.schema.json",
+    "console_result": "native-console-result-v2.schema.json",
+    "console_export": "native-console-export-v2.schema.json",
+    "verification": "native-verification-v2.schema.json",
+}
+
+_ACTIVE_SCHEMA_VERSIONS: Final[dict[NativeSchemaKind, str]] = {
+    "config": "liang-pingfa/native-adapter-config/v2",
+    "request": "liang-pingfa/native-bridge/v1",
+    "response": "liang-pingfa/native-bridge/v1",
+    "inventory": "liang-pingfa/native-inventory-export/v2",
+    "session": "liang-pingfa/native-bridge-session/v2",
+    "geometry": "liang-pingfa/native-geometry-export/v2",
+    "audit": "liang-pingfa/native-audit/v2",
+    "intent": "liang-pingfa/native-edit-intent/v2",
+    "plan": "liang-pingfa/native-edit-plan/v2",
+    "manifest": "liang-pingfa/native-edit-manifest/v2",
+    "console_result": "liang-pingfa/native-console-result/v2",
+    "console_export": "liang-pingfa/native-console-export/v2",
+    "verification": "liang-pingfa/native-verification/v2",
+}
+
+_VERSION_FIELD_BY_KIND: Final[dict[NativeSchemaKind, str]] = {
+    "request": "protocol_version",
+    "response": "protocol_version",
+}
+
+_SUPPORTED_SCHEMA_FILES: Final[dict[NativeSchemaKind, dict[str, str]]] = {
+    "config": {
+        "liang-pingfa/native-adapter-config/v1": "native-adapter-config-v1.schema.json",
+        "liang-pingfa/native-adapter-config/v2": "native-adapter-config-v2.schema.json",
+    },
+    "request": {
+        "liang-pingfa/native-bridge/v1": "native-bridge-request-v1.schema.json",
+    },
+    "response": {
+        "liang-pingfa/native-bridge/v1": "native-bridge-response-v1.schema.json",
+    },
+    "inventory": {
+        "liang-pingfa/native-inventory-export/v2": "native-inventory-export-v2.schema.json",
+    },
+    "session": {
+        "liang-pingfa/native-bridge-session/v1": "native-bridge-session-v1.schema.json",
+        "liang-pingfa/native-bridge-session/v2": "native-bridge-session-v2.schema.json",
+    },
+    "geometry": {
+        "liang-pingfa/native-geometry-export/v1": "native-geometry-export-v1.schema.json",
+        "liang-pingfa/native-geometry-export/v2": "native-geometry-export-v2.schema.json",
+    },
+    "audit": {
+        "liang-pingfa/native-audit/v1": "native-audit-v1.schema.json",
+        "liang-pingfa/native-audit/v2": "native-audit-v2.schema.json",
+    },
+    "intent": {
+        "liang-pingfa/native-edit-intent/v1": "native-edit-intent-v1.schema.json",
+        "liang-pingfa/native-edit-intent/v2": "native-edit-intent-v2.schema.json",
+    },
+    "plan": {
+        "liang-pingfa/native-edit-plan/v1": "native-edit-plan-v1.schema.json",
+        "liang-pingfa/native-edit-plan/v2": "native-edit-plan-v2.schema.json",
+    },
+    "manifest": {
+        "liang-pingfa/native-edit-manifest/v1": "native-edit-manifest-v1.schema.json",
+        "liang-pingfa/native-edit-manifest/v2": "native-edit-manifest-v2.schema.json",
+    },
+    "console_result": {
+        "liang-pingfa/native-console-result/v1": "native-console-result-v1.schema.json",
+        "liang-pingfa/native-console-result/v2": "native-console-result-v2.schema.json",
+    },
+    "console_export": {
+        "liang-pingfa/native-console-export/v1": "native-console-export-v1.schema.json",
+        "liang-pingfa/native-console-export/v2": "native-console-export-v2.schema.json",
+    },
+    "verification": {
+        "liang-pingfa/native-verification/v1": "native-verification-v1.schema.json",
+        "liang-pingfa/native-verification/v2": "native-verification-v2.schema.json",
+    },
 }
 _ARTIFACT_ERRORS: dict[NativeArtifactKind, ErrorCode] = {
     "session": ErrorCode.NATIVE_SESSION_INVALID,
@@ -124,22 +205,10 @@ _ARTIFACT_ERRORS: dict[NativeArtifactKind, ErrorCode] = {
     "console_export": ErrorCode.NATIVE_READBACK_INVALID,
     "verification": ErrorCode.NATIVE_VERIFICATION_INVALID,
 }
-_SCHEMA_VERSIONS: dict[NativeArtifactKind, str] = {
-    "session": "liang-pingfa/native-bridge-session/v1",
-    "geometry": "liang-pingfa/native-geometry-export/v1",
-    "audit": "liang-pingfa/native-audit/v1",
-    "intent": "liang-pingfa/native-edit-intent/v1",
-    "plan": "liang-pingfa/native-edit-plan/v1",
-    "manifest": "liang-pingfa/native-edit-manifest/v1",
-    "console_result": "liang-pingfa/native-console-result/v1",
-    "console_export": "liang-pingfa/native-console-export/v1",
-    "verification": "liang-pingfa/native-verification/v1",
-}
-
 # The original 100k/250k envelope allowed valid responses to outlive the
-# fixed 60-second RPC budget on ordinary CI hardware.  These v1 caps leave a
-# generous margin for the validated 623-entity scenario while keeping every
-# full canonical/schema/semantic pass bounded below that deadline.
+# fixed 60-second RPC budget on ordinary CI hardware.  Geometry's published
+# v1 bounds remain readable; active v2 preserves these conservative geometry
+# bounds while reducing mutable operation cardinality to fit result transport.
 MAX_NATIVE_GEOMETRY_ENTITIES: Final = 2_000
 MAX_NATIVE_GEOMETRY_SEGMENTS: Final = 10_000
 # This is a UTF-8 *byte* ceiling, not a JSON Schema ``maxLength`` ceiling.
@@ -158,6 +227,7 @@ MAX_NATIVE_ENTITIES: Final = MAX_NATIVE_GEOMETRY_ENTITIES
 MAX_NATIVE_SEGMENTS: Final = MAX_NATIVE_GEOMETRY_SEGMENTS
 MAX_TRANSLATION = 1_000_000.0
 PRIVATE_RECORD_CARDINALITY: Final = "explicit_private"
+MAX_NATIVE_LEGACY_OPERATION_COUNT: Final = 2_000
 _SCHEMA_CHECKPOINT_INTERVAL: Final = 64
 _GEOMETRY_UTF8_SCAN_CHARACTERS: Final = 16 * 1024
 NATIVE_OPAQUE_EMBEDDED_JSON_RULES: Final[
@@ -190,6 +260,39 @@ _PRIVATE_PERSISTED_KINDS: Final[frozenset[NativeSchemaKind]] = frozenset(
         "verification",
     }
 )
+
+
+def canonical_console_result_bytes(result: Mapping[str, Any]) -> bytes:
+    """Return the exact bytes consumed by the bounded Console result reader.
+
+    The outer result has no opaque carrier path, so ordinary canonical JSON is
+    both the integrity representation and the byte budget representation.
+    Keeping this helper here lets builders, validators, and tests use the
+    same calculation instead of inferring a safe operation count.
+    """
+
+    return canonical_json_bytes(dict(result))
+
+
+def require_console_result_transport_budget(result: Mapping[str, Any]) -> None:
+    """Reject a result whose canonical bytes consume the reserved headroom.
+
+    The external reader remains capped at ``MAX_NATIVE_CONSOLE_RESULT_BYTES``.
+    Valid success and failure envelopes must stay below the smaller canonical
+    budget so logging, a terminal LF, and transport framing cannot make a
+    schema-valid result unreadable.
+    """
+
+    try:
+        length = len(canonical_console_result_bytes(result))
+    except (CanonicalJsonError, TypeError, ValueError) as error:
+        raise ValueError("native console result cannot be canonicalized") from error
+    if length > MAX_NATIVE_CONSOLE_RESULT_CANONICAL_BYTES:
+        raise ValueError(
+            "native console result exceeds the fixed transport budget "
+            f"({length}>{MAX_NATIVE_CONSOLE_RESULT_CANONICAL_BYTES}; "
+            f"hard cap {MAX_NATIVE_CONSOLE_RESULT_BYTES})"
+        )
 
 
 def opaque_embedded_json_rules(kind: NativeSchemaKind) -> OpaqueJsonStringRules:
@@ -435,13 +538,20 @@ def _error_for(kind: NativeSchemaKind) -> ErrorCode:
     return _ARTIFACT_ERRORS[kind]
 
 
-def schema_for_native(kind: NativeSchemaKind) -> dict[str, Any]:
+def schema_for_native(
+    kind: NativeSchemaKind,
+    *,
+    schema_version: str | None = None,
+) -> dict[str, Any]:
     """Load one packaged Draft 2020-12 schema without filesystem discovery."""
 
     try:
+        filename = _SCHEMA_FILES[kind]
+        if schema_version is not None:
+            filename = _SUPPORTED_SCHEMA_FILES[kind][schema_version]
         text = (
             resources.files("liang_pingfa_review.schemas")
-            .joinpath(_SCHEMA_FILES[kind])
+            .joinpath(filename)
             .read_text(encoding="utf-8")
         )
         schema = strict_json_loads(text)
@@ -461,6 +571,65 @@ def schema_for_native(kind: NativeSchemaKind) -> dict[str, Any]:
     if not isinstance(schema, dict):
         raise PipelineError(ErrorCode.INTERNAL_ERROR, "native schema is not an object")
     return schema
+
+
+def native_contract_schema_version(
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+) -> str:
+    """Return the version token that selects one exact packaged schema.
+
+    Native wire envelopes deliberately retain their frozen v1
+    ``protocol_version`` field.  Every persisted artifact uses
+    ``schema_version``.  Keeping this selection in one place prevents a
+    caller from validating a v1 object with an active v2 schema merely
+    because both have similar field names.
+    """
+
+    field = _VERSION_FIELD_BY_KIND.get(kind, "schema_version")
+    version = artifact.get(field)
+    if not isinstance(version, str):
+        raise PipelineError(_error_for(kind), "native schema namespace is missing")
+    return version
+
+
+def is_active_native_contract(
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+) -> bool:
+    """Return whether an already decoded artifact is in the active namespace."""
+
+    return native_contract_schema_version(kind, artifact) == _ACTIVE_SCHEMA_VERSIONS[
+        kind
+    ]
+
+
+def require_active_native_contract(
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+    *,
+    deadline_check: _DeadlineCheck | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate an active v2 artifact or reject a frozen v1 read artifact.
+
+    This is deliberately separate from :func:`validate_native_contract`.
+    Legacy callers need to inspect and report v1 evidence, while every
+    execution boundary must fail with one stable, non-reinterpreting code.
+    """
+
+    checked = validate_native_contract(
+        kind,
+        artifact,
+        deadline_check=deadline_check,
+        now=now,
+    )
+    if not is_active_native_contract(kind, checked):
+        raise PipelineError(
+            ErrorCode.NATIVE_LEGACY_ARTIFACT_READ_ONLY,
+            "published native v1 artifacts require a fresh v2 audit/session",
+        )
+    return checked
 
 
 def _require_mapping(value: Any, kind: NativeSchemaKind) -> dict[str, Any]:
@@ -670,7 +839,10 @@ def _validate_schema(
         validate_json_nesting(artifact, deadline_check=deadline_check)
         validator = _deadline_aware_validator(
             kind,
-            schema_for_native(kind),
+            schema_for_native(
+                kind,
+                schema_version=native_contract_schema_version(kind, artifact),
+            ),
             deadline_check=deadline_check,
         )
         # Native callers expose one redacted validation outcome, not a sorted
@@ -722,11 +894,10 @@ def _validate_common(
     except ValueError as error:
         raise PipelineError(_error_for(kind), "native contract is non-canonical") from error
     _check_deadline(deadline_check, f"{kind} canonical validation")
-    _validate_schema(kind, normalized, deadline_check=deadline_check)
-    if kind in _SCHEMA_VERSIONS and normalized.get("schema_version") != _SCHEMA_VERSIONS[
-        cast(NativeArtifactKind, kind)
-    ]:
+    schema_version = native_contract_schema_version(kind, normalized)
+    if schema_version not in _SUPPORTED_SCHEMA_FILES[kind]:
         raise PipelineError(_error_for(kind), "native schema namespace mismatch")
+    _validate_schema(kind, normalized, deadline_check=deadline_check)
     return normalized
 
 
@@ -923,6 +1094,7 @@ def prewrite_revision_binding(
     export: Mapping[str, Any],
     *,
     native_host_binding_value: str,
+    stable_host_binding_digest: str,
     audited_semantic_state_digest: str,
 ) -> dict[str, Any]:
     """Project every pre-write invariant without predicting a future revision.
@@ -948,6 +1120,7 @@ def prewrite_revision_binding(
         "document_state_digest": document["document_state_digest"],
         "adapter_binding": geometry_adapter_binding(export),
         "native_host_binding": native_host_binding_value,
+        "stable_host_binding_digest": stable_host_binding_digest,
         "audited_semantic_state_digest": audited_semantic_state_digest,
     }
 
@@ -1002,7 +1175,10 @@ def _stable_geometry_host_binding_digest(
             "host_executable_fingerprint": process["executable_fingerprint"],
             "adapter": dict(adapter),
             "plugin": dict(plugin),
-            "capabilities": list(capabilities),
+            # Capability membership is stable; list ordering is an
+            # ephemeral adapter serialization detail. The C# typed context
+            # canonicalizes this set before calculating the same digest.
+            "capabilities": sorted(capabilities),
         }
     )
 
@@ -1019,6 +1195,35 @@ def native_geometry_host_binding_digest(session: Mapping[str, Any]) -> str:
         adapter=cast(Mapping[str, Any], session["adapter"]),
         plugin=cast(Mapping[str, Any], session["plugin"]),
         capabilities=cast(list[str], session["capabilities"]),
+    )
+
+
+def native_execution_stable_host_binding_digest(
+    geometry: Mapping[str, Any],
+    marker_policy: Mapping[str, Any],
+) -> str:
+    """Return the save/readback-stable host projection shared with C#.
+
+    It retains protocol, complete host identity including executable
+    fingerprint, adapter/profile/version, plugin identity, capability set,
+    and every output-affecting marker-policy field. Session/PID/pipe/nonces,
+    database instance, and revision intentionally do not participate.
+    """
+
+    binding = cast(Mapping[str, Any], geometry["binding"])
+    process = cast(Mapping[str, Any], binding["process"])
+    return canonical_sha256(
+        {
+            "protocol_version": binding["protocol_version"],
+            "protocol_major": binding["protocol_major"],
+            "protocol_minor": binding["protocol_minor"],
+            "host": dict(cast(Mapping[str, Any], binding["host"])),
+            "host_executable_fingerprint": process["executable_fingerprint"],
+            "adapter": dict(cast(Mapping[str, Any], binding["adapter"])),
+            "plugin": dict(cast(Mapping[str, Any], binding["plugin"])),
+            "capabilities": sorted(cast(list[str], binding["capabilities"])),
+            "marker_policy_binding": dict(marker_policy),
+        }
     )
 
 
@@ -1061,12 +1266,12 @@ def require_geometry_export_matches_session(
     RPC client and direct audit/manifest consumers.
     """
 
-    checked_geometry = validate_native_contract(
+    checked_geometry = require_active_native_contract(
         "geometry",
         geometry,
         deadline_check=deadline_check,
     )
-    checked_session = validate_native_contract(
+    checked_session = require_active_native_contract(
         "session",
         session,
         deadline_check=deadline_check,
@@ -1080,13 +1285,15 @@ def require_geometry_export_matches_session(
     _check_deadline(deadline_check, "geometry/session binding validation")
     if (
         checked_geometry["schema_version"]
-        != "liang-pingfa/native-geometry-export/v1"
+        != _ACTIVE_SCHEMA_VERSIONS["geometry"]
         or checked_session["schema_version"]
-        != "liang-pingfa/native-bridge-session/v1"
+        != _ACTIVE_SCHEMA_VERSIONS["session"]
         or binding["protocol_version"] != PROTOCOL_VERSION
         or binding["protocol_major"] != PROTOCOL_MAJOR
         or binding["protocol_minor"] != PROTOCOL_MINOR
         or binding["session_id"] != checked_session["session_id"]
+        or binding["session_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["session"]
         or binding["host"] != checked_session["host"]
         or binding["process"] != _export_process_binding(checked_session)
         or binding["adapter"] != checked_session["adapter"]
@@ -1493,6 +1700,9 @@ def _validate_geometry_semantics(
     expected_protected = canonical_sha256(
         {
             "document_state_digest": expected_document_state,
+            # Owner records are protected host state even when currently
+            # unused by an entity. Preserve their complete canonical order.
+            "owners": artifact["owners"],
             "opaque_state_digests": opaque_state_digests,
         },
         deadline_check=deadline_check,
@@ -1501,6 +1711,7 @@ def _validate_geometry_semantics(
         {
             "container_sequences": container_projection,
             "document_state_digest": expected_document_state,
+            "owners": artifact["owners"],
         },
         deadline_check=deadline_check,
     )
@@ -1516,6 +1727,11 @@ def _validate_geometry_semantics(
     binding = cast(Mapping[str, Any], artifact["binding"])
     if (
         binding["document_binding_digest"] != geometry_document_binding_digest(artifact)
+        or (
+            is_active_native_contract("geometry", artifact)
+            and binding["session_schema_version"]
+            != _ACTIVE_SCHEMA_VERSIONS["session"]
+        )
         or binding["stable_host_binding_digest"]
         != _stable_geometry_host_binding_digest(
             protocol_version=cast(str, binding["protocol_version"]),
@@ -1630,17 +1846,25 @@ def _validate_session_semantics(
     *,
     now: datetime | None = None,
 ) -> None:
+    active = is_active_native_contract("session", artifact)
+    # Frozen descriptors can be read long after their one-use deadline.  For
+    # v1 reporting/migration validation prove the original interval shape but
+    # deliberately do not reinterpret it as a currently live session.
+    created_at = cast(str, artifact["created_at"])
     validate_native_session_temporal_bounds(
-        cast(str, artifact["created_at"]),
+        created_at,
         cast(str, artifact["expires_at"]),
-        now=now,
+        now=now if active else parse_utc(created_at),
     )
-    validate_native_session_monotonic_bounds(
-        artifact["monotonic_clock"],
-        artifact["monotonic_boot_id"],
-        artifact["monotonic_issued"],
-        artifact["monotonic_expires"],
-    )
+    if active:
+        if artifact["config_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["config"]:
+            raise ValueError("native session config schema differs")
+        validate_native_session_monotonic_bounds(
+            artifact["monotonic_clock"],
+            artifact["monotonic_boot_id"],
+            artifact["monotonic_issued"],
+            artifact["monotonic_expires"],
+        )
     if artifact["mode"] != "read_only":
         raise ValueError("native session is not read-only")
     capabilities = cast(list[str], artifact["capabilities"])
@@ -1673,9 +1897,10 @@ def _validate_inventory_semantics(
 
     _check_deadline(deadline_check, "inventory semantic validation")
     if set(artifact) != {
+        "schema_version",
         "document_revision_fingerprint",
         "inventory_digest",
-    }:
+    } or artifact["schema_version"] != _ACTIVE_SCHEMA_VERSIONS["inventory"]:
         raise ValueError("native inventory shape is invalid")
 
 
@@ -1687,6 +1912,12 @@ def _validate_audit_semantics(artifact: dict[str, Any]) -> None:
     records = cast(list[dict[str, Any]], artifact["records"])
     if artifact["record_cardinality"] != PRIVATE_RECORD_CARDINALITY:
         raise ValueError("native audit cardinality claim is false")
+    if is_active_native_contract("audit", artifact) and (
+        artifact["config_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["config"]
+        or artifact["session_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["session"]
+        or artifact["geometry_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["geometry"]
+    ):
+        raise ValueError("native audit version binding differs")
     if records != sorted(records, key=lambda item: cast(str, item["target_id"])):
         raise ValueError("native audit records are not ordered")
     records_by_id = {record["target_id"]: record for record in records}
@@ -1710,9 +1941,43 @@ def _validate_audit_semantics(artifact: dict[str, Any]) -> None:
             raise ValueError("read-only native finding leaks target authorization")
 
 
+def _require_native_operation_count(
+    operations: list[Mapping[str, Any]],
+    *,
+    label: str,
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+) -> None:
+    """Apply the versioned cardinality bound after schema validation.
+
+    Historical v1 plans remain readable at their originally published
+    2,000-operation limit.  Active v2 writes are constrained to 1,024 so a
+    complete result always fits the fixed transport budget.
+    """
+
+    maximum = (
+        MAX_NATIVE_OPERATION_COUNT
+        if is_active_native_contract(kind, artifact)
+        else MAX_NATIVE_LEGACY_OPERATION_COUNT
+    )
+    if not 1 <= len(operations) <= maximum:
+        raise ValueError(f"{label} operation count exceeds the fixed result budget")
+
+
 def _validate_intent_semantics(artifact: dict[str, Any]) -> None:
     operations = cast(list[dict[str, Any]], artifact["operations"])
+    _require_native_operation_count(
+        operations,
+        label="native intent",
+        kind="intent",
+        artifact=artifact,
+    )
     operation_ids = [cast(str, item["operation_id"]) for item in operations]
+    if is_active_native_contract("intent", artifact) and (
+        artifact["audit_binding"]["audit_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["audit"]
+    ):
+        raise ValueError("native intent audit schema differs")
     if len(operation_ids) != len(set(operation_ids)):
         raise ValueError("duplicate native intent operation")
     targets: set[str] = set()
@@ -1749,8 +2014,20 @@ def _validate_intent_semantics(artifact: dict[str, Any]) -> None:
 
 def _validate_plan_semantics(artifact: dict[str, Any]) -> None:
     operations = cast(list[dict[str, Any]], artifact["operations"])
+    _require_native_operation_count(
+        operations,
+        label="native plan",
+        kind="plan",
+        artifact=artifact,
+    )
     if artifact["record_cardinality"] != PRIVATE_RECORD_CARDINALITY:
         raise ValueError("native plan cardinality claim is false")
+    if is_active_native_contract("plan", artifact) and (
+        artifact["audit_binding"]["audit_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["audit"]
+        or artifact["intent_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["intent"]
+    ):
+        raise ValueError("native plan version binding differs")
     ids = [cast(str, item["operation_id"]) for item in operations]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate native plan operation")
@@ -1920,6 +2197,66 @@ def _embedded_inventory(
         raise PipelineError(error, "embedded native inventory is invalid") from exc
 
 
+def _validate_legacy_manifest_semantics(
+    artifact: Mapping[str, Any],
+    geometry: Mapping[str, Any],
+) -> None:
+    """Validate only relationships that existed in published v1.
+
+    This intentionally does not project v2 output constraints, stable-host
+    digests, or session-clock fields into a v1 record.  Such a projection
+    would turn a read path into an unsafe semantic reinterpretation.
+    """
+
+    source = cast(Mapping[str, Any], geometry["source"])
+    document = cast(Mapping[str, Any], geometry["document"])
+    prewrite = cast(Mapping[str, Any], artifact["expected_prewrite_revision"])
+    private_copy = cast(Mapping[str, Any], artifact["private_source_copy"])
+    if (
+        geometry["schema_version"] != "liang-pingfa/native-geometry-export/v1"
+        or artifact["source"] != source
+        or prewrite["source_binding"] != source
+        or prewrite["document_path_fingerprint"] != source["path_fingerprint"]
+        or prewrite["document_file_identity_fingerprint"]
+        != source["file_identity_fingerprint"]
+        or prewrite["document_content_sha256"] != source["sha256"]
+        or prewrite["document_byte_size"] != source["byte_size"]
+        or prewrite["database_instance_fingerprint"]
+        != document["database_instance_fingerprint"]
+        or prewrite["revision_fingerprint"] != document["revision_fingerprint"]
+        or prewrite["geometry_digest"] != document["complete_geometry_digest"]
+        or prewrite["protected_state_digest"] != document["protected_state_digest"]
+        or prewrite["protected_order_digest"] != document["protected_order_digest"]
+        or prewrite["document_state_digest"] != document["document_state_digest"]
+        or prewrite["adapter_binding"] != geometry_adapter_binding(geometry)
+        or prewrite["native_host_binding"] != artifact["native_host_binding"]
+        or prewrite["audited_semantic_state_digest"]
+        != artifact["audit_binding"]["audit_integrity_sha256"]
+        or private_copy["sha256"] != source["sha256"]
+        or private_copy["byte_size"] != source["byte_size"]
+        or not isinstance(private_copy["file_identity_fingerprint"], str)
+    ):
+        raise ValueError("legacy manifest binding differs")
+    renewal = cast(Mapping[str, Any], artifact["session_renewal"])
+    if (
+        renewal["native_host_binding"] != artifact["native_host_binding"]
+        or renewal["audited_session_binding"] == renewal["fresh_session_binding"]
+        or parse_utc(cast(str, renewal["expires_at"]))
+        < parse_utc(cast(str, artifact["expires_at"]))
+    ):
+        raise ValueError("legacy manifest session-renewal proof differs")
+    operations = cast(list[Mapping[str, Any]], artifact["operations"])
+    _require_native_operation_count(
+        operations,
+        label="legacy native manifest",
+        kind="manifest",
+        artifact=artifact,
+    )
+    operation_ids = [operation["operation_id"] for operation in operations]
+    if len(operation_ids) != len(set(operation_ids)):
+        raise ValueError("duplicate legacy manifest operation")
+
+
 def _validate_manifest_semantics(
     artifact: dict[str, Any],
     *,
@@ -1942,19 +2279,66 @@ def _validate_manifest_semantics(
         deadline_check=deadline_check,
     ):
         raise ValueError("manifest geometry digest mismatch")
+    is_v2 = is_active_native_contract("manifest", artifact)
+    if not is_v2:
+        # Frozen v1 manifests are readable historical evidence only. Their
+        # source schema has no final-output constraints, stable-host digest,
+        # or same-boot session binding, so none can be invented during a
+        # legacy parse.
+        _validate_legacy_manifest_semantics(artifact, geometry)
+        return
     prewrite = cast(Mapping[str, Any], artifact["expected_prewrite_revision"])
     source = cast(Mapping[str, Any], geometry["source"])
     document = cast(Mapping[str, Any], geometry["document"])
+    # v2 intentionally binds only the input private copy.  The final file's
+    # hash/size/identity do not exist until SaveAs has completed; only a
+    # narrowly scoped, integrity-covered constraint set can be authored
+    # before execution.
+    prewrite_output = cast(
+        Mapping[str, Any], artifact["expected_prewrite_output_copy_binding"]
+    )
+    constraints = cast(Mapping[str, Any], artifact["final_output_constraints"])
+    original_source = cast(Mapping[str, Any], artifact["source"])
     if (
-        artifact["source"] != source
-        or prewrite["source_binding"] != source
-        or prewrite["document_path_fingerprint"] != source["path_fingerprint"]
+        geometry["schema_version"] != _ACTIVE_SCHEMA_VERSIONS["geometry"]
+        or artifact["audit_binding"]["audit_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["audit"]
+        or artifact["plan_binding"]["plan_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["plan"]
+        or artifact["intent_binding"]["intent_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["intent"]
+        or artifact["session_renewal"]["audited_session_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["session"]
+        or artifact["session_renewal"]["fresh_session_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["session"]
+        or source != prewrite_output
+        or prewrite["source_binding"] != prewrite_output
+        or prewrite["document_path_fingerprint"]
+        != prewrite_output["path_fingerprint"]
         or prewrite["document_file_identity_fingerprint"]
-        != source["file_identity_fingerprint"]
-        or prewrite["document_content_sha256"] != source["sha256"]
-        or prewrite["document_byte_size"] != source["byte_size"]
+        != prewrite_output["file_identity_fingerprint"]
+        or prewrite["document_content_sha256"] != prewrite_output["sha256"]
+        or prewrite["document_byte_size"] != prewrite_output["byte_size"]
+        or original_source["sha256"] != prewrite_output["sha256"]
+        or original_source["byte_size"] != prewrite_output["byte_size"]
+        or original_source["dwg_header_signature"]
+        != prewrite_output["dwg_header_signature"]
+        or original_source["path_fingerprint"]
+        == prewrite_output["path_fingerprint"]
+        or original_source["file_identity_fingerprint"]
+        == prewrite_output["file_identity_fingerprint"]
     ):
-        raise ValueError("manifest source mismatches geometry")
+        raise ValueError("manifest prewrite private-copy binding differs")
+    if (
+        constraints["authorized_private_path_fingerprint"]
+        != prewrite_output["path_fingerprint"]
+        or constraints["required_dwg_header_signature"]
+        != prewrite_output["dwg_header_signature"]
+        or constraints["required_dwg_version"]
+        != constraints["required_dwg_header_signature"]
+        or constraints["max_byte_size"] < 6
+    ):
+        raise ValueError("manifest final-output constraints differ from prewrite")
     if (
         prewrite["database_instance_fingerprint"]
         != document["database_instance_fingerprint"]
@@ -1965,6 +2349,13 @@ def _validate_manifest_semantics(
         or prewrite["document_state_digest"] != document["document_state_digest"]
         or prewrite["adapter_binding"] != geometry_adapter_binding(geometry)
         or prewrite["native_host_binding"] != artifact["native_host_binding"]
+        or prewrite["stable_host_binding_digest"]
+        != artifact["stable_host_binding_digest"]
+        or artifact["stable_host_binding_digest"]
+        != native_execution_stable_host_binding_digest(
+            geometry,
+            cast(Mapping[str, Any], artifact["marker_policy_binding"]),
+        )
         or prewrite["audited_semantic_state_digest"]
         != artifact["audit_binding"]["audit_integrity_sha256"]
     ):
@@ -1980,6 +2371,12 @@ def _validate_manifest_semantics(
     ):
         raise ValueError("manifest session-renewal proof mismatches")
     operation_ids = [operation["operation_id"] for operation in artifact["operations"]]
+    _require_native_operation_count(
+        cast(list[Mapping[str, Any]], artifact["operations"]),
+        label="native manifest",
+        kind="manifest",
+        artifact=artifact,
+    )
     if len(operation_ids) != len(set(operation_ids)):
         raise ValueError("duplicate native manifest operation")
     targets = [
@@ -1995,6 +2392,42 @@ def _validate_manifest_semantics(
         derive_native_target_id(entity): entity
         for entity in cast(list[dict[str, Any]], geometry["entities"])
     }
+    # Marker slots are reservations made from the immutable prewrite
+    # Modelspace projection. They are never recomputed from a prefix where a
+    # delete may already have removed the original maximum sequence index.
+    marker_operations = [
+        operation
+        for operation in cast(list[dict[str, Any]], artifact["operations"])
+        if operation["kind"] == "create_review_marker"
+    ]
+    marker_sequence_reservations: dict[str, int] = {}
+    if marker_operations:
+        direct_modelspace = [
+            entity
+            for entity in cast(list[dict[str, Any]], geometry["entities"])
+            if (
+                entity["space"]["kind"] == "modelspace"
+                and entity["space"]["block_handle"] is None
+                and entity["block_path"] == []
+            )
+        ]
+        if not direct_modelspace:
+            raise ValueError("marker has no direct Modelspace reservation base")
+        maximum_sequence = max(
+            cast(int, entity["sequence_index"]) for entity in direct_modelspace
+        )
+        reserved_slots: set[int] = set()
+        for marker_offset, operation in enumerate(marker_operations):
+            slot = cast(int, operation["sequence_index"])
+            if (
+                slot != maximum_sequence + marker_offset + 1
+                or slot in reserved_slots
+            ):
+                raise ValueError("marker sequence reservation differs from prewrite Modelspace")
+            reserved_slots.add(slot)
+            marker_sequence_reservations[
+                cast(str, operation["operation_id"])
+            ] = slot
     for operation_index, operation in enumerate(
         cast(list[dict[str, Any]], artifact["operations"])
     ):
@@ -2013,10 +2446,32 @@ def _validate_manifest_semantics(
                 cast(str, operation["operation_id"]),
                 marker_policy,
             )
+            direct_modelspace = [
+                entity
+                for entity in cast(list[dict[str, Any]], geometry["entities"])
+                if (
+                    entity["space"]["kind"] == "modelspace"
+                    and entity["space"]["block_handle"] is None
+                    and entity["block_path"] == []
+                )
+            ]
+            direct_containers = {
+                _container_key(entity)
+                for entity in direct_modelspace
+            }
+            direct_owners = {
+                entity["owner_handle"]
+                for entity in direct_modelspace
+            }
             if (
                 operation["marker_text"] != expected
                 or operation["marker_fingerprint"]
                 != native_marker_fingerprint(operation)
+                or operation["owner_handle"] not in geometry["owners"]
+                or len(direct_containers) != 1
+                or len(direct_owners) != 1
+                or operation["owner_handle"] not in direct_owners
+                or _container_key(operation) not in direct_containers
                 or operation["space"]["kind"] != "modelspace"
                 or operation["space"]["kind"] != marker_defaults["space_kind"]
                 or operation["block_path"] != marker_defaults["block_path"]
@@ -2026,14 +2481,26 @@ def _validate_manifest_semantics(
                 or operation["rotation"] != marker_policy["rotation_bits"]
                 or operation["overlay_evidence"]
                 != marker_defaults["overlay_evidence"]
+                or operation["sequence_index"]
+                != marker_sequence_reservations[operation["operation_id"]]
             ):
                 raise ValueError("marker text is not operation-derived")
 
 
 def _validate_console_result_semantics(artifact: dict[str, Any]) -> None:
+    _require_native_operation_count(
+        cast(list[Mapping[str, Any]], artifact["operation_results"]),
+        label="native console result",
+        kind="console_result",
+        artifact=artifact,
+    )
     operation_ids = [item["operation_id"] for item in artifact["operation_results"]]
     if len(operation_ids) != len(set(operation_ids)):
         raise ValueError("duplicate console operation result")
+    if is_active_native_contract("console_result", artifact) and (
+        artifact["manifest_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["manifest"]
+    ):
+        raise ValueError("console result manifest schema differs")
     final = cast(Mapping[str, Any], artifact["final_document_binding"])
     if final["revision_fingerprint"] != artifact["final_revision_fingerprint"]:
         raise ValueError("console result final revision binding differs")
@@ -2062,6 +2529,16 @@ def _validate_console_export_semantics(
         or final["database_instance_fingerprint"]
         != geometry["document"]["database_instance_fingerprint"]
         or final["output_copy_binding"] != geometry["source"]
+        or (
+            is_active_native_contract("console_export", artifact)
+            and (
+                geometry["schema_version"] != _ACTIVE_SCHEMA_VERSIONS["geometry"]
+                or artifact["manifest_schema_version"]
+                != _ACTIVE_SCHEMA_VERSIONS["manifest"]
+                or artifact["console_result_schema_version"]
+                != _ACTIVE_SCHEMA_VERSIONS["console_result"]
+            )
+        )
     ):
         raise ValueError("console export final document binding differs")
 
@@ -2069,9 +2546,28 @@ def _validate_console_export_semantics(
 def _validate_verification_semantics(artifact: dict[str, Any]) -> None:
     if artifact["record_cardinality"] != PRIVATE_RECORD_CARDINALITY:
         raise ValueError("native verification cardinality claim is false")
+    _require_native_operation_count(
+        cast(list[Mapping[str, Any]], artifact["operation_results"]),
+        label="native verification",
+        kind="verification",
+        artifact=artifact,
+    )
     operation_ids = [item["operation_id"] for item in artifact["operation_results"]]
     if len(operation_ids) != len(set(operation_ids)):
         raise ValueError("duplicate native verification operation")
+    if is_active_native_contract("verification", artifact) and (
+        artifact["audit_binding"]["audit_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["audit"]
+        or artifact["plan_binding"]["plan_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["plan"]
+        or artifact["manifest_binding"]["manifest_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["manifest"]
+        or artifact["console_result_binding"]["result_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["console_result"]
+        or artifact["console_export_binding"]["export_schema_version"]
+        != _ACTIVE_SCHEMA_VERSIONS["console_export"]
+    ):
+        raise ValueError("native verification version binding differs")
 
 
 def strict_native_json(
@@ -2179,6 +2675,7 @@ def validate_native_contract(
             )
         elif kind == "console_result":
             _validate_console_result_semantics(normalized)
+            require_console_result_transport_budget(normalized)
         elif kind == "console_export":
             _validate_console_export_semantics(
                 normalized,
@@ -2462,12 +2959,41 @@ def load_native_config(path: Path) -> dict[str, Any]:
                 ErrorCode.NATIVE_CONFIG_INVALID,
                 "native config is invalid",
             ) from error
-        return validate_native_contract("config", loaded)
+        return require_active_native_contract("config", loaded)
 
     return cast(
         dict[str, Any],
         read_private_native_artifact_bytes("config", path, consume=consume),
     )
+
+
+def migrate_native_v1_to_v2(
+    kind: NativeSchemaKind,
+    artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Explicitly migrate the one v1 shape that preserves all v2 semantics.
+
+    Adapter configuration is declarative and its v2 schema only changes the
+    namespace.  Session/audit/plan/manifest/result/readback artifacts are
+    intentionally *not* migrated: their published v1 shapes lack mandatory
+    same-boot, stable-host, or actual-output bindings.  Inventing any of
+    those values would make a legacy read look like fresh authorization.
+    """
+
+    checked = validate_native_contract(kind, artifact)
+    version = native_contract_schema_version(kind, checked)
+    if version == _ACTIVE_SCHEMA_VERSIONS[kind]:
+        return checked
+    if kind != "config" or version != "liang-pingfa/native-adapter-config/v1":
+        raise PipelineError(
+            ErrorCode.NATIVE_LEGACY_ARTIFACT_READ_ONLY,
+            "legacy native artifact requires a fresh v2 audit/session",
+        )
+    migrated = dict(checked)
+    migrated["schema_version"] = _ACTIVE_SCHEMA_VERSIONS["config"]
+    # Config has no integrity carrier. Validate the exact transformed object
+    # rather than accepting a caller-supplied partial projection.
+    return validate_native_contract("config", migrated)
 
 
 def native_artifact_integrity(artifact: Mapping[str, Any]) -> str:

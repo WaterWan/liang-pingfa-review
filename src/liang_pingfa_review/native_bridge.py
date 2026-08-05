@@ -46,6 +46,7 @@ from .native_contracts import (
     native_host_binding,
     opaque_embedded_json_rules,
     require_geometry_export_matches_session,
+    require_active_native_contract,
     strict_native_json,
     validate_native_contract,
     validate_native_session_monotonic_bounds,
@@ -1007,7 +1008,7 @@ def acquire_native_installation_leases(
     """
 
     _require_windows()
-    checked = validate_native_contract("config", config)
+    checked = require_active_native_contract("config", config)
     selected_backend = backend or platform_backend(require_windows=True)
     candidates = {
         "core_console": (checked["core_console"], ".exe"),
@@ -1728,7 +1729,11 @@ class NativeBridgeClient:
         session_clock: NativeSessionClock | None = None,
     ) -> None:
         wall_now = utc_now()
-        self._session = validate_native_contract("session", session, now=wall_now)
+        self._session = require_active_native_contract(
+            "session",
+            session,
+            now=wall_now,
+        )
         self._session_clock = session_clock
         try:
             created, expires = validate_native_session_temporal_bounds(
@@ -1755,7 +1760,7 @@ class NativeBridgeClient:
         self._session_deadline = (
             monotonic_projection_origin + remaining_monotonic / 1000
         )
-        self._config = validate_native_contract("config", config)
+        self._config = require_active_native_contract("config", config)
         # Reject a hand-supplied descriptor that is valid in isolation but is
         # incompatible with the exact configured native host before a pipe can
         # be opened.  Geometry responses then use the same shared binding gate.
@@ -2419,11 +2424,21 @@ class NativeBridgeClient:
                 "inventory binding semantic validation",
             )
             if (
-                set(inventory) != {"document_revision_fingerprint", "inventory_digest"}
+                set(inventory)
+                != {
+                    "schema_version",
+                    "document_revision_fingerprint",
+                    "inventory_digest",
+                }
+                or inventory["schema_version"]
+                != "liang-pingfa/native-inventory-export/v2"
                 or not all(
                     isinstance(inventory[key], str)
                     and _SHA256_PATTERN.fullmatch(inventory[key]) is not None
-                    for key in inventory
+                    for key in (
+                        "document_revision_fingerprint",
+                        "inventory_digest",
+                    )
                 )
                 or inventory["document_revision_fingerprint"]
                 != self._session["current_document"]["revision_fingerprint"]
@@ -2702,7 +2717,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
     ) -> None:
         self._context = context
         self._session_clock = session_clock
-        self._config = validate_native_contract("config", config)
+        self._config = require_active_native_contract("config", config)
         self._validate_context()
         self._transport = transport
         # These fields are the existing protocol client's transport state.
@@ -3151,7 +3166,8 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
             # descriptor sealing was still in progress.
             self._context_monotonic_remaining_milliseconds()
             artifact = {
-                "schema_version": "liang-pingfa/native-bridge-session/v1",
+                "schema_version": "liang-pingfa/native-bridge-session/v2",
+                "config_schema_version": self._config["schema_version"],
                 "session_id": self._context.session_id,
                 "created_at": format_utc(self._context.created_at),
                 "expires_at": format_utc(expires_at),
@@ -3178,7 +3194,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 "current_document": handshake["current_document"],
                 "capabilities": handshake["capabilities"],
             }
-            completed = validate_native_contract(
+            completed = require_active_native_contract(
                 "session",
                 attach_integrity(artifact),
                 now=publication_now,
@@ -3210,10 +3226,13 @@ def prepare_native_session(
     establishes the required no-replace and DACL boundary.
     """
 
+    # Reject a legacy configuration before platform/clock work so it can
+    # never appear to reach an executable session-preparation boundary.
+    checked_config = require_active_native_contract("config", config)
     _require_windows()
-    # Capture both clocks before any configuration, installation, process, or
-    # pipe work. A slow pre-handshake path consumes this one fixed budget; it
-    # can never receive a new five-minute window at descriptor publication.
+    # Capture both clocks before installation, process, or pipe work. A slow
+    # pre-handshake path consumes this one fixed budget; it can never receive
+    # a new five-minute window at descriptor publication.
     created_at = utc_now()
     clock_reading = _read_native_session_clock(session_clock)
     if (
@@ -3231,7 +3250,6 @@ def prepare_native_session(
         + MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
     )
     validate_pipe_name(pipe_name)
-    checked_config = validate_native_contract("config", config)
     validate_native_installation(checked_config)
     identity = inspect_process(pid)
     context = NativeBridgeHandshakeContext(
@@ -3276,8 +3294,12 @@ def write_private_native_session_descriptor(
     and reading back the current-user/SYSTEM-only DACL.
     """
 
+    checked_session = require_active_native_contract(
+        "session",
+        session,
+        now=utc_now(),
+    )
     _require_windows()
-    checked_session = validate_native_contract("session", session, now=utc_now())
     _require_live_persisted_native_session(
         checked_session,
         session_clock=session_clock,
@@ -3575,12 +3597,19 @@ def consume_native_session(
             raise OwnershipLostError("claimed session descriptor owner changed")
         payload = b"".join(opened.read_chunks())
         try:
-            session = validate_native_contract(
+            session = require_active_native_contract(
                 "session",
                 strict_native_json(payload.decode("utf-8", errors="strict")),
                 now=utc_now(),
             )
-        except (UnicodeDecodeError, CanonicalJsonError, PipelineError, RecursionError) as error:
+        except PipelineError as error:
+            if error.code == ErrorCode.NATIVE_LEGACY_ARTIFACT_READ_ONLY:
+                raise
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "claimed session descriptor is invalid",
+            ) from error
+        except (UnicodeDecodeError, CanonicalJsonError, RecursionError) as error:
             raise PipelineError(
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "claimed session descriptor is invalid",
