@@ -1,0 +1,9 @@
+<Project>
+  <!--
+    Directory.Build.targets intentionally carries no security enforcement.
+    Its import can be disabled by an MSBuild global property. The mandatory
+    per-project NativeCad.RepositoryPolicy.targets import is the checkpoint
+    policy boundary and is evaluated even when Directory.Build imports are
+    suppressed.
+  -->
+</Project>

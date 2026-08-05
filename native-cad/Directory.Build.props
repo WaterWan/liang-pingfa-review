@@ -1,0 +1,20 @@
+<Project>
+  <!--
+    Checkpoint 1 is intentionally SDK-free.  Every project below this directory
+    compiles deterministically from the .NET SDK and project-owned source only.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <!-- Numeric wire spelling is explicitly invariant; Unicode NFC requires
+         the runtime globalization tables, so invariant-globalization is not
+         appropriate for this strict protocol project. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <DebugType>portable</DebugType>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+</Project>

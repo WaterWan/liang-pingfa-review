@@ -1,0 +1,40 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiangPingfa.NativeCad.Protocol", "src\LiangPingfa.NativeCad.Protocol\LiangPingfa.NativeCad.Protocol.csproj", "{D69906C9-776A-485B-9F08-A5804A7CFD4A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiangPingfa.NativeCad.Core", "src\LiangPingfa.NativeCad.Core\LiangPingfa.NativeCad.Core.csproj", "{5E3A5E75-8E4F-41C7-A943-399AF30B78B8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiangPingfa.NativeCad.AutoCAD.ApiStubs", "src\LiangPingfa.NativeCad.AutoCAD.ApiStubs\LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj", "{E3D20349-69C7-426B-8FDC-B31E7D7CEB7A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiangPingfa.NativeCad.Core.Tests", "tests\LiangPingfa.NativeCad.Core.Tests\LiangPingfa.NativeCad.Core.Tests.csproj", "{3F227D87-4C90-484C-9DA9-884C38254693}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D69906C9-776A-485B-9F08-A5804A7CFD4A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D69906C9-776A-485B-9F08-A5804A7CFD4A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D69906C9-776A-485B-9F08-A5804A7CFD4A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D69906C9-776A-485B-9F08-A5804A7CFD4A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5E3A5E75-8E4F-41C7-A943-399AF30B78B8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5E3A5E75-8E4F-41C7-A943-399AF30B78B8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5E3A5E75-8E4F-41C7-A943-399AF30B78B8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5E3A5E75-8E4F-41C7-A943-399AF30B78B8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E3D20349-69C7-426B-8FDC-B31E7D7CEB7A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E3D20349-69C7-426B-8FDC-B31E7D7CEB7A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E3D20349-69C7-426B-8FDC-B31E7D7CEB7A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E3D20349-69C7-426B-8FDC-B31E7D7CEB7A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3F227D87-4C90-484C-9DA9-884C38254693}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3F227D87-4C90-484C-9DA9-884C38254693}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3F227D87-4C90-484C-9DA9-884C38254693}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3F227D87-4C90-484C-9DA9-884C38254693}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
