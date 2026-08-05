@@ -21,44 +21,14 @@ public static class NativeBridgeProtocolV1
         "liang-pingfa/native-bridge/challenge-response/v1";
     public const int Major = 1;
     public const int Minor = 0;
-    /// <summary>
-    /// A native session is valid only when its RFC 3339 UTC
-    /// <c>created_at &lt;= current UTC &lt; expires_at</c> interval is no longer
-    /// than this fixed bound. Conforming clients allow no future-clock skew
-    /// and must retain the private preparation-time monotonic deadline after
-    /// validation; they must not create one at handshake or client startup.
-    /// </summary>
-    public const int MaxSessionLifetimeSeconds = 5 * 60;
-    /// <summary>
-    /// Exact lifetime used by the private GetTickCount64 descriptor binding.
-    /// Uptime values remain decimal strings because GetTickCount64 is an
-    /// unsigned 64-bit value and must not lose precision in JSON.
-    /// </summary>
-    public const int MaxSessionLifetimeMilliseconds =
-        MaxSessionLifetimeSeconds * 1000;
-    /// <summary>
-    /// Private same-boot clock domain persisted in a session descriptor.
-    /// The paired boot identifier makes descriptors invalid after reboot.
-    /// </summary>
-    public const string SessionMonotonicClock =
-        "windows-gettickcount64-ms/v1";
     public const int MaxControlResponseBytes = 256 * 1024;
     /// <summary>Outer framed limit for the fixed two-digest inventory result.</summary>
     public const int MaxInventoryResponseBytes = 256 * 1024;
     /// <summary>Outer framed limit for a geometry response carrying escaped JSON.</summary>
     public const int MaxGeometryResponseBytes = 32 * 1024 * 1024;
-    /// <summary>
-    /// Maximum exact opaque geometry JSON inside a response or manifest,
-    /// measured in UTF-8 encoded bytes (not UTF-16 characters or JSON Schema
-    /// code points). Bound the outer carrier before NFC, then parse its inner
-    /// JSON separately as canonical NFC.
-    /// </summary>
+    /// <summary>Maximum unescaped canonical geometry JSON inside a response or manifest.</summary>
     public const int MaxGeometryJsonBytes = 16 * 1024 * 1024;
-    /// <summary>
-    /// Maximum UTF-8 bytes in the exact opaque <c>inventory_json</c> carrier.
-    /// Bound the outer carrier before NFC; parse and validate its inner JSON
-    /// separately, where strings remain canonical NFC.
-    /// </summary>
+    /// <summary>Maximum canonical JSON in the fixed two-digest inventory result.</summary>
     public const int MaxInventoryJsonBytes = 64 * 1024;
     /// <summary>v1 semantic capacity proven below the fixed 60-second RPC deadline.</summary>
     public const int MaxNativeGeometryEntities = 2_000;
@@ -81,18 +51,7 @@ public sealed record NativeBridgeSessionContextV1(
     string BridgeNonce,
     NativeHostIdentityV1 Host,
     string DocumentRevisionFingerprint,
-    IReadOnlyList<string> Capabilities,
-    NativePrivateSessionLifetimeV1 PrivateLifetime);
-
-/// <summary>
-/// Private same-boot lifetime carried only in a local session descriptor.
-/// It is never a wire response, report, event, or public artifact field.
-/// </summary>
-public sealed record NativePrivateSessionLifetimeV1(
-    [property: JsonPropertyName("monotonic_clock")] string MonotonicClock,
-    [property: JsonPropertyName("monotonic_boot_id")] string MonotonicBootId,
-    [property: JsonPropertyName("monotonic_issued")] string MonotonicIssued,
-    [property: JsonPropertyName("monotonic_expires")] string MonotonicExpires);
+    IReadOnlyList<string> Capabilities);
 
 /// <summary>Stable full-host identity; no PID, pipe, nonce, or session ID appears here.</summary>
 public sealed record NativeHostIdentityV1(
@@ -211,12 +170,7 @@ public sealed record NativeManifestExecutionResultV1(
     string RollbackClaim,
     IReadOnlyList<NativeOperationResultV1> Operations);
 
-/// <summary>
-/// Separate post-save envelope that binds the embedded geometry revision.
-/// <paramref name="CanonicalGeometryJson"/> is an exact opaque outer carrier,
-/// limited by <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> UTF-8
-/// bytes before outer NFC. Its separately parsed inner JSON is canonical NFC.
-/// </summary>
+/// <summary>Separate post-save envelope that binds the embedded geometry revision.</summary>
 public sealed record NativeConsoleExportV1(
     string RunId,
     string ManifestId,
@@ -365,20 +319,14 @@ public sealed record NativeCurrentDocumentResultV1(
     [property: JsonPropertyName("current_document")] NativeCurrentDocumentV1 CurrentDocument);
 
 /// <summary>
-/// Exact inventory result. The bridge returns an exact opaque, byte-bounded
-/// <c>inventory_json</c> carrier, not a geometry export. Do not NFC-normalize
-/// the outer carrier; parse its inner JSON separately as canonical NFC.
+/// Exact inventory result.  The bridge intentionally returns the bounded
+/// canonical inventory as <c>inventory_json</c>, not a geometry export.
 /// </summary>
 public sealed record NativeInventoryExportV1(
     [property: JsonPropertyName("kind")] NativeWireResultKindV1 Kind,
     [property: JsonPropertyName("inventory_json")] string InventoryJson);
 
-/// <summary>
-/// Exact bounded geometry result. <c>geometry_json</c> is an opaque outer
-/// carrier whose exact UTF-8 bytes must not exceed
-/// <see cref="NativeBridgeProtocolV1.MaxGeometryJsonBytes"/> before any outer
-/// NFC. Parse its inner JSON separately as canonical NFC.
-/// </summary>
+/// <summary>Exact bounded geometry result, whose canonical JSON stays private.</summary>
 public sealed record NativeExactGeometryExportV1(
     [property: JsonPropertyName("kind")] NativeWireResultKindV1 Kind,
     [property: JsonPropertyName("geometry_json")] string GeometryJson);
