@@ -2,6 +2,26 @@
 
 本原生通道的受支持执行和 CI 平台是 Windows；其他平台未测试且不受支持。
 
+## 原生 v1/v2 版本边界
+
+`c374e6c` 发布的 native v1 schema 和 C# V1 DTO/interface 是不可变的历史读取
+契约。v1 artifact 只能被校验、读取、报告或送入明确迁移检查；任何 native plan、
+apply、Core Console write、readback 或 published-output verify 都必须拒绝它，并返回
+稳定的 `NATIVE_LEGACY_ARTIFACT_READ_ONLY`。不得把 v1 的字段名、预测输出或缺失
+binding 当作 v2 授权。
+
+活动 adapter config、session、geometry、audit、intent、plan、manifest、console result/
+export 和 verification 使用 `liang-pingfa/native-*/v2`。v2 绑定同启动 monotonic
+session、稳定 host、私有 cardinality、2,000 entity/10,000 segment/1,024 operation
+边界、prewrite binding、final-output constraints 与实际输出/readback binding，并在
+plan/manifest/result/export/verification 之间交叉绑定 v2 schema 和 integrity。
+`native-bridge/v1` request/response 仍保留，仅因为其 wire JSON shape 确实冻结；
+这不构成持久 artifact 的 v1 写入兼容承诺。
+
+只有 v1 adapter config 可显式、确定性地改写到同语义的 v2 config。v1 session/audit/
+plan/manifest 等缺少安全字段时必须拒绝迁移，要求 fresh session prepare 和 fresh
+native audit；绝不合成 monotonic、stable-host、prewrite 或 actual-output 值。
+
 ## 范围与非声明
 
 原生 Bridge 是与现有 ODA 两阶段流程完全分离的可选本地通道。仓库只提供
@@ -12,6 +32,43 @@
 或任意图纸的兼容性。外部适配器必须由操作人员单独安装、许可和验证；任何
 事务/回滚字段都是外部 conformance claim，项目只能用保存后的独立导出检查
 可见的精确状态，不能证明其内部实现。
+
+### SDK-free 可执行核心检查点（非宿主证明）
+
+`native-cad` 现提供运行时生成内存数据上的 C# v2 协议/事务核心。它可执行
+固定 manifest 的 `translate_dbtext`、`delete_auxiliary_overlay_text` 和经
+capability/policy 门控的 `create_review_marker`，在一个 vendor-neutral staged
+transaction 中预检、回滚、精确 staged export/readback，再且仅再 commit 一次；
+commit 后核心必须先 dispose transaction，才可调用
+`ICadDatabase.SaveAndReopen()`；只对**新打开**的数据库 export/readback 通过后才由
+executor 内部 verified-readback token 构造 result 或 console export。完整、有序的
+owner state（包括未使用 owner）也是 protected state；增删、重排或替换任一 owner 都会
+失败。save、reopen 或该读回任一
+失败时不得发送成功 result，也不得把已提交的私有副本说成已经 rollback。未来经许可
+adapter 可用 private `SaveAs` 后新的 `Database.ReadDwgFile`，或独立 readback
+process，实现这一 vendor-neutral 边界。它还
+包含项目原创的 `Autodesk.*` **syntax-only** declarations：每个 public nonabstract
+reference-type stub constructor 和可执行成员均立即抛出 `NotSupportedException`。
+struct 保留 CLR 的 default value construction 边界，但其显式 constructor/可执行成员也
+抛出；它们均不可部署、不允许 `dotnet pack` 或 `dotnet publish`，且不提供 runtime
+behavior。
+
+这只证明 SDK-free 核心的生成式模型和严格允许差异，不证明 AutoCAD command、
+document lock、数据库映射、真实 transaction、TSSD、ODA、RealDWG 或任何
+runtime compatibility。实际 AutoCAD adapter 仍是下一检查点；本检查点没有
+加载、复制、反编译或发布厂商 DLL/SDK，也不得把 stub 编译或内存测试写成
+真实宿主集成。
+
+checkpoint 1 的 MSBuild policy 也为 fail-closed：每个 current project 只能有
+精确 root `Project Sdk="Microsoft.NET.Sdk"` 和一个无条件的 allowlisted
+`TargetFramework`；child SDK、`FrameworkReference`、package、`Reference`、
+`HintPath`、Import/UsingTask/Exec/network hooks 及 props/targets/environment
+override 均拒绝。每个 project 文件末尾无条件精确 import
+`NativeCad.RepositoryPolicy.targets`，故 `ImportDirectoryBuildProps=false` 或
+`ImportDirectoryBuildTargets=false` 也不关闭该 policy。未来 adapter 仅可在其自身
+已评审、明确 policy mode/condition 的 ItemGroup
+中讨论三项 proprietary `<Reference>`；这不是当前 exemption，也绝不放宽
+`HintPath`、SDK、package 或 shared props/targets。
 
 ## 明确选择和只读会话
 
@@ -78,7 +135,7 @@ deadline 到达时会调用 `CancelIoEx`、等待取消完成、释放 event 并
 同一个绝对 deadline 还覆盖 UTF-8/嵌套/重复键/NFC/有限数规范化、通用 Draft
 2020-12 schema 迭代、`uniqueItems`、实体/线段和指纹语义检查；这些遍历按固定批次
 checkpoint，超时会报告稳定的 RPC timeout 或 session expired、关闭客户端并释放
-single-flight 锁。v1 固定接受至多 2,000 个实体和全部实体合计 10,000 条线段；
+single-flight 锁。冻结 v1 读取上限保持原样；活动 v2 固定接受至多 2,000 个实体和全部实体合计 10,000 条线段；
 原始 geometry JSON 上限为 16 MiB **UTF-8 字节**，而非 Unicode 代码点/字符数；
 该限制在 bridge、私有导出、audit、manifest、Core Console export 和 readback 的每个
 原始或嵌入 geometry 边界、解析/规范化前执行。JSON Schema 的 `maxLength` 只是次要
@@ -90,8 +147,8 @@ schema 路径的序列化 JSON 值是 outer opaque carrier：先以收到的精�
 UTF-8 bytes 进行字节上限、binding 和 hashing，绝不把整段 carrier 交给 NFC。
 随后才独立解析内部 JSON；内部键和值仍适用深度、重复键、有限数、单标量预 NFC
 上限、canonical NFC、schema、语义和同一绝对 RPC deadline。相同名称的任意嵌套
-攻击者字段不享有该例外。此前有效的 canonical 内部 JSON 保持相同 v1 artifact
-bytes/hash，因此不需要迁移或静默重解释持久工件。
+攻击者字段不享有该例外。历史 v1 artifact 只按冻结 schema 读取，绝不静默迁移或
+重解释为 v2 write authorization。
 外部 server conformance 必须拒绝远程客户端、使用单一首实例、仅向当前用户和
 SYSTEM 授权的 DACL，并在服务端核验客户端 PID/SID/Windows 会话；项目客户端
 核验本地管道与 `GetNamedPipeServerProcessId`。这些措施防止意外错连，不把
@@ -164,11 +221,33 @@ SID 或该链上 Everyone/Users 的显式或继承写入 ACE 视为受信。
 manifest 路径仅经一个私有环境变量传递。没有 UI、Editor prompt、鼠标、
 键盘、焦点、窗口发现、SendKeys、动态命令或脚本。写入超时为 120 秒，读回
 超时为 60 秒，标准输出/错误均有固定上限且不会出现在报告中。
+`native-console-result/v2` 的硬读取上限固定为 256 KiB，不得因大量操作而提高；v2
+最多 1,024 个 native operations（覆盖已验证的 623-operation 场景），并在
+`BeginTransaction` 前以所有 operation ID/status/digest 和完整 canonical envelope
+精确计算结果字节数，保留 16 KiB headroom。超出预算的 plan/result 必须在 mutation
+之前失败，失败结果也不得超过 reader cap。
 
 manifest 只保存新鲜导出的 `expected_prewrite_revision`，其中包含源文件身份/
 散列、保存文档路径和文件身份、内容/geometry/protected 摘要、适配器/插件、
 稳定宿主绑定及审计语义状态；它绝不预测 final revision。写入后必须启动**新的**
 Core Console 进程，以固定读回命令导出私有输出。
+`native-edit-manifest/v2` 在写入前只绑定精确的
+`expected_prewrite_output_copy_binding`：它完整包含将要打开的私有副本 SHA-256、
+字节数、路径指纹、文件身份和 DWG 头。**最终** SHA-256、大小、身份和 revision 在
+SaveAs 前不可知，绝不得预测或从 prewrite 复制。manifest 的
+`final_output_constraints` 改为完整性覆盖的授权：精确私有路径/根指纹、同卷及私有
+根策略、必需 DWG header/version、最大大小和 identity transition policy
+（same-identity 或允许 replacement）。transaction 内的 staged export 必须逐字段等于
+prewrite binding；`SaveAndReopen` 后保留实际私有 DWG 句柄，计算实际 binding 并先验证
+这些 constraints，随后 `native-console-result/v2`、新的 readback export 和嵌入 geometry
+必须逐字段等于这个**实际** binding。原输入、陈旧 prewrite、错误路径/header/大小、
+禁止的 replacement、伪造 result 或任意新保存目标都不能成功。稳定宿主 digest 同时绑定 protocol、adapter
+ID/profile/version、plugin ID/version/fingerprint、完整 capability set、宿主
+product/release/runtime/mode/可执行文件指纹，以及 marker policy；新的 session/PID/
+pipe/database/revision 可以变化，其余任一漂移均不得产生 success token。
+已发布的 v1 schema 仅保留用于结构化读取旧 artifact；所有 active execution gate
+（session、audit/plan、manifest、Core Console、readback、verification）都明确拒绝
+v1 并返回 `NATIVE_LEGACY_ARTIFACT_READ_ONLY`，绝不把旧字段静默解释为 v2 constraint。
 项目比较 `before → manifest 允许差异 → after`：平移必须精确移动位置/边界/
 线段；删除仅能去除目标且不重编号其余实体；一个或多个 marker 必须在唯一的
 直接 Modelspace 容器中按 operation ID 派生的追加顺序逐一双射匹配。每个

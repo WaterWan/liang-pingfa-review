@@ -289,6 +289,9 @@ python scripts\validate_skill.py --tracked
 python -m unittest discover -s tests -p "test_*.py" -v
 python -m compileall -q src tests scripts
 dotnet build native-bridge-contracts\LiangPingfa.NativeBridge.Contracts.csproj -c Release --nologo
+dotnet run --project native-bridge-contracts\tests\LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj -c Release --nologo
+dotnet build native-cad\LiangPingfa.NativeCad.sln -c Release --nologo
+dotnet run --project native-cad\tests\LiangPingfa.NativeCad.Core.Tests -c Release --no-build
 python -m liang_pingfa_review --help
 ```
 
@@ -313,6 +316,45 @@ Remove-Item Env:\LIANG_PINGFA_RUN_GENERATED_ODA
 `doctor`、`audit`、`plan`、`review-plan`、`apply`、`verify` 或
 `local-regression` 的 ODA 行为。
 
+### 原生契约版本政策
+
+已发布的 `native-*/v1` schema、`ProtocolV1.cs` 和 `Interfaces.cs` 是冻结的历史
+读取表面，按 `c374e6c` 基线逐字节/签名校验。v1 只能校验、读取、报告或执行明确的
+迁移检查；它**不能**执行 native plan、apply、Core Console write 或 published-output
+verify。任何此类执行门都会以
+`NATIVE_LEGACY_ARTIFACT_READ_ONLY` 失败，而不会把旧字段重新解释成新授权。
+
+当前活动配置、私有 session、geometry、audit、intent、plan、manifest、Core Console
+result/export 和 verification 全部使用明确的 `liang-pingfa/native-*/v2`。v2 绑定
+同启动 monotonic session、稳定宿主、私有枚举基数、1,024 operation 上限、精确
+prewrite binding、最终输出 constraints 与实际 readback binding；plan/manifest/result/
+export/verification 还携带精确的 v2 schema/integrity 交叉绑定。`native-bridge/v1`
+request/response 保持不变，因为其 wire shape 没有不兼容变化；这不是对持久 v1
+artifact 的“全面兼容”声明。
+
+逐工件的首次发布 commit 与 SHA-256 冻结图见
+`tests/contracts/native-v1-baseline.json`；`tests/fixtures/native-v1/` 中的
+source-free historical vectors 必须始终通过 v1 reader。
+`native-cad` 在该发布基线后才进入工作树，因此其 executable core 只公开/使用 v2
+types，不伪造另一套已发布 v1 API。
+
+仅无状态的 v1 adapter config 可由显式工具确定性迁移到 v2。v1 session、audit、
+intent、plan、manifest、result、export 和 verification 缺少必要安全绑定，绝不补造；
+必须重新 prepare session 并对源文件进行 fresh native audit。
+
+### SDK-free 可执行核心检查点
+
+仓库现有 `native-cad` 的 SDK-free C# 协议/事务核心：它只对运行时生成的内存
+CAD 快照执行固定 manifest 的 `translate_dbtext`、`delete_auxiliary_overlay_text`
+和受 policy 门控的 `create_review_marker`，并在单次 commit 前做精确
+before/allowed-delta/after 读回验证。它还包含原创的、**仅语法**
+`Autodesk.*` API stub，以便下一检查点编写窄适配器边界。
+
+这只是内存模型、协议与回滚语义的可执行证明；不加载厂商 SDK、没有 AutoCAD
+命令、不能部署，且**不证明**真实 AutoCAD、RealDWG、TSSD、ODA 或任何宿主
+事务运行时兼容性。实际 AutoCAD adapter 和命令映射仍在下一检查点，当前不得将
+stub 或核心测试称为真实宿主能力。
+
 操作人员必须显式选择外部适配器、PID 和其公布的本地随机命名管道；工具绝不
 枚举第一个进程、扫描 PATH/注册表、选择窗口或在 ODA/原生之间自动回退。协议
 仅允许固定的只读 health/session/document/inventory/精确几何导出请求，绑定
@@ -329,10 +371,10 @@ Remove-Item Env:\LIANG_PINGFA_RUN_GENERATED_ODA
 CLI 事件。health、session 和后续 RPC 都取配置方法超时、严格 UTC 过期和这个原始
 uptime deadline 的最小值。重启/domain 不同、当前 uptime 小于签发值或达到 deadline
 都会失败关闭；延迟握手、落盘或另一进程消费都不会重新开始五分钟窗口。
-每份精确几何还必须与**同一**会话的 ID、完整进程/宿主、适配器/插件版本和指纹、
+每份活动 v2 精确几何还必须与**同一**会话的 ID、完整进程/宿主、适配器/插件版本和指纹、
 完全相等的能力集合、保存源（含头、散列、大小、路径/文件身份）、数据库实例及
-revision 相符，并携带会话/文档 binding digest；只比较源字节绝不充分。v1 的固定
-上限为 2,000 个实体和总计 10,000 条线段，原始 geometry JSON 最多 16 MiB
+revision 相符，并携带会话/文档 binding digest；只比较源字节绝不充分。v1 的原始读取上限保持冻结；
+活动 v2 的保守上限为 2,000 个实体和总计 10,000 条线段，原始 geometry JSON 最多 16 MiB
 **UTF-8 字节**（不是字符/代码点数；schema `maxLength` 仅为次要约束），外层
 几何响应最多 32 MiB；inventory 是独立的双摘要响应，原始 JSON 最多 64 KiB。
 仅在已定义的精确 schema 路径（bridge `result.geometry_json` /
@@ -340,8 +382,7 @@ revision 相符，并携带会话/文档 binding digest；只比较源字节绝�
 export `geometry_json`）中，序列化 JSON 字符串才是**外层 opaque carrier**：
 先按收到的精确 codepoint/UTF-8 bytes 绑定和散列并检查字节上限，绝不对整个
 carrier 做 NFC。随后独立解析内部 JSON；内部键和值仍执行深度、重复键、有限数、
-单标量 NFC 上限、schema、语义和同一绝对 deadline 校验。此前已有效的 canonical
-内部 JSON 在这一 v1 澄清下产生相同工件字节/散列，无需静默迁移或版本重解释。
+单标量 NFC 上限、schema、语义和同一绝对 deadline 校验。历史 v1 工件只按其冻结 schema 验证；不会被静默迁移、版本重命名或重新解释为 v2。
 
 原生计划只允许经审计的 DBTEXT XY 平移、精确辅助覆盖文字删除，以及默认关闭且
 需配置/能力/既有图层样式共同准入的 review marker。没有自由命令、LISP、脚本

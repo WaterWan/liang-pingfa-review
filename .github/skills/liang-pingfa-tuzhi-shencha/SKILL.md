@@ -157,11 +157,21 @@ ODA 转换必须在受验证 NTFS 与限制性 DACL 的两个独立随机私有�
 注册表或 PATH，不选择窗口，不使用 GUI、鼠标、键盘、焦点或自动化，也绝不在
 原生失败时回退到 ODA（反之亦然）。
 
+已发布 native v1 artifact 是冻结、legacy-read-only 的读取表面，不能执行原生写入；
+active session/audit/plan/manifest/result/export/verification 均为 v2。v1 缺少
+monotonic、stable-host 或 actual-output security binding 时不得补造，必须 fresh
+session prepare 和 fresh native audit；执行门返回
+`NATIVE_LEGACY_ARTIFACT_READ_ONLY`。未变化的 `native-bridge/v1` 仅是冻结的
+read-only wire request/response，不是 v1 写入兼容声明。
+
 任何原生写入必须从保留的源句柄复制到私有副本，以固定 `NETLOAD` 与固定命令在
 外部 Core Console 上运行；源和最终公共路径绝不交给该进程。保存后必须启动新的
 读回进程并验证精确允许差异，成功后才无替换发布。外部插件的单事务/回滚声明是
 conformance claim，不是本项目可证明的内部事实；公开 CI 的生成 mock 也不构成
 外部宿主集成声明。外部许可、对象启用器和专有组件由操作人员负责，仓库不分发。
+`native-cad` 的 SDK-free 内存事务核心和 syntax-only API stubs 只证明固定协议/
+允许差异模型；它们不是 AutoCAD runtime command、adapter 或兼容性证明，真实映射
+仍留给下一检查点。
 
 原生会话描述符、机器可读 audit/intent/plan/manifest/Core Console result/export/
 verification（以及任何恢复日志）均为私有最终文件：它们只允许当前用户和 `SYSTEM`，
