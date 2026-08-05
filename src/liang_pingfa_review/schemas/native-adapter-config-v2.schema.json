@@ -1,0 +1,465 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "liang-pingfa/native-adapter-config/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "adapter",
+    "protocol",
+    "required_capabilities",
+    "core_console",
+    "plugins",
+    "host_compatibility",
+    "timeouts",
+    "geometry_limits",
+    "write_revision_transition",
+    "operation_profiles",
+    "marker_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "liang-pingfa/native-adapter-config/v2"
+    },
+    "adapter": {
+      "$ref": "#/$defs/adapter"
+    },
+    "protocol": {
+      "$ref": "#/$defs/protocol"
+    },
+    "required_capabilities": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/capability"
+      }
+    },
+    "core_console": {
+      "$ref": "#/$defs/installation"
+    },
+    "plugins": {
+      "$ref": "#/$defs/plugins"
+    },
+    "host_compatibility": {
+      "$ref": "#/$defs/hostCompatibility"
+    },
+    "timeouts": {
+      "$ref": "#/$defs/timeouts"
+    },
+    "geometry_limits": {
+      "$ref": "#/$defs/geometryLimits"
+    },
+    "write_revision_transition": {
+      "enum": [
+        "save_reopen_changes_revision",
+        "preserved_by_plugin_capability"
+      ]
+    },
+    "operation_profiles": {
+      "$ref": "#/$defs/operationProfiles"
+    },
+    "marker_policy": {
+      "$ref": "#/$defs/markerPolicy"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9._/-]*$"
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "profile",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "profile": {
+          "$ref": "#/$defs/identifier"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "const": 1
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 0
+        }
+      }
+    },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "path",
+        "sha256",
+        "command"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "command": {
+          "enum": [
+            "LPF_NATIVE_EXECUTE_MANIFEST",
+            "LPF_NATIVE_EXPORT_MANIFEST"
+          ]
+        }
+      }
+    },
+    "plugins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "write",
+        "readback"
+      ],
+      "properties": {
+        "write": {
+          "$ref": "#/$defs/plugin"
+        },
+        "readback": {
+          "$ref": "#/$defs/plugin"
+        }
+      }
+    },
+    "hostCompatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_family",
+        "minimum_version",
+        "maximum_version",
+        "host_product",
+        "host_release",
+        "host_runtime",
+        "audit_host_mode",
+        "core_console_mode"
+      ],
+      "properties": {
+        "host_family": {
+          "$ref": "#/$defs/identifier"
+        },
+        "minimum_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "maximum_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "host_product": {
+          "$ref": "#/$defs/identifier"
+        },
+        "host_release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "host_runtime": {
+          "$ref": "#/$defs/identifier"
+        },
+        "audit_host_mode": {
+          "enum": [
+            "full_host",
+            "core_console"
+          ]
+        },
+        "core_console_mode": {
+          "const": "core_console"
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pipe_connect_ms",
+        "health_ms",
+        "session_ms",
+        "document_ms",
+        "inventory_ms",
+        "geometry_ms",
+        "write_console_seconds",
+        "readback_console_seconds"
+      ],
+      "properties": {
+        "pipe_connect_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        },
+        "health_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 3000
+        },
+        "session_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 3000
+        },
+        "document_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        },
+        "inventory_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 30000
+        },
+        "geometry_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 60000
+        },
+        "write_console_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "readback_console_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "geometryLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_entities",
+        "max_segments",
+        "max_geometry_json_bytes",
+        "max_inventory_json_bytes"
+      ],
+      "properties": {
+        "max_entities": {
+          "const": 2000
+        },
+        "max_segments": {
+          "const": 10000
+        },
+        "max_geometry_json_bytes": {
+          "const": 16777216,
+          "description": "Fixed maximum raw canonical geometry JSON UTF-8 byte length."
+        },
+        "max_inventory_json_bytes": {
+          "const": 65536
+        }
+      }
+    },
+    "operationProfiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "translate_dbtext/v1",
+        "delete_auxiliary_overlay_text/v1",
+        "create_review_marker/v1"
+      ],
+      "properties": {
+        "translate_dbtext/v1": {
+          "type": "boolean"
+        },
+        "delete_auxiliary_overlay_text/v1": {
+          "type": "boolean"
+        },
+        "create_review_marker/v1": {
+          "type": "boolean"
+        }
+      }
+    },
+    "markerPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "profile",
+        "enabled",
+        "plugin_capability",
+        "layer",
+        "style",
+        "layer_fingerprint",
+        "style_fingerprint",
+        "height_bits",
+        "rotation_bits",
+        "text_prefix",
+        "text_derivation_version",
+        "geometry_defaults"
+      ],
+      "properties": {
+        "policy_version": {
+          "const": "marker-policy/v1"
+        },
+        "profile": {
+          "const": "create_review_marker/v1"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "plugin_capability": {
+          "type": "boolean"
+        },
+        "layer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "style": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "layer_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "style_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "height_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "rotation_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "text_prefix": {
+          "const": "LPF-REVIEW-"
+        },
+        "text_derivation_version": {
+          "const": "operation-id-suffix/v1"
+        },
+        "geometry_defaults": {
+          "$ref": "#/$defs/markerGeometryDefaults"
+        }
+      }
+    },
+    "markerGeometryDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "space_kind",
+        "block_path",
+        "overlay_evidence"
+      ],
+      "properties": {
+        "space_kind": {
+          "const": "modelspace"
+        },
+        "block_path": {
+          "type": "array",
+          "maxItems": 0,
+          "items": false
+        },
+        "overlay_evidence": {
+          "$ref": "#/$defs/markerOverlayEvidence"
+        }
+      }
+    },
+    "markerOverlayEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_content",
+        "left_panel",
+        "corresponding_right_absent",
+        "visible_interference",
+        "unsupported_data"
+      ],
+      "properties": {
+        "unique_content": {
+          "const": false
+        },
+        "left_panel": {
+          "const": false
+        },
+        "corresponding_right_absent": {
+          "const": false
+        },
+        "visible_interference": {
+          "const": false
+        },
+        "unsupported_data": {
+          "const": true
+        }
+      }
+    }
+  }
+}
