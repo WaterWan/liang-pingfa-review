@@ -159,6 +159,8 @@ namespace LiangPingfa.NativeCad.Core
             Snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
             Document = document ?? throw new ArgumentNullException(nameof(document));
             ContainerSequences = containerSequences ?? throw new ArgumentNullException(nameof(containerSequences));
+            PortablePrewriteProjection =
+                PortablePrewriteProjectionV2.From(this);
         }
 
         /// <summary>Underlying immutable snapshot.</summary>
@@ -169,6 +171,16 @@ namespace LiangPingfa.NativeCad.Core
 
         /// <summary>Exact container sequences retained for readback verification.</summary>
         public IReadOnlyList<object?> ContainerSequences { get; private set; }
+
+        /// <summary>
+        /// Source-to-private-copy portable semantic/protected projection
+        /// emitted by full-host bridge exports and compared by Core Console.
+        /// </summary>
+        public PortablePrewriteProjectionV2 PortablePrewriteProjection
+        {
+            get;
+            private set;
+        }
 
         /// <summary>Returns a matching entity by handle.</summary>
         public CadEntitySnapshot? FindByHandle(string handle)
@@ -210,14 +222,35 @@ namespace LiangPingfa.NativeCad.Core
                 entities.Add(record);
             }
 
+            List<object?> containers = new List<object?>();
+            for (int index = 0; index < Snapshot.Containers.Count; index++)
+            {
+                containers.Add(Snapshot.Containers[index].ToWireValue());
+            }
+
             Dictionary<string, object?> payload = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 { "schema_version", NativeCadProtocolV2.GeometrySchemaVersion },
                 { "source", Snapshot.Source.ToWireValue() },
-                { "binding", Snapshot.BindingContext.ToWireValue(Snapshot.Source, Document.ToWireValue()) },
+                {
+                    "binding",
+                    Snapshot.BindingContext.ToWireValue(
+                        Snapshot.Source,
+                        Document.ToWireValue(),
+                        containers)
+                },
                 { "document", Document.ToWireValue() },
                 { "owners", owners },
+                { "containers", containers },
                 { "entities", entities },
+                {
+                    "portable_prewrite_projection",
+                    PortablePrewriteProjection.ToWireValue()
+                },
+                {
+                    "portable_prewrite_projection_digest",
+                    PortablePrewriteProjection.Digest
+                },
             };
             payload.Add(
                 "integrity",
@@ -264,10 +297,12 @@ namespace LiangPingfa.NativeCad.Core
                 throw new ArgumentNullException(nameof(snapshot));
             }
 
+            RequireV2ContainerBounds(snapshot);
             List<object?> orderedRecords = new List<object?>();
             List<object?> geometryRecords = new List<object?>();
             List<object?> opaqueStateDigests = new List<object?>();
             List<object?> owners = new List<object?>();
+            List<object?> containers = BuildContainerRecords(snapshot.Containers);
             for (int index = 0; index < snapshot.Owners.Count; index++)
             {
                 owners.Add(snapshot.Owners[index]);
@@ -289,12 +324,24 @@ namespace LiangPingfa.NativeCad.Core
                 opaqueStateDigests.Add(entity.OpaqueStateDigest);
             }
 
-            IReadOnlyList<object?> containerSequences = BuildContainerSequences(snapshot.Entities);
+            IReadOnlyList<object?> containerSequences = BuildContainerSequences(
+                snapshot.Containers,
+                snapshot.Entities);
             Dictionary<string, object?> documentState = snapshot.Tables.ToStateWireValue();
             string documentStateDigest = CanonicalJson.Sha256Hex(documentState);
-            string orderedEntityDigest = CanonicalJson.Sha256Hex(orderedRecords);
+            string orderedEntityDigest = CanonicalJson.Sha256Hex(
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    { "containers", containers },
+                    { "entities", orderedRecords },
+                });
             string containerOrderDigest = CanonicalJson.Sha256Hex(containerSequences);
-            string completeGeometryDigest = CanonicalJson.Sha256Hex(geometryRecords);
+            string completeGeometryDigest = CanonicalJson.Sha256Hex(
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    { "containers", containers },
+                    { "entities", geometryRecords },
+                });
             string protectedStateDigest = CanonicalJson.Sha256Hex(
                 new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
@@ -303,6 +350,7 @@ namespace LiangPingfa.NativeCad.Core
                     // one. Their canonical sequence is host state, not an
                     // operation-owned resource.
                     { "owners", owners },
+                    { "containers", containers },
                     { "opaque_state_digests", opaqueStateDigests },
                 });
             string protectedOrderDigest = CanonicalJson.Sha256Hex(
@@ -330,7 +378,55 @@ namespace LiangPingfa.NativeCad.Core
             return new GeometryExportV2(snapshot, document, containerSequences);
         }
 
+        private static void RequireV2ContainerBounds(CadDocumentSnapshot snapshot)
+        {
+            if (snapshot.Owners.Count > NativeCadProtocolV2.MaxGeometryContainers ||
+                snapshot.Containers.Count > NativeCadProtocolV2.MaxGeometryContainers)
+            {
+                throw new CadCoreException(
+                    CadCoreErrorCode.ManifestInvalid,
+                    "Snapshot exceeds the v2 geometry container limit.");
+            }
+
+            HashSet<string> owners = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> containers = new HashSet<string>(StringComparer.Ordinal);
+            for (int index = 0; index < snapshot.Owners.Count; index++)
+            {
+                if (!owners.Add(snapshot.Owners[index]))
+                {
+                    throw new CadCoreException(
+                        CadCoreErrorCode.ManifestInvalid,
+                        "Snapshot has duplicate owners.");
+                }
+            }
+
+            for (int index = 0; index < snapshot.Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots container = snapshot.Containers[index];
+                if (!owners.Contains(container.OwnerHandle) ||
+                    !containers.Add(container.Container.SortKey))
+                {
+                    throw new CadCoreException(
+                        CadCoreErrorCode.ManifestInvalid,
+                        "Snapshot has an invalid owner/container mapping.");
+                }
+            }
+        }
+
+        private static List<object?> BuildContainerRecords(
+            IReadOnlyList<CadContainerPhysicalSlots> containers)
+        {
+            List<object?> result = new List<object?>();
+            for (int index = 0; index < containers.Count; index++)
+            {
+                result.Add(containers[index].ToWireValue());
+            }
+
+            return result;
+        }
+
         private static IReadOnlyList<object?> BuildContainerSequences(
+            IReadOnlyList<CadContainerPhysicalSlots> containers,
             IReadOnlyList<CadEntitySnapshot> entities)
         {
             SortedDictionary<string, List<CadEntitySnapshot>> grouped =
@@ -349,9 +445,15 @@ namespace LiangPingfa.NativeCad.Core
             }
 
             List<object?> result = new List<object?>();
-            foreach (KeyValuePair<string, List<CadEntitySnapshot>> entry in grouped)
+            for (int containerIndex = 0; containerIndex < containers.Count; containerIndex++)
             {
-                List<CadEntitySnapshot> records = entry.Value;
+                CadContainerPhysicalSlots container = containers[containerIndex];
+                List<CadEntitySnapshot>? records;
+                if (!grouped.TryGetValue(container.Container.SortKey, out records))
+                {
+                    records = new List<CadEntitySnapshot>();
+                }
+
                 List<object?> projected = new List<object?>();
                 for (int index = 0; index < records.Count; index++)
                 {
@@ -369,7 +471,9 @@ namespace LiangPingfa.NativeCad.Core
                 result.Add(
                     new Dictionary<string, object?>(StringComparer.Ordinal)
                     {
-                        { "container", records[0].Container.ToKeyWireValue() },
+                        { "container", container.Container.ToKeyWireValue() },
+                        { "owner_handle", container.OwnerHandle },
+                        { "physical_slot_count", (long)container.PhysicalSlotCount },
                         { "entities", projected },
                     });
             }
