@@ -155,11 +155,49 @@ def _handshake_identity() -> dict[str, Any]:
     }
 
 
-def _handshake_response(request: dict[str, Any]) -> dict[str, Any]:
-    """Generate only the fixed read-only pre/session methods for tests."""
+class _GeneratedAdapterSessionGate:
+    """Model the adapter's client-owned session binding state machine.
+
+    The bootstrap advertisement intentionally has no session identifier.
+    A generated Python client proposes one in its first ``health`` request;
+    this server binds that exact value and rejects a later mismatch rather
+    than independently minting a competing identifier.
+    """
+
+    def __init__(self) -> None:
+        self._session_id: str | None = None
+        self._descriptor_issued = False
+
+    def require_request(self, request: dict[str, Any]) -> None:
+        method = request["method"]
+        proposed = request["params"]["session_id"]
+        if self._session_id is None:
+            if method != "health":
+                raise ValueError("adapter bridge requires health before binding")
+            self._session_id = proposed
+            return
+        if proposed != self._session_id:
+            raise ValueError("adapter bridge session identifier changed")
+        if method == "get_session":
+            if self._descriptor_issued:
+                raise ValueError("adapter bridge handshake was duplicated")
+            self._descriptor_issued = True
+            return
+        if method != "health" and not self._descriptor_issued:
+            raise ValueError("adapter bridge handshake is incomplete")
+
+
+def _handshake_response(
+    request: dict[str, Any],
+    *,
+    session_gate: _GeneratedAdapterSessionGate | None = None,
+) -> dict[str, Any]:
+    """Generate only the fixed read-only adapter bridge methods for tests."""
 
     identity = _handshake_identity()
     method = request["method"]
+    if session_gate is not None:
+        session_gate.require_request(request)
     if method == "health":
         result: dict[str, Any] = {
             "kind": "health",
@@ -410,6 +448,7 @@ def _serve_handshake_connection(
     pipe_name: str,
     methods: tuple[str, ...],
     *,
+    session_gate: _GeneratedAdapterSessionGate,
     announce_ready: bool = False,
 ) -> None:
     """Serve one generated connection with an exact method sequence."""
@@ -428,7 +467,7 @@ def _serve_handshake_connection(
             )
             if request["method"] != method:
                 raise ValueError("generated handshake method order differs")
-            response = _handshake_response(request)
+            response = _handshake_response(request, session_gate=session_gate)
             _write_all(
                 handle,
                 encode_frame(
@@ -443,14 +482,20 @@ def _serve_handshake_connection(
 
 
 def serve_handshake_sequence(pipe_name: str) -> None:
-    """Serve prepare then one consumed descriptor on generated local pipes."""
+    """Serve adapter-semantic preparation then one consumed descriptor."""
 
+    session_gate = _GeneratedAdapterSessionGate()
     _serve_handshake_connection(
         pipe_name,
         ("health", "get_session"),
+        session_gate=session_gate,
         announce_ready=True,
     )
-    _serve_handshake_connection(pipe_name, ("health", "get_current_document"))
+    _serve_handshake_connection(
+        pipe_name,
+        ("health", "get_current_document"),
+        session_gate=session_gate,
+    )
     # Keep the actual server process alive through the client's post-response
     # PID-instance recheck; production bridges remain resident after a
     # response rather than exiting at the frame boundary.

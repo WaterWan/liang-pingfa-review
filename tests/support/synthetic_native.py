@@ -14,6 +14,8 @@ from liang_pingfa_review.native_contracts import (
     MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS,
     native_geometry_host_binding_digest,
     native_session_binding_digest,
+    prewrite_semantic_projection,
+    prewrite_semantic_projection_digest,
     validate_native_contract,
 )
 from liang_pingfa_review.native_bridge import read_native_session_clock
@@ -58,8 +60,8 @@ def config() -> dict[str, Any]:
         "adapter": adapter(),
         "protocol": {"major": 1, "minor": 0},
         "required_capabilities": [
-            "read.inventory/v1",
             "read.exact_geometry/v1",
+            "read.inventory/v1",
         ],
         "core_console": {"path": "generated-core.exe", "sha256": digest("core")},
         "plugins": {
@@ -234,6 +236,7 @@ def geometry(
     entities: list[dict[str, Any]] | None = None,
     *,
     owners: list[str] | None = None,
+    containers: list[dict[str, Any]] | None = None,
     source_value: dict[str, Any] | None = None,
     session_value: dict[str, Any] | None = None,
     session_id: str = "native-session-0123456789abcdef0123456789abcdef",
@@ -252,8 +255,8 @@ def geometry(
             "mode": "full_host",
         }
         selected_capabilities = capabilities or [
-            "read.inventory/v1",
             "read.exact_geometry/v1",
+            "read.inventory/v1",
         ]
         selected_process = {
             "pid": 1234,
@@ -315,6 +318,64 @@ def geometry(
         key=lambda item: (*_container(item), item["sequence_index"]),
     )
     selected_owners = ["AA"] if owners is None else list(owners)
+    if containers is None:
+        active_by_container: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for record in records:
+            active_by_container.setdefault(_container(record), []).append(record)
+        physical_containers: list[dict[str, Any]] = []
+        owners_with_active_container: set[str] = set()
+        for container_key, active in active_by_container.items():
+            exemplar = active[0]
+            owner_handle = exemplar["owner_handle"]
+            owners_with_active_container.add(owner_handle)
+            physical_containers.append(
+                {
+                    "owner_handle": owner_handle,
+                    "space": dict(exemplar["space"]),
+                    "block_path": list(exemplar["block_path"]),
+                    # Generated/in-memory mocks model no erased records unless
+                    # callers explicitly supply a larger physical extent.
+                    "physical_slot_count": max(
+                        item["sequence_index"] for item in active
+                    )
+                    + 1,
+                }
+            )
+        for owner_handle in selected_owners:
+            if owner_handle in owners_with_active_container:
+                continue
+            # Retain an explicit empty physical container for every declared
+            # owner instead of inferring it from active records.
+            physical_containers.append(
+                {
+                    "owner_handle": owner_handle,
+                    "space": {
+                        "kind": "block",
+                        "layout_handle": None,
+                        "block_handle": owner_handle,
+                    },
+                    "block_path": [],
+                    "physical_slot_count": 0,
+                }
+            )
+    else:
+        physical_containers = [
+            {
+                "owner_handle": item["owner_handle"],
+                "space": dict(item["space"]),
+                "block_path": list(item["block_path"]),
+                "physical_slot_count": item["physical_slot_count"],
+            }
+            for item in containers
+        ]
+    physical_containers.sort(
+        key=lambda item: (
+            item["space"]["kind"],
+            item["space"]["layout_handle"] or "",
+            item["space"]["block_handle"] or "",
+            tuple(item["block_path"]),
+        )
+    )
     order = [
         {
             "container": _container(item),
@@ -326,10 +387,18 @@ def geometry(
         for item in records
     ]
     container_order = []
-    for container in sorted({_container(item) for item in records}):
+    for physical_container in physical_containers:
+        container = (
+            physical_container["space"]["kind"],
+            physical_container["space"]["layout_handle"] or "",
+            physical_container["space"]["block_handle"] or "",
+            tuple(physical_container["block_path"]),
+        )
         container_order.append(
             {
                 "container": container,
+                "owner_handle": physical_container["owner_handle"],
+                "physical_slot_count": physical_container["physical_slot_count"],
                 "entities": [
                     {
                         "geometry_fingerprint": item["geometry_fingerprint"],
@@ -353,13 +422,21 @@ def geometry(
     document = {
         "database_instance_fingerprint": selected_database,
         "revision_fingerprint": selected_revision,
-        "ordered_entity_digest": canonical_sha256(order),
+        "ordered_entity_digest": canonical_sha256(
+            {"containers": physical_containers, "entities": order}
+        ),
         "container_order_digest": canonical_sha256(container_order),
-        "complete_geometry_digest": canonical_sha256([_projection(item) for item in records]),
+        "complete_geometry_digest": canonical_sha256(
+            {
+                "containers": physical_containers,
+                "entities": [_projection(item) for item in records],
+            }
+        ),
         "protected_state_digest": canonical_sha256(
             {
                 "document_state_digest": document_state_digest,
                 "owners": selected_owners,
+                "containers": physical_containers,
                 "opaque_state_digests": [item["opaque_state_digest"] for item in records],
             }
         ),
@@ -390,6 +467,7 @@ def geometry(
         },
         "document": document,
         "owners": selected_owners,
+        "containers": physical_containers,
         "entities": records,
     }
     artifact["binding"]["session_binding_digest"] = native_session_binding_digest(
@@ -401,6 +479,12 @@ def geometry(
     artifact["binding"][
         "document_binding_digest"
     ] = geometry_document_binding_digest(artifact)
+    artifact["portable_prewrite_projection"] = prewrite_semantic_projection(
+        artifact
+    )
+    artifact["portable_prewrite_projection_digest"] = (
+        prewrite_semantic_projection_digest(artifact)
+    )
     return validate_native_contract("geometry", attach_integrity(artifact))
 
 
@@ -462,8 +546,8 @@ def session(
             "revision_fingerprint": revision or digest("revision"),
         },
         "capabilities": [
-            "read.inventory/v1",
             "read.exact_geometry/v1",
+            "read.inventory/v1",
         ],
     }
     return validate_native_contract("session", attach_integrity(artifact))
