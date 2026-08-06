@@ -185,7 +185,10 @@ namespace LiangPingfa.NativeCad.Core
                 "binding",
                 "document",
                 "owners",
+                "containers",
                 "entities",
+                "portable_prewrite_projection",
+                "portable_prewrite_projection_digest",
                 "integrity");
             if (!string.Equals(
                     RequireString(geometry, "schema_version"),
@@ -199,10 +202,17 @@ namespace LiangPingfa.NativeCad.Core
             RequireObject(geometry, "source");
             RequireObject(geometry, "binding");
             RequireObject(geometry, "document");
+            RequireObject(geometry, "portable_prewrite_projection");
+            CanonicalJson.RequireSha256(
+                RequireString(geometry, "portable_prewrite_projection_digest"),
+                "portablePrewriteProjectionDigest");
             List<object?> owners = RequireArray(geometry, "owners");
+            List<object?> containers = RequireArray(geometry, "containers");
             List<object?> entities = RequireArray(geometry, "entities");
             if (owners.Count == 0 ||
-                owners.Count > NativeCadProtocolV2.MaxGeometryEntities + 1 ||
+                owners.Count > NativeCadProtocolV2.MaxGeometryContainers ||
+                containers.Count == 0 ||
+                containers.Count > NativeCadProtocolV2.MaxGeometryContainers ||
                 entities.Count > NativeCadProtocolV2.MaxGeometryEntities)
             {
                 throw new CanonicalJsonException(
@@ -241,7 +251,7 @@ namespace LiangPingfa.NativeCad.Core
                     "Embedded geometry JSON integrity does not match its payload.");
             }
 
-            ValidateGeometrySchema(geometry, owners, entities);
+            ValidateGeometrySchema(geometry, owners, containers, entities);
             return geometry;
         }
 
@@ -313,11 +323,21 @@ namespace LiangPingfa.NativeCad.Core
         private static void ValidateGeometrySchema(
             Dictionary<string, object?> geometry,
             List<object?> owners,
+            List<object?> containers,
             List<object?> entities)
         {
-            ValidateSource(RequireObject(geometry, "source"));
-            ValidateBinding(RequireObject(geometry, "binding"));
-            ValidateDocument(RequireObject(geometry, "document"));
+            Dictionary<string, object?> source = RequireObject(geometry, "source");
+            Dictionary<string, object?> document = RequireObject(geometry, "document");
+            ValidateSource(source);
+            ValidateDocument(document);
+            ValidateBinding(
+                RequireObject(geometry, "binding"),
+                source,
+                document,
+                containers);
+            ValidatePortablePrewriteProjection(
+                RequireObject(geometry, "portable_prewrite_projection"),
+                RequireString(geometry, "portable_prewrite_projection_digest"));
 
             HashSet<string> knownOwners = new HashSet<string>(StringComparer.Ordinal);
             for (int index = 0; index < owners.Count; index++)
@@ -329,6 +349,17 @@ namespace LiangPingfa.NativeCad.Core
                     throw new CanonicalJsonException(
                         "Embedded geometry JSON repeats an owner handle.");
                 }
+            }
+
+            List<CadContainerPhysicalSlots> physicalContainers =
+                ParsePhysicalContainers(containers, knownOwners);
+            Dictionary<string, CadContainerPhysicalSlots> containersByKey =
+                new Dictionary<string, CadContainerPhysicalSlots>(
+                    StringComparer.Ordinal);
+            for (int index = 0; index < physicalContainers.Count; index++)
+            {
+                CadContainerPhysicalSlots container = physicalContainers[index];
+                containersByKey.Add(container.Container.SortKey, container);
             }
 
             int aggregateSegments = 0;
@@ -348,6 +379,20 @@ namespace LiangPingfa.NativeCad.Core
                         "Embedded geometry JSON repeats an entity handle.");
                 }
 
+                CadContainerPhysicalSlots? physicalContainer;
+                if (!containersByKey.TryGetValue(
+                        current.Container.SortKey,
+                        out physicalContainer) ||
+                    !string.Equals(
+                        physicalContainer.OwnerHandle,
+                        current.OwnerHandle,
+                        StringComparison.Ordinal) ||
+                    current.SequenceIndex >= physicalContainer.PhysicalSlotCount)
+                {
+                    throw new CanonicalJsonException(
+                        "Embedded geometry active entity is outside its physical container extent.");
+                }
+
                 string sequenceKey = current.Container.SortKey + "\u001f" +
                     current.SequenceIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 if (!containerSequences.Add(sequenceKey) ||
@@ -359,6 +404,48 @@ namespace LiangPingfa.NativeCad.Core
                 }
 
                 previous = current;
+            }
+        }
+
+        private static void ValidatePortablePrewriteProjection(
+            Dictionary<string, object?> projection,
+            string claimedDigest)
+        {
+            RequireExactKeys(
+                projection,
+                "schema_version",
+                "ordered_entity_digest",
+                "container_order_digest",
+                "geometry_digest",
+                "protected_semantic_digest",
+                "table_state_digest",
+                "layout_state_digest",
+                "block_state_digest");
+            if (!string.Equals(
+                    RequireString(projection, "schema_version"),
+                    NativeCadProtocolV2.PortablePrewriteProjectionSchemaVersion,
+                    StringComparison.Ordinal))
+            {
+                throw new CanonicalJsonException(
+                    "Embedded geometry portable prewrite schema is invalid.");
+            }
+
+            PortablePrewriteProjectionV2 typed =
+                new PortablePrewriteProjectionV2(
+                    RequireString(projection, "ordered_entity_digest"),
+                    RequireString(projection, "container_order_digest"),
+                    RequireString(projection, "geometry_digest"),
+                    RequireString(projection, "protected_semantic_digest"),
+                    RequireString(projection, "table_state_digest"),
+                    RequireString(projection, "layout_state_digest"),
+                    RequireString(projection, "block_state_digest"));
+            if (!string.Equals(
+                    typed.Digest,
+                    claimedDigest,
+                    StringComparison.Ordinal))
+            {
+                throw new CanonicalJsonException(
+                    "Embedded geometry portable prewrite digest is invalid.");
             }
         }
 
@@ -388,7 +475,11 @@ namespace LiangPingfa.NativeCad.Core
                 RequireString(source, "dwg_header_signature"));
         }
 
-        private static void ValidateBinding(Dictionary<string, object?> binding)
+        private static void ValidateBinding(
+            Dictionary<string, object?> binding,
+            Dictionary<string, object?> source,
+            Dictionary<string, object?> document,
+            List<object?> containers)
         {
             RequireExactKeys(
                 binding,
@@ -500,13 +591,8 @@ namespace LiangPingfa.NativeCad.Core
             RequireSha256(binding, "session_binding_digest");
             string stableHostBindingDigest =
                 RequireSha256(binding, "stable_host_binding_digest");
-            List<string> sortedCapabilities = new List<string>(capabilityValues);
-            sortedCapabilities.Sort(StringComparer.Ordinal);
-            List<object?> stableCapabilities = new List<object?>();
-            for (int index = 0; index < sortedCapabilities.Count; index++)
-            {
-                stableCapabilities.Add(sortedCapabilities[index]);
-            }
+            List<object?> stableCapabilities =
+                NativeCadCapabilities.ToWireValue(capabilityValues);
             string expectedStableHostBindingDigest = CanonicalJson.Sha256Hex(
                 new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
@@ -530,7 +616,23 @@ namespace LiangPingfa.NativeCad.Core
                 throw new CanonicalJsonException(
                     "Embedded geometry stable host binding digest is invalid.");
             }
-            RequireSha256(binding, "document_binding_digest");
+            string documentBindingDigest =
+                RequireSha256(binding, "document_binding_digest");
+            string expectedDocumentBindingDigest = CanonicalJson.Sha256Hex(
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    { "source", source },
+                    { "document", document },
+                    { "containers", containers },
+                });
+            if (!string.Equals(
+                    documentBindingDigest,
+                    expectedDocumentBindingDigest,
+                    StringComparison.Ordinal))
+            {
+                throw new CanonicalJsonException(
+                    "Embedded geometry document binding digest is invalid.");
+            }
         }
 
         private static void ValidateDocument(Dictionary<string, object?> document)
@@ -572,6 +674,89 @@ namespace LiangPingfa.NativeCad.Core
 
             RequireNullableSha256(document, "marker_layer_fingerprint");
             RequireNullableSha256(document, "marker_style_fingerprint");
+        }
+
+        private static List<CadContainerPhysicalSlots> ParsePhysicalContainers(
+            List<object?> rawContainers,
+            ISet<string> knownOwners)
+        {
+            List<CadContainerPhysicalSlots> result =
+                new List<CadContainerPhysicalSlots>();
+            HashSet<string> containers = new HashSet<string>(StringComparer.Ordinal);
+            CadContainerPhysicalSlots? previous = null;
+            for (int index = 0; index < rawContainers.Count; index++)
+            {
+                Dictionary<string, object?> raw =
+                    RequireDictionary(rawContainers[index], "container");
+                RequireExactKeys(
+                    raw,
+                    "owner_handle",
+                    "space",
+                    "block_path",
+                    "physical_slot_count");
+                string owner = RequireString(raw, "owner_handle");
+                CadHandle.Require(owner, "containerOwner");
+                if (!knownOwners.Contains(owner))
+                {
+                    throw new CanonicalJsonException(
+                        "Embedded geometry container owner is invalid.");
+                }
+
+                List<object?> rawBlockPath = RequireArray(raw, "block_path");
+                if (rawBlockPath.Count > 32)
+                {
+                    throw new CanonicalJsonException(
+                        "Embedded geometry container block path exceeds the frozen bound.");
+                }
+
+                List<string> blockPath = new List<string>();
+                for (int pathIndex = 0; pathIndex < rawBlockPath.Count; pathIndex++)
+                {
+                    string block = RequireStringValue(
+                        rawBlockPath[pathIndex],
+                        "container block path");
+                    CadHandle.Require(block, "containerBlockPath");
+                    blockPath.Add(block);
+                }
+
+                CadContainer container = ParseContainer(
+                    RequireObject(raw, "space"),
+                    blockPath);
+                if (!containers.Add(container.SortKey))
+                {
+                    throw new CanonicalJsonException(
+                        "Embedded geometry container repeats its tuple.");
+                }
+
+                CadContainerPhysicalSlots physical =
+                    new CadContainerPhysicalSlots(
+                        container,
+                        owner,
+                        (int)RequireBoundedInteger(
+                            raw,
+                            "physical_slot_count",
+                            0,
+                            NativeCadProtocolV2.MaxPhysicalSlotCount));
+                if (previous != null &&
+                    string.CompareOrdinal(
+                        previous.Container.SortKey,
+                        physical.Container.SortKey) >= 0)
+                {
+                    throw new CanonicalJsonException(
+                        "Embedded geometry containers are not in canonical order.");
+                }
+
+                result.Add(physical);
+                previous = physical;
+            }
+
+            if (result.Count == 0)
+            {
+                throw new CanonicalJsonException(
+                    "Embedded geometry has no physical containers.");
+            }
+
+            return result;
         }
 
         private static CadEntitySnapshot ParseEntity(
@@ -634,7 +819,7 @@ namespace LiangPingfa.NativeCad.Core
                 entity,
                 "sequence_index",
                 0,
-                1000000);
+                NativeCadProtocolV2.MaxGeometrySequenceIndex);
             string? layer = RequireNullableString(entity, "layer", 1, 255);
             string? text = RequireNullableString(entity, "text", 0, 4096);
             string? style = RequireNullableString(entity, "style", 1, 255);
@@ -1003,6 +1188,10 @@ namespace LiangPingfa.NativeCad.Core
                         "Embedded geometry capabilities are duplicated.");
                 }
             }
+
+            NativeCadCapabilities.RequireCanonicalOrder(
+                capabilities,
+                "Embedded geometry capabilities");
         }
 
         private static void RequirePrefixedLowerHex(

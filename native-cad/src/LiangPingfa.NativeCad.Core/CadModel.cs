@@ -9,6 +9,126 @@ using LiangPingfa.NativeCad.Protocol;
 
 namespace LiangPingfa.NativeCad.Core
 {
+    /// <summary>
+    /// The one fixed capability sequence advertised by the AutoCAD adapter.
+    /// It is NFC, unique, and ordinal-sorted to preserve Python/C# wire
+    /// identity without allowing a serializer or caller to reorder it.
+    /// </summary>
+    public static class NativeCadCapabilities
+    {
+        private static readonly IReadOnlyList<string> autoCadAdapter =
+            CreateAutoCadAdapterCapabilities();
+
+        /// <summary>Gets the immutable canonical AutoCAD capability sequence.</summary>
+        public static IReadOnlyList<string> AutoCadAdapter
+        {
+            get { return autoCadAdapter; }
+        }
+
+        /// <summary>
+        /// Rejects a capability sequence that is not NFC, unique, and strictly
+        /// increasing under ordinal comparison. It never reorders input.
+        /// </summary>
+        public static void RequireCanonicalOrder(
+            IReadOnlyList<string> capabilities,
+            string parameterName)
+        {
+            if (capabilities == null)
+            {
+                throw new ArgumentNullException(nameof(capabilities));
+            }
+
+            if (string.IsNullOrEmpty(parameterName))
+            {
+                throw new ArgumentException(
+                    "A capability collection label is required.",
+                    nameof(parameterName));
+            }
+
+            string? previous = null;
+            for (int index = 0; index < capabilities.Count; index++)
+            {
+                string capability = capabilities[index];
+                if (capability == null)
+                {
+                    throw new CanonicalJsonException(
+                        parameterName + " contains a null capability.");
+                }
+
+                CanonicalJson.RequireNfcString(capability, parameterName);
+                if (previous != null &&
+                    StringComparer.Ordinal.Compare(previous, capability) >= 0)
+                {
+                    throw new CanonicalJsonException(
+                        parameterName +
+                        " must be unique and ordinal-sorted.");
+                }
+
+                previous = capability;
+            }
+        }
+
+        /// <summary>
+        /// Rejects adapter input whose capabilities drift from the exact
+        /// canonical AutoCAD sequence.
+        /// </summary>
+        public static void RequireAutoCadAdapter(
+            IReadOnlyList<string> capabilities,
+            string parameterName)
+        {
+            RequireCanonicalOrder(capabilities, parameterName);
+            if (capabilities.Count != autoCadAdapter.Count)
+            {
+                throw new CanonicalJsonException(
+                    parameterName +
+                    " does not match the AutoCAD adapter capabilities.");
+            }
+
+            for (int index = 0; index < autoCadAdapter.Count; index++)
+            {
+                if (!string.Equals(
+                        capabilities[index],
+                        autoCadAdapter[index],
+                        StringComparison.Ordinal))
+                {
+                    throw new CanonicalJsonException(
+                        parameterName +
+                        " does not match the AutoCAD adapter capabilities.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Copies a verified capability sequence for canonical JSON DTO
+        /// serialization without sorting or otherwise changing its order.
+        /// </summary>
+        public static List<object?> ToWireValue(
+            IReadOnlyList<string> capabilities)
+        {
+            RequireCanonicalOrder(capabilities, "capabilities");
+            List<object?> values = new List<object?>();
+            for (int index = 0; index < capabilities.Count; index++)
+            {
+                values.Add(capabilities[index]);
+            }
+
+            return values;
+        }
+
+        private static IReadOnlyList<string> CreateAutoCadAdapterCapabilities()
+        {
+            string[] values =
+            {
+                "create_review_marker/v1",
+                "read.exact_geometry/v1",
+                "read.inventory/v1",
+                "translate_dbtext/v1",
+            };
+            RequireCanonicalOrder(values, "AutoCAD adapter capabilities");
+            return new ReadOnlyCollection<string>(values);
+        }
+    }
+
     /// <summary>Stable, non-host-specific failures emitted by the transaction core.</summary>
     public enum CadCoreErrorCode
     {
@@ -190,13 +310,15 @@ namespace LiangPingfa.NativeCad.Core
                 pluginFingerprint,
                 capabilities);
 
+            NativeCadCapabilities.RequireCanonicalOrder(
+                capabilities,
+                "Embedded geometry capabilities");
             List<string> copied = new List<string>();
             for (int index = 0; index < capabilities.Count; index++)
             {
                 copied.Add(capabilities[index]);
             }
 
-            copied.Sort(StringComparer.Ordinal);
             string resolvedHostProduct = hostProduct ?? "generated-host";
             string resolvedHostRelease = hostRelease ?? "1.0";
             string resolvedHostRuntime = hostRuntime ?? "generated-runtime";
@@ -316,7 +438,8 @@ namespace LiangPingfa.NativeCad.Core
         /// <summary>Returns a full v2 binding object whose document digest is fresh.</summary>
         public Dictionary<string, object?> ToWireValue(
             NativeSourceBindingV2 source,
-            Dictionary<string, object?> document)
+            Dictionary<string, object?> document,
+            IReadOnlyList<object?> containers)
         {
             if (source == null)
             {
@@ -326,6 +449,11 @@ namespace LiangPingfa.NativeCad.Core
             if (document == null)
             {
                 throw new ArgumentNullException(nameof(document));
+            }
+
+            if (containers == null)
+            {
+                throw new ArgumentNullException(nameof(containers));
             }
 
             Dictionary<string, object?> host = HostWireValue();
@@ -349,6 +477,7 @@ namespace LiangPingfa.NativeCad.Core
                 {
                     { "source", source.ToWireValue() },
                     { "document", document },
+                    { "containers", containers },
                 });
 
             return new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -380,7 +509,7 @@ namespace LiangPingfa.NativeCad.Core
                 "generated-plugin",
                 "1.0.0",
                 Digest("plugin"),
-                new[] { "read.exact_geometry/v1", "read.inventory/v1" });
+                NativeCadCapabilities.AutoCadAdapter);
         }
 
         /// <summary>Returns an identical stable context with a renewed session/process.</summary>
@@ -599,13 +728,7 @@ namespace LiangPingfa.NativeCad.Core
 
         private List<object?> CapabilitiesWireValue()
         {
-            List<object?> values = new List<object?>();
-            for (int index = 0; index < Capabilities.Count; index++)
-            {
-                values.Add(Capabilities[index]);
-            }
-
-            return values;
+            return NativeCadCapabilities.ToWireValue(Capabilities);
         }
 
         private Dictionary<string, object?> StableHostWireValue()
@@ -781,6 +904,71 @@ namespace LiangPingfa.NativeCad.Core
         }
     }
 
+    /// <summary>
+    /// Immutable v2 physical container extent. It records only the bounded
+    /// slot count and never exposes erased entity content or identity.
+    /// </summary>
+    public sealed class CadContainerPhysicalSlots
+    {
+        /// <summary>Creates one exact owner/container physical-slot record.</summary>
+        public CadContainerPhysicalSlots(
+            CadContainer container,
+            string ownerHandle,
+            int physicalSlotCount)
+        {
+            Container = container ?? throw new ArgumentNullException(nameof(container));
+            CadHandle.Require(ownerHandle, nameof(ownerHandle));
+            if (physicalSlotCount < 0 ||
+                physicalSlotCount > NativeCadProtocolV2.MaxPhysicalSlotCount)
+            {
+                throw new CanonicalJsonException(
+                    "Physical container slot count is outside the v2 range.");
+            }
+
+            OwnerHandle = ownerHandle;
+            PhysicalSlotCount = physicalSlotCount;
+        }
+
+        /// <summary>Exact entity container.</summary>
+        public CadContainer Container { get; private set; }
+
+        /// <summary>Block-table-record owner handle.</summary>
+        public string OwnerHandle { get; private set; }
+
+        /// <summary>
+        /// Erased-inclusive physical slot extent. Active records may leave
+        /// gaps below this count, but cannot occupy this count itself.
+        /// </summary>
+        public int PhysicalSlotCount { get; private set; }
+
+        /// <summary>Returns the required active v2 geometry container object.</summary>
+        public Dictionary<string, object?> ToWireValue()
+        {
+            List<object?> path = new List<object?>();
+            for (int index = 0; index < Container.BlockPath.Count; index++)
+            {
+                path.Add(Container.BlockPath[index]);
+            }
+
+            return new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                { "owner_handle", OwnerHandle },
+                { "space", Container.ToSpaceWireValue() },
+                { "block_path", path },
+                { "physical_slot_count", (long)PhysicalSlotCount },
+            };
+        }
+
+        /// <summary>Returns an immutable record with a changed physical extent.</summary>
+        internal CadContainerPhysicalSlots WithPhysicalSlotCount(int physicalSlotCount)
+        {
+            return new CadContainerPhysicalSlots(
+                Container,
+                OwnerHandle,
+                physicalSlotCount);
+        }
+    }
+
     /// <summary>Immutable supported entity or protected opaque record.</summary>
     public sealed class CadEntitySnapshot
     {
@@ -808,7 +996,8 @@ namespace LiangPingfa.NativeCad.Core
                 throw new ArgumentNullException(nameof(container));
             }
 
-            if (sequenceIndex < 0 || sequenceIndex > 1000000)
+            if (sequenceIndex < 0 ||
+                sequenceIndex > NativeCadProtocolV2.MaxGeometrySequenceIndex)
             {
                 throw new CanonicalJsonException("Sequence index is outside the frozen v1 range.");
             }
@@ -1182,9 +1371,7 @@ namespace LiangPingfa.NativeCad.Core
             return Layers.TryGetValue(layer, out observedLayer) &&
                 Styles.TryGetValue(style, out observedStyle) &&
                 string.Equals(observedLayer, layerFingerprint, StringComparison.Ordinal) &&
-                string.Equals(observedStyle, styleFingerprint, StringComparison.Ordinal) &&
-                string.Equals(MarkerLayerFingerprint, layerFingerprint, StringComparison.Ordinal) &&
-                string.Equals(MarkerStyleFingerprint, styleFingerprint, StringComparison.Ordinal);
+                string.Equals(observedStyle, styleFingerprint, StringComparison.Ordinal);
         }
 
         private static IReadOnlyDictionary<string, string> CopyTokens(
@@ -1216,6 +1403,7 @@ namespace LiangPingfa.NativeCad.Core
             string databaseInstanceFingerprint,
             string revisionFingerprint,
             IEnumerable<string> owners,
+            IEnumerable<CadContainerPhysicalSlots> containers,
             IEnumerable<CadEntitySnapshot> entities,
             CadDocumentTables tables,
             NativeSourceBindingV2 source,
@@ -1231,6 +1419,11 @@ namespace LiangPingfa.NativeCad.Core
             if (entities == null)
             {
                 throw new ArgumentNullException(nameof(entities));
+            }
+
+            if (containers == null)
+            {
+                throw new ArgumentNullException(nameof(containers));
             }
 
             Tables = tables ?? throw new ArgumentNullException(nameof(tables));
@@ -1255,6 +1448,58 @@ namespace LiangPingfa.NativeCad.Core
                 throw new CanonicalJsonException("At least one owner is required.");
             }
 
+            if (copiedOwners.Count > NativeCadProtocolV2.MaxGeometryContainers)
+            {
+                throw new CanonicalJsonException("Owner limit exceeded.");
+            }
+
+            List<CadContainerPhysicalSlots> copiedContainers =
+                new List<CadContainerPhysicalSlots>();
+            Dictionary<string, CadContainerPhysicalSlots> containersByKey =
+                new Dictionary<string, CadContainerPhysicalSlots>(
+                    StringComparer.Ordinal);
+            CadContainerPhysicalSlots? previousContainer = null;
+            foreach (CadContainerPhysicalSlots container in containers)
+            {
+                if (copiedContainers.Count >=
+                    NativeCadProtocolV2.MaxGeometryContainers)
+                {
+                    throw new CanonicalJsonException("Geometry container limit exceeded.");
+                }
+
+                if (container == null)
+                {
+                    throw new CanonicalJsonException(
+                        "Physical container record may not be null.");
+                }
+
+                if (!knownOwners.Contains(container.OwnerHandle) ||
+                    containersByKey.ContainsKey(container.Container.SortKey))
+                {
+                    throw new CanonicalJsonException(
+                        "Physical container owner/container mapping is invalid.");
+                }
+
+                if (previousContainer != null &&
+                    string.CompareOrdinal(
+                        previousContainer.Container.SortKey,
+                        container.Container.SortKey) >= 0)
+                {
+                    throw new CanonicalJsonException(
+                        "Physical containers are not in canonical order.");
+                }
+
+                copiedContainers.Add(container);
+                containersByKey.Add(container.Container.SortKey, container);
+                previousContainer = container;
+            }
+
+            if (copiedContainers.Count == 0)
+            {
+                throw new CanonicalJsonException(
+                    "At least one physical container record is required.");
+            }
+
             List<CadEntitySnapshot> copiedEntities = new List<CadEntitySnapshot>();
             HashSet<string> handles = new HashSet<string>(StringComparer.Ordinal);
             HashSet<string> sequences = new HashSet<string>(StringComparer.Ordinal);
@@ -1270,6 +1515,20 @@ namespace LiangPingfa.NativeCad.Core
                 if (!knownOwners.Contains(entity.OwnerHandle))
                 {
                     throw new CanonicalJsonException("Entity owner is not declared.");
+                }
+
+                CadContainerPhysicalSlots? physicalContainer;
+                if (!containersByKey.TryGetValue(
+                        entity.Container.SortKey,
+                        out physicalContainer) ||
+                    !string.Equals(
+                        physicalContainer.OwnerHandle,
+                        entity.OwnerHandle,
+                        StringComparison.Ordinal) ||
+                    entity.SequenceIndex >= physicalContainer.PhysicalSlotCount)
+                {
+                    throw new CanonicalJsonException(
+                        "Entity is outside its exact physical container extent.");
                 }
 
                 if (!handles.Add(entity.Handle))
@@ -1307,6 +1566,8 @@ namespace LiangPingfa.NativeCad.Core
             DatabaseInstanceFingerprint = databaseInstanceFingerprint;
             RevisionFingerprint = revisionFingerprint;
             Owners = new ReadOnlyCollection<string>(copiedOwners);
+            Containers = new ReadOnlyCollection<CadContainerPhysicalSlots>(
+                copiedContainers);
             Entities = new ReadOnlyCollection<CadEntitySnapshot>(copiedEntities);
         }
 
@@ -1318,6 +1579,12 @@ namespace LiangPingfa.NativeCad.Core
 
         /// <summary>Declared owners.</summary>
         public IReadOnlyList<string> Owners { get; private set; }
+
+        /// <summary>
+        /// Canonically ordered v2 physical entity containers, including
+        /// erased-only or empty active containers.
+        /// </summary>
+        public IReadOnlyList<CadContainerPhysicalSlots> Containers { get; private set; }
 
         /// <summary>Canonical ordered records.</summary>
         public IReadOnlyList<CadEntitySnapshot> Entities { get; private set; }
@@ -1345,6 +1612,26 @@ namespace LiangPingfa.NativeCad.Core
             return null;
         }
 
+        /// <summary>Returns one physical container by its exact container tuple.</summary>
+        public CadContainerPhysicalSlots? FindContainer(CadContainer container)
+        {
+            if (container == null)
+            {
+                throw new ArgumentNullException(nameof(container));
+            }
+
+            for (int index = 0; index < Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots candidate = Containers[index];
+                if (candidate.Container.Equals(container))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>Returns an exact clone with a new ordered entity list.</summary>
         public CadDocumentSnapshot WithEntities(IEnumerable<CadEntitySnapshot> entities)
         {
@@ -1352,6 +1639,7 @@ namespace LiangPingfa.NativeCad.Core
                 DatabaseInstanceFingerprint,
                 RevisionFingerprint,
                 Owners,
+                Containers,
                 entities,
                 Tables,
                 Source,
@@ -1369,6 +1657,7 @@ namespace LiangPingfa.NativeCad.Core
                 DatabaseInstanceFingerprint,
                 RevisionFingerprint,
                 owners,
+                Containers,
                 Entities,
                 Tables,
                 Source,
@@ -1382,6 +1671,7 @@ namespace LiangPingfa.NativeCad.Core
                 databaseInstanceFingerprint,
                 RevisionFingerprint,
                 Owners,
+                Containers,
                 Entities,
                 Tables,
                 Source,
@@ -1395,6 +1685,7 @@ namespace LiangPingfa.NativeCad.Core
                 DatabaseInstanceFingerprint,
                 revisionFingerprint,
                 Owners,
+                Containers,
                 Entities,
                 Tables,
                 Source,
@@ -1408,6 +1699,7 @@ namespace LiangPingfa.NativeCad.Core
                 DatabaseInstanceFingerprint,
                 RevisionFingerprint,
                 Owners,
+                Containers,
                 Entities,
                 tables,
                 Source,
@@ -1424,6 +1716,7 @@ namespace LiangPingfa.NativeCad.Core
                 DatabaseInstanceFingerprint,
                 RevisionFingerprint,
                 Owners,
+                Containers,
                 Entities,
                 Tables,
                 source,
@@ -1442,10 +1735,30 @@ namespace LiangPingfa.NativeCad.Core
                 DatabaseInstanceFingerprint,
                 RevisionFingerprint,
                 Owners,
+                Containers,
                 Entities,
                 Tables,
                 Source,
                 bindingContext);
+        }
+
+        /// <summary>
+        /// Returns an exact clone with independently supplied physical slot
+        /// state. Production mutation paths use the transaction model; this
+        /// is retained for generated fault/readback checks.
+        /// </summary>
+        public CadDocumentSnapshot WithContainers(
+            IEnumerable<CadContainerPhysicalSlots> containers)
+        {
+            return new CadDocumentSnapshot(
+                DatabaseInstanceFingerprint,
+                RevisionFingerprint,
+                Owners,
+                containers,
+                Entities,
+                Tables,
+                Source,
+                BindingContext);
         }
 
         /// <summary>Derives a deterministic post-commit revision from generated state.</summary>
@@ -1463,11 +1776,18 @@ namespace LiangPingfa.NativeCad.Core
                 entities.Add(Entities[index].ToWireValue());
             }
 
+            List<object?> containers = new List<object?>();
+            for (int index = 0; index < Containers.Count; index++)
+            {
+                containers.Add(Containers[index].ToWireValue());
+            }
+
             return CanonicalJson.Sha256Hex(
                 new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
                     { "previous_revision", RevisionFingerprint },
                     { "owners", owners },
+                    { "containers", containers },
                     { "entities", entities },
                     { "document_state", Tables.ToStateWireValue() },
                 });
