@@ -3441,6 +3441,7 @@ def native_doctor_status(config_path: Path | None) -> dict[str, str]:
             "core_console": "not_checked",
             "plugins": "not_checked",
             "protocol": "not_checked",
+            "write_capabilities": "not_checked",
             "per_file_compatibility": "audit_required",
             "integration_claim": "external-adapter-not-validated",
         }
@@ -3453,6 +3454,7 @@ def native_doctor_status(config_path: Path | None) -> dict[str, str]:
             "core_console": "not_checked",
             "plugins": "not_checked",
             "protocol": "not_checked",
+            "write_capabilities": "not_checked",
             "per_file_compatibility": "audit_required",
             "integration_claim": "external-adapter-not-validated",
         }
@@ -3468,6 +3470,7 @@ def native_doctor_status(config_path: Path | None) -> dict[str, str]:
             "core_console": "not_ready",
             "plugins": "not_ready",
             "protocol": "not_ready",
+            "write_capabilities": "not_ready",
             "per_file_compatibility": "audit_required",
             "integration_claim": "external-adapter-not-validated",
         }
@@ -3479,6 +3482,13 @@ def native_doctor_status(config_path: Path | None) -> dict[str, str]:
         "core_console": "fingerprint_validated",
         "plugins": "fingerprints_validated",
         "protocol": "v1-configured",
+        "write_capabilities": ",".join(
+            sorted(
+                profile
+                for profile, enabled in config["operation_profiles"].items()
+                if enabled
+            )
+        ),
         "per_file_compatibility": "audit_required",
         "integration_claim": "external-adapter-not-validated",
     }

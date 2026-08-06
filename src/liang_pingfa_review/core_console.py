@@ -27,7 +27,10 @@ from .native_contracts import (
     load_native_json_value,
     require_active_native_contract,
 )
-from .native_protocol import MAX_NATIVE_CONSOLE_RESULT_BYTES
+from .native_protocol import (
+    MAX_NATIVE_CONSOLE_EXPORT_BYTES,
+    MAX_NATIVE_CONSOLE_RESULT_BYTES,
+)
 from .temporary import PrivateWorkspace
 
 
@@ -35,7 +38,7 @@ _MAX_CONSOLE_STREAM_BYTES = 64 * 1024
 # Retain the private spelling for compatibility with focused launcher tests,
 # but keep the public protocol constant authoritative.
 _MAX_CONSOLE_RESULT_BYTES = MAX_NATIVE_CONSOLE_RESULT_BYTES
-_MAX_CONSOLE_EXPORT_BYTES = 32 * 1024 * 1024
+_MAX_CONSOLE_EXPORT_BYTES = MAX_NATIVE_CONSOLE_EXPORT_BYTES
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
