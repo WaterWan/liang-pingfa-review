@@ -55,6 +55,10 @@ MAX_NATIVE_CONSOLE_RESULT_HEADROOM_BYTES: Final = 16 * 1024
 MAX_NATIVE_CONSOLE_RESULT_CANONICAL_BYTES: Final = (
     MAX_NATIVE_CONSOLE_RESULT_BYTES - MAX_NATIVE_CONSOLE_RESULT_HEADROOM_BYTES
 )
+# Console exports contain one 16 MiB opaque geometry carrier plus bounded
+# outer binding/integrity fields. Keep their file-reader ceiling explicit and
+# aligned with the C# adapter's pre-write cap.
+MAX_NATIVE_CONSOLE_EXPORT_BYTES: Final = 32 * 1024 * 1024
 # A full active-v2 result contains one fixed-width status record per requested
 # operation. 1,024 records are comfortably below the canonical result budget
 # while still covering the validated 623-operation release scenario.

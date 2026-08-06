@@ -211,6 +211,11 @@ _ARTIFACT_ERRORS: dict[NativeArtifactKind, ErrorCode] = {
 # bounds while reducing mutable operation cardinality to fit result transport.
 MAX_NATIVE_GEOMETRY_ENTITIES: Final = 2_000
 MAX_NATIVE_GEOMETRY_SEGMENTS: Final = 10_000
+MAX_NATIVE_GEOMETRY_CONTAINERS: Final = MAX_NATIVE_GEOMETRY_ENTITIES + 1
+MAX_NATIVE_GEOMETRY_SEQUENCE_INDEX: Final = 1_000_000
+# A count is an extent, rather than an index: the maximum legal active index
+# requires one additional erased-inclusive physical slot.
+MAX_NATIVE_PHYSICAL_SLOT_COUNT: Final = MAX_NATIVE_GEOMETRY_SEQUENCE_INDEX + 1
 # This is a UTF-8 *byte* ceiling, not a JSON Schema ``maxLength`` ceiling.
 # Schemas retain their code-point bound as a secondary structural constraint,
 # while every raw/embedded geometry boundary calls the bounded helper below.
@@ -227,6 +232,12 @@ MAX_NATIVE_ENTITIES: Final = MAX_NATIVE_GEOMETRY_ENTITIES
 MAX_NATIVE_SEGMENTS: Final = MAX_NATIVE_GEOMETRY_SEGMENTS
 MAX_TRANSLATION = 1_000_000.0
 PRIVATE_RECORD_CARDINALITY: Final = "explicit_private"
+AUTOCAD_ADAPTER_ID: Final = "liang-pingfa-autocad-adapter"
+_OPERATION_PROFILE_CAPABILITIES: Final[dict[str, str]] = {
+    "translate_dbtext/v1": "translate_dbtext/v1",
+    "delete_auxiliary_overlay_text/v1": "delete_auxiliary_overlay_text/v1",
+    "create_review_marker/v1": "create_review_marker/v1",
+}
 MAX_NATIVE_LEGACY_OPERATION_COUNT: Final = 2_000
 _SCHEMA_CHECKPOINT_INTERVAL: Final = 64
 _GEOMETRY_UTF8_SCAN_CHARACTERS: Final = 16 * 1024
@@ -722,7 +733,18 @@ def _deadline_aware_validator(
         # Small nested arrays are sampled by the shared schema counter, while
         # long arrays force an initial and each subsequent bounded checkpoint.
         # This avoids a callback for every one-item field in every entity.
-        checkpoint(item_stage, force=total >= _SCHEMA_CHECKPOINT_INTERVAL)
+        # Entity arrays are the dominant nested geometry cost and their first
+        # deadline probe must not depend on how many unrelated schema fields
+        # precede them. In particular, adding v2 physical-container records
+        # must not shift a small entity array past a sampler boundary and let
+        # it bypass the request's first geometry checkpoint.
+        checkpoint(
+            item_stage,
+            force=(
+                total >= _SCHEMA_CHECKPOINT_INTERVAL
+                or (item_stage == "entities items" and total > 0)
+            ),
+        )
         extra = total - prefix
         if extra <= 0:
             return
@@ -1007,32 +1029,64 @@ def _geometry_projection(entity: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _container_key(entity: Mapping[str, Any]) -> tuple[str, str, str, tuple[str, ...]]:
-    space = cast(Mapping[str, Any], entity["space"])
+def _container_key_from_record(
+    record: Mapping[str, Any],
+) -> tuple[str, str, str, tuple[str, ...]]:
+    space = cast(Mapping[str, Any], record["space"])
     return (
         cast(str, space["kind"]),
         cast(str, space["layout_handle"] or ""),
         cast(str, space["block_handle"] or ""),
-        tuple(cast(list[str], entity["block_path"])),
+        tuple(cast(list[str], record["block_path"])),
     )
+
+
+def _container_key(entity: Mapping[str, Any]) -> tuple[str, str, str, tuple[str, ...]]:
+    return _container_key_from_record(entity)
 
 
 def native_container_sequences(
     entities: list[Mapping[str, Any]],
+    containers: list[Mapping[str, Any]] | None = None,
     *,
     deadline_check: _DeadlineCheck | None = None,
 ) -> list[dict[str, Any]]:
-    """Project ordered handle/fingerprint records for every exact container."""
+    """Project ordered records with explicit v2 physical container extents.
+
+    Legacy v1 callers intentionally retain their historical active-record
+    grouping when ``containers`` is omitted. Active v2 callers must supply
+    every physical container rather than deriving its extent from active
+    sequence indices.
+    """
 
     grouped: dict[tuple[str, str, str, tuple[str, ...]], list[Mapping[str, Any]]] = {}
     for index, entity in enumerate(entities):
         if index % _SCHEMA_CHECKPOINT_INTERVAL == 0:
             _check_deadline(deadline_check, "geometry container projection")
         grouped.setdefault(_container_key(entity), []).append(entity)
+    if containers is None:
+        ordered_containers: list[tuple[
+            tuple[str, str, str, tuple[str, ...]],
+            Mapping[str, Any] | None,
+        ]] = [
+            (container, None) for container in sorted(grouped)
+        ]
+    else:
+        ordered_containers = [
+            (_container_key_from_record(container), container)
+            for container in sorted(
+                containers,
+                key=_container_key_from_record,
+            )
+        ]
+
     projected: list[dict[str, Any]] = []
-    for container_index, (container, records) in enumerate(sorted(grouped.items())):
+    for container_index, (container, container_record) in enumerate(
+        ordered_containers
+    ):
         if container_index % _SCHEMA_CHECKPOINT_INTERVAL == 0:
             _check_deadline(deadline_check, "geometry container projection")
+        records = grouped.get(container, [])
         records_projection: list[dict[str, Any]] = []
         for record_index, entity in enumerate(records):
             if record_index % _SCHEMA_CHECKPOINT_INTERVAL == 0:
@@ -1045,7 +1099,16 @@ def native_container_sequences(
                     "sequence_index": entity["sequence_index"],
                 }
             )
-        projected.append({"container": container, "entities": records_projection})
+        projection: dict[str, Any] = {
+            "container": container,
+            "entities": records_projection,
+        }
+        if container_record is not None:
+            projection["owner_handle"] = container_record["owner_handle"]
+            projection["physical_slot_count"] = container_record[
+                "physical_slot_count"
+            ]
+        projected.append(projection)
     return projected
 
 
@@ -1069,6 +1132,45 @@ def geometry_document_binding(export: Mapping[str, Any]) -> dict[str, Any]:
             "document_state_digest",
         )
     }
+
+
+def prewrite_semantic_projection(export: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the one source-to-private-copy portable prewrite contract.
+
+    Database instance/revision values and source/session bindings identify the
+    host context that produced an export, but a byte-for-byte private DWG copy
+    is allowed to receive different values for each.  This projection carries
+    only semantic/protected state that must survive that retarget.  Marker
+    policy is deliberately not folded into this digest: it is bound and
+    checked separately by the manifest stable-host binding, while the
+    policy-independent table digest still rejects marker resource drift.
+    """
+
+    document = cast(Mapping[str, Any], export["document"])
+    return {
+        "schema_version": "liang-pingfa/portable-prewrite-projection/v2",
+        "ordered_entity_digest": document["ordered_entity_digest"],
+        "container_order_digest": document["container_order_digest"],
+        "geometry_digest": document["complete_geometry_digest"],
+        "protected_semantic_digest": canonical_sha256(
+            {
+                "owners": list(cast(list[str], export["owners"])),
+                "opaque_state_digests": [
+                    entity["opaque_state_digest"]
+                    for entity in cast(list[Mapping[str, Any]], export["entities"])
+                ],
+            }
+        ),
+        "table_state_digest": document["table_state_digest"],
+        "layout_state_digest": document["layout_state_digest"],
+        "block_state_digest": document["block_state_digest"],
+    }
+
+
+def prewrite_semantic_projection_digest(export: Mapping[str, Any]) -> str:
+    """Return the canonical digest of :func:`prewrite_semantic_projection`."""
+
+    return canonical_sha256(prewrite_semantic_projection(export))
 
 
 def geometry_adapter_binding(export: Mapping[str, Any]) -> dict[str, Any]:
@@ -1097,27 +1199,29 @@ def prewrite_revision_binding(
     stable_host_binding_digest: str,
     audited_semantic_state_digest: str,
 ) -> dict[str, Any]:
-    """Project every pre-write invariant without predicting a future revision.
+    """Bind private source bytes and one portable prewrite projection.
 
-    A pre-write transaction binding intentionally includes the fresh database
-    and revision tokens only as evidence of the state that will be edited.
-    The post-save revision is supplied later by the write-result contract.
+    The bridge database/revision values remain explicit evidence of the
+    embedded bridge export only. They are never compared to a Core Console
+    private-copy database, whose documented host identity may differ after
+    opening the copied DWG.
     """
 
     source = cast(Mapping[str, Any], export["source"])
     document = cast(Mapping[str, Any], export["document"])
+    portable = prewrite_semantic_projection(export)
     return {
         "source_binding": dict(source),
         "document_path_fingerprint": source["path_fingerprint"],
         "document_file_identity_fingerprint": source["file_identity_fingerprint"],
         "document_content_sha256": source["sha256"],
         "document_byte_size": source["byte_size"],
-        "database_instance_fingerprint": document["database_instance_fingerprint"],
-        "revision_fingerprint": document["revision_fingerprint"],
-        "geometry_digest": document["complete_geometry_digest"],
-        "protected_state_digest": document["protected_state_digest"],
-        "protected_order_digest": document["protected_order_digest"],
-        "document_state_digest": document["document_state_digest"],
+        "bridge_document_identity": {
+            "database_instance_fingerprint": document["database_instance_fingerprint"],
+            "revision_fingerprint": document["revision_fingerprint"],
+        },
+        "portable_prewrite_projection": portable,
+        "portable_prewrite_projection_digest": canonical_sha256(portable),
         "adapter_binding": geometry_adapter_binding(export),
         "native_host_binding": native_host_binding_value,
         "stable_host_binding_digest": stable_host_binding_digest,
@@ -1230,12 +1334,23 @@ def native_execution_stable_host_binding_digest(
 def geometry_document_binding_digest(export: Mapping[str, Any]) -> str:
     """Digest every source and document field carried by a geometry export."""
 
-    return canonical_sha256(
-        {
-            "source": dict(cast(Mapping[str, Any], export["source"])),
-            "document": dict(cast(Mapping[str, Any], export["document"])),
-        }
-    )
+    binding: dict[str, Any] = {
+        "source": dict(cast(Mapping[str, Any], export["source"])),
+        "document": dict(cast(Mapping[str, Any], export["document"])),
+    }
+    # v1's persisted document-binding digest is frozen. Active v2 binds the
+    # full erased-inclusive container extent in addition to its document
+    # digest fields, so an otherwise self-consistent count drift cannot pass
+    # audit/plan/manifest preconditions.
+    if export.get("schema_version") == _ACTIVE_SCHEMA_VERSIONS["geometry"]:
+        binding["containers"] = [
+            dict(container)
+            for container in cast(
+                list[Mapping[str, Any]],
+                export["containers"],
+            )
+        ]
+    return canonical_sha256(binding)
 
 
 def _export_process_binding(session: Mapping[str, Any]) -> dict[str, Any]:
@@ -1518,6 +1633,12 @@ def _preflight_geometry_limits(
     entities = artifact.get("entities")
     if not isinstance(entities, list):
         return
+    containers = artifact.get("containers")
+    if isinstance(containers, list) and len(containers) > MAX_NATIVE_GEOMETRY_CONTAINERS:
+        raise PipelineError(
+            ErrorCode.NATIVE_GEOMETRY_INVALID,
+            "native geometry exceeds the fixed container limit",
+        )
     _check_deadline(deadline_check, "geometry limit preflight")
     if len(entities) > MAX_NATIVE_GEOMETRY_ENTITIES:
         raise PipelineError(
@@ -1570,6 +1691,43 @@ def _validate_geometry_semantics(
         if owner_index % _SCHEMA_CHECKPOINT_INTERVAL == 0:
             _check_deadline(deadline_check, "geometry owner semantic validation")
         owners.add(owner)
+    active_v2 = artifact["schema_version"] == _ACTIVE_SCHEMA_VERSIONS["geometry"]
+    physical_containers: list[dict[str, Any]] | None = None
+    containers_by_key: dict[
+        tuple[str, str, str, tuple[str, ...]], dict[str, Any]
+    ] = {}
+    if active_v2:
+        physical_containers = cast(list[dict[str, Any]], artifact["containers"])
+        if (
+            len(physical_containers) == 0
+            or len(physical_containers) > MAX_NATIVE_GEOMETRY_CONTAINERS
+        ):
+            raise ValueError("native physical container cardinality is invalid")
+        previous_container: tuple[str, str, str, tuple[str, ...]] | None = None
+        for container_index, container in enumerate(physical_containers):
+            if container_index % _SCHEMA_CHECKPOINT_INTERVAL == 0:
+                _check_deadline(
+                    deadline_check,
+                    "geometry physical container semantic validation",
+                )
+            key = _container_key_from_record(container)
+            owner = cast(str, container["owner_handle"])
+            count = container["physical_slot_count"]
+            if (
+                owner not in owners
+                or key in containers_by_key
+                or not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 0
+                or count > MAX_NATIVE_PHYSICAL_SLOT_COUNT
+                or (
+                    previous_container is not None
+                    and key <= previous_container
+                )
+            ):
+                raise ValueError("native physical container is invalid")
+            containers_by_key[key] = container
+            previous_container = key
     entities = cast(list[dict[str, Any]], artifact["entities"])
     if len(entities) > MAX_NATIVE_GEOMETRY_ENTITIES:
         raise ValueError("too many native entities")
@@ -1586,7 +1744,19 @@ def _validate_geometry_semantics(
         handles.add(handle)
         if entity["owner_handle"] not in owners:
             raise ValueError("entity owner is unknown")
-        key = (_container_key(entity), cast(int, entity["sequence_index"]))
+        container_key = _container_key(entity)
+        if active_v2:
+            physical_container = containers_by_key.get(container_key)
+            if (
+                physical_container is None
+                or physical_container["owner_handle"] != entity["owner_handle"]
+                or entity["sequence_index"]
+                >= physical_container["physical_slot_count"]
+            ):
+                raise ValueError(
+                    "native entity is outside its physical container extent"
+                )
+        key = (container_key, cast(int, entity["sequence_index"]))
         if key in sequences:
             raise ValueError("duplicate native sequence index")
         sequences.add(key)
@@ -1668,11 +1838,27 @@ def _validate_geometry_semantics(
         opaque_state_digests.append(cast(str, item["opaque_state_digest"]))
     container_projection = native_container_sequences(
         entities,
+        physical_containers,
         deadline_check=deadline_check,
     )
     _check_deadline(deadline_check, "geometry document fingerprint validation")
+    expected_order_value: Any = order_projection
+    expected_geometry_value: Any = geometry_projection
+    if active_v2:
+        # The active carrier retains all physical containers, including
+        # erased-only ones. These explicit records must be inseparable from
+        # ordered/geometry/protected digests rather than reconstructed from
+        # the active entities below them.
+        expected_order_value = {
+            "containers": physical_containers,
+            "entities": order_projection,
+        }
+        expected_geometry_value = {
+            "containers": physical_containers,
+            "entities": geometry_projection,
+        }
     expected_order_digest = canonical_sha256(
-        order_projection,
+        expected_order_value,
         deadline_check=deadline_check,
     )
     expected_container_order_digest = canonical_sha256(
@@ -1680,7 +1866,7 @@ def _validate_geometry_semantics(
         deadline_check=deadline_check,
     )
     expected_geometry_digest = canonical_sha256(
-        geometry_projection,
+        expected_geometry_value,
         deadline_check=deadline_check,
     )
     # A saved/reopened output necessarily receives a new file identity,
@@ -1703,6 +1889,11 @@ def _validate_geometry_semantics(
             # Owner records are protected host state even when currently
             # unused by an entity. Preserve their complete canonical order.
             "owners": artifact["owners"],
+            **(
+                {"containers": physical_containers}
+                if active_v2
+                else {}
+            ),
             "opaque_state_digests": opaque_state_digests,
         },
         deadline_check=deadline_check,
@@ -1724,6 +1915,19 @@ def _validate_geometry_semantics(
         or document["protected_order_digest"] != expected_protected_order
     ):
         raise ValueError("native document digest mismatch")
+    if is_active_native_contract("geometry", artifact):
+        portable = prewrite_semantic_projection(artifact)
+        if (
+            artifact["portable_prewrite_projection"] != portable
+            or artifact["portable_prewrite_projection_digest"]
+            != canonical_sha256(portable, deadline_check=deadline_check)
+            or artifact["portable_prewrite_projection_digest"]
+            != canonical_sha256(
+                cast(Mapping[str, Any], artifact["portable_prewrite_projection"]),
+                deadline_check=deadline_check,
+            )
+        ):
+            raise ValueError("native portable prewrite projection mismatch")
     binding = cast(Mapping[str, Any], artifact["binding"])
     if (
         binding["document_binding_digest"] != geometry_document_binding_digest(artifact)
@@ -2339,14 +2543,23 @@ def _validate_manifest_semantics(
         or constraints["max_byte_size"] < 6
     ):
         raise ValueError("manifest final-output constraints differ from prewrite")
+    portable = prewrite_semantic_projection(geometry)
     if (
-        prewrite["database_instance_fingerprint"]
-        != document["database_instance_fingerprint"]
-        or prewrite["revision_fingerprint"] != document["revision_fingerprint"]
-        or prewrite["geometry_digest"] != document["complete_geometry_digest"]
-        or prewrite["protected_state_digest"] != document["protected_state_digest"]
-        or prewrite["protected_order_digest"] != document["protected_order_digest"]
-        or prewrite["document_state_digest"] != document["document_state_digest"]
+        prewrite["bridge_document_identity"]
+        != {
+            "database_instance_fingerprint": document[
+                "database_instance_fingerprint"
+            ],
+            "revision_fingerprint": document["revision_fingerprint"],
+        }
+        or prewrite["portable_prewrite_projection"] != portable
+        or prewrite["portable_prewrite_projection_digest"]
+        != canonical_sha256(portable, deadline_check=deadline_check)
+        or prewrite["portable_prewrite_projection_digest"]
+        != canonical_sha256(
+            cast(Mapping[str, Any], prewrite["portable_prewrite_projection"]),
+            deadline_check=deadline_check,
+        )
         or prewrite["adapter_binding"] != geometry_adapter_binding(geometry)
         or prewrite["native_host_binding"] != artifact["native_host_binding"]
         or prewrite["stable_host_binding_digest"]
@@ -2392,38 +2605,43 @@ def _validate_manifest_semantics(
         derive_native_target_id(entity): entity
         for entity in cast(list[dict[str, Any]], geometry["entities"])
     }
-    # Marker slots are reservations made from the immutable prewrite
-    # Modelspace projection. They are never recomputed from a prefix where a
-    # delete may already have removed the original maximum sequence index.
+    # Marker slots are reservations made from the immutable prewrite physical
+    # Modelspace extent. They are never recomputed from a prefix where a
+    # delete may have removed an active tail while its erased slot remains.
     marker_operations = [
         operation
         for operation in cast(list[dict[str, Any]], artifact["operations"])
         if operation["kind"] == "create_review_marker"
     ]
     marker_sequence_reservations: dict[str, int] = {}
+    marker_container: Mapping[str, Any] | None = None
     if marker_operations:
         direct_modelspace = [
-            entity
-            for entity in cast(list[dict[str, Any]], geometry["entities"])
+            container
+            for container in cast(list[Mapping[str, Any]], geometry["containers"])
             if (
-                entity["space"]["kind"] == "modelspace"
-                and entity["space"]["block_handle"] is None
-                and entity["block_path"] == []
+                container["space"]["kind"] == "modelspace"
+                and container["space"]["block_handle"] is None
+                and container["block_path"] == []
             )
         ]
-        if not direct_modelspace:
+        if len(direct_modelspace) != 1:
             raise ValueError("marker has no direct Modelspace reservation base")
-        maximum_sequence = max(
-            cast(int, entity["sequence_index"]) for entity in direct_modelspace
+        marker_container = direct_modelspace[0]
+        physical_slot_count = cast(
+            int,
+            marker_container["physical_slot_count"],
         )
         reserved_slots: set[int] = set()
         for marker_offset, operation in enumerate(marker_operations):
             slot = cast(int, operation["sequence_index"])
             if (
-                slot != maximum_sequence + marker_offset + 1
+                slot != physical_slot_count + marker_offset
                 or slot in reserved_slots
             ):
-                raise ValueError("marker sequence reservation differs from prewrite Modelspace")
+                raise ValueError(
+                    "marker sequence reservation differs from prewrite physical Modelspace"
+                )
             reserved_slots.add(slot)
             marker_sequence_reservations[
                 cast(str, operation["operation_id"])
@@ -2446,32 +2664,15 @@ def _validate_manifest_semantics(
                 cast(str, operation["operation_id"]),
                 marker_policy,
             )
-            direct_modelspace = [
-                entity
-                for entity in cast(list[dict[str, Any]], geometry["entities"])
-                if (
-                    entity["space"]["kind"] == "modelspace"
-                    and entity["space"]["block_handle"] is None
-                    and entity["block_path"] == []
-                )
-            ]
-            direct_containers = {
-                _container_key(entity)
-                for entity in direct_modelspace
-            }
-            direct_owners = {
-                entity["owner_handle"]
-                for entity in direct_modelspace
-            }
             if (
                 operation["marker_text"] != expected
                 or operation["marker_fingerprint"]
                 != native_marker_fingerprint(operation)
                 or operation["owner_handle"] not in geometry["owners"]
-                or len(direct_containers) != 1
-                or len(direct_owners) != 1
-                or operation["owner_handle"] not in direct_owners
-                or _container_key(operation) not in direct_containers
+                or marker_container is None
+                or operation["owner_handle"] != marker_container["owner_handle"]
+                or _container_key(operation)
+                != _container_key_from_record(marker_container)
                 or operation["space"]["kind"] != "modelspace"
                 or operation["space"]["kind"] != marker_defaults["space_kind"]
                 or operation["block_path"] != marker_defaults["block_path"]
@@ -2705,10 +2906,18 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
     if not {"read.inventory/v1", "read.exact_geometry/v1"}.issubset(required):
         raise ValueError("native config lacks read capabilities")
     operation_profiles = cast(dict[str, bool], config["operation_profiles"])
-    if not operation_profiles["translate_dbtext/v1"] or not operation_profiles[
-        "delete_auxiliary_overlay_text/v1"
-    ]:
-        raise ValueError("initial native profiles must be explicitly enabled")
+    if not operation_profiles["translate_dbtext/v1"]:
+        raise ValueError("initial native translation profile must be explicitly enabled")
+    if config["adapter"]["id"] == AUTOCAD_ADAPTER_ID:
+        for profile, capability in _OPERATION_PROFILE_CAPABILITIES.items():
+            if operation_profiles[profile] and capability not in required:
+                raise ValueError(
+                    "enabled AutoCAD operation lacks advertised plugin capability"
+                )
+        if operation_profiles["delete_auxiliary_overlay_text/v1"]:
+            raise ValueError(
+                "the AutoCAD adapter does not support delete_auxiliary_overlay_text"
+            )
     plugins = cast(dict[str, dict[str, Any]], config["plugins"])
     if plugins["write"]["command"] != "LPF_NATIVE_EXECUTE_MANIFEST" or plugins[
         "readback"

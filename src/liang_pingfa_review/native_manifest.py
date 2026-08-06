@@ -35,6 +35,8 @@ from .native_contracts import (
     native_marker_fingerprint,
     native_marker_policy_binding,
     PRIVATE_RECORD_CARDINALITY,
+    prewrite_semantic_projection,
+    prewrite_semantic_projection_digest,
     prewrite_revision_binding,
     require_active_native_contract,
     require_geometry_export_matches_session,
@@ -251,13 +253,27 @@ def _private_prewrite_export(
     fresh_export: Mapping[str, Any],
     prewrite_output_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Retarget exact audited geometry at the private copy before execution."""
+    """Retarget source binding without changing portable document semantics."""
 
+    bridge_projection = prewrite_semantic_projection(fresh_export)
+    bridge_projection_digest = prewrite_semantic_projection_digest(fresh_export)
     private_export = deepcopy(dict(fresh_export))
+    # This is the only intentional source-to-private-copy rewrite. Host
+    # database/revision fields remain bridge evidence in the embedded geometry
+    # and are excluded from the portable projection checked by Core Console.
     private_export["source"] = dict(prewrite_output_binding)
     private_export["binding"]["document_binding_digest"] = geometry_document_binding_digest(
         private_export
     )
+    if (
+        prewrite_semantic_projection(private_export) != bridge_projection
+        or prewrite_semantic_projection_digest(private_export)
+        != bridge_projection_digest
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_MANIFEST_INVALID,
+            "private source retarget changed portable prewrite state",
+        )
     return validate_native_contract(
         "geometry",
         attach_native_integrity("geometry", private_export),
@@ -453,30 +469,25 @@ def _marker_destinations(
     """Reserve deterministic append slots in the one audited direct Modelspace."""
 
     defaults = marker_policy["geometry_defaults"]
-    direct = [
-        entity
-        for entity in export["entities"]
+    direct_containers = [
+        container
+        for container in export["containers"]
         if (
-            entity["space"]["kind"] == defaults["space_kind"]
-            and entity["block_path"] == defaults["block_path"]
+            container["space"]["kind"] == defaults["space_kind"]
+            and container["block_path"] == defaults["block_path"]
         )
     ]
-    containers = {
-        (
-            entity["owner_handle"],
-            entity["space"]["layout_handle"],
-            entity["space"]["block_handle"],
-        )
-        for entity in direct
-    }
     if marker_count < 1:
         return []
-    if len(containers) != 1:
+    if len(direct_containers) != 1:
         raise PipelineError(
             ErrorCode.NATIVE_MANIFEST_INVALID,
             "marker direct Modelspace container is ambiguous",
         )
-    owner_handle, layout_handle, block_handle = next(iter(containers))
+    direct = direct_containers[0]
+    owner_handle = direct["owner_handle"]
+    layout_handle = direct["space"]["layout_handle"]
+    block_handle = direct["space"]["block_handle"]
     if block_handle is not None or defaults["space_kind"] != "modelspace":
         raise PipelineError(
             ErrorCode.NATIVE_MANIFEST_INVALID,
@@ -487,7 +498,11 @@ def _marker_destinations(
             ErrorCode.NATIVE_MANIFEST_INVALID,
             "marker owner is not a pre-existing declared Modelspace owner",
         )
-    first_index = max(int(entity["sequence_index"]) for entity in direct) + 1
+    # Slot reservations are based on the immutable erased-inclusive physical
+    # extent, not on the greatest active entity index. This remains correct
+    # when the final physical slots are erased or all active records precede
+    # an internal/trailing gap.
+    first_index = int(direct["physical_slot_count"])
     return [
         {
             "owner_handle": owner_handle,
