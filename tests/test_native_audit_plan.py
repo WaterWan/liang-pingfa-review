@@ -14,6 +14,8 @@ from liang_pingfa_review.native_contracts import (
     bits_vector,
     derive_native_target_id,
     geometry_document_binding_digest,
+    prewrite_semantic_projection,
+    prewrite_semantic_projection_digest,
     strict_native_json,
     validate_native_contract,
 )
@@ -104,6 +106,7 @@ def _renewed_session(value: dict, token: str = "f") -> dict:
 def _fresh_export(before: dict, fresh_session: dict) -> dict:
     return geometry(
         deepcopy(before["entities"]),
+        containers=deepcopy(before["containers"]),
         source_value=deepcopy(before["source"]),
         session_value=fresh_session,
     )
@@ -142,8 +145,53 @@ def _final_export(
 ) -> dict:
     """Build generated readback evidence from an observed constrained output."""
 
+    preconditions = strict_native_json(manifest["preconditions_geometry_json"])
+    containers = deepcopy(preconditions["containers"])
+    for operation in manifest["operations"]:
+        if operation["kind"] != "create_review_marker":
+            continue
+        matching = [
+            container
+            for container in containers
+            if (
+                container["owner_handle"] == operation["owner_handle"]
+                and container["space"] == operation["space"]
+                and container["block_path"] == operation["block_path"]
+            )
+        ]
+        if len(matching) != 1:
+            raise AssertionError("generated marker has no unique physical container")
+        matching[0]["physical_slot_count"] += 1
+    # Malformed readback scenarios still need a schema-valid physical extent
+    # so the transition verifier—not a malformed helper—reports their
+    # count/index drift. Legitimate transitions never take this branch beyond
+    # the exact marker increments above.
+    for entity_value in entities:
+        matching = [
+            container
+            for container in containers
+            if (
+                container["space"] == entity_value["space"]
+                and container["block_path"] == entity_value["block_path"]
+            )
+        ]
+        if len(matching) == 1:
+            matching[0]["physical_slot_count"] = max(
+                matching[0]["physical_slot_count"],
+                entity_value["sequence_index"] + 1,
+            )
+        elif not matching:
+            containers.append(
+                {
+                    "owner_handle": entity_value["owner_handle"],
+                    "space": deepcopy(entity_value["space"]),
+                    "block_path": list(entity_value["block_path"]),
+                    "physical_slot_count": entity_value["sequence_index"] + 1,
+                }
+            )
     return geometry(
         entities,
+        containers=containers,
         source_value=_actual_output_binding(manifest),
         **kwargs,
     )
@@ -210,6 +258,79 @@ class NativeAuditPlanTests(unittest.TestCase):
         self.assertNotIn("generated-private-text", str(plan))
         self.assertNotIn("generated-private-text", str(audit))
         self.assertIn("generated-private-text", manifest["preconditions_geometry_json"])
+
+    def test_portable_prewrite_projection_survives_copy_and_rejects_drift(self) -> None:
+        """Only source/database instance identity may differ across contexts."""
+
+        before, _audit, _intent, _plan, manifest = self._translation_workflow()
+        bridge_projection = prewrite_semantic_projection(before)
+        self.assertEqual(
+            bridge_projection,
+            before["portable_prewrite_projection"],
+        )
+        self.assertEqual(
+            prewrite_semantic_projection_digest(before),
+            before["portable_prewrite_projection_digest"],
+        )
+        copied_context = deepcopy(before)
+        copied_context["source"]["path_fingerprint"] = digest("private-copy-path")
+        copied_context["source"]["file_identity_fingerprint"] = digest(
+            "private-copy-identity"
+        )
+        copied_context["document"]["database_instance_fingerprint"] = digest(
+            "core-console-database"
+        )
+        copied_context["document"]["revision_fingerprint"] = digest(
+            "core-console-revision"
+        )
+        copied_context["binding"]["session_id"] = "native-session-" + "e" * 32
+        self.assertEqual(bridge_projection, prewrite_semantic_projection(copied_context))
+        self.assertEqual(
+            prewrite_semantic_projection_digest(before),
+            prewrite_semantic_projection_digest(copied_context),
+        )
+
+        embedded = strict_native_json(manifest["preconditions_geometry_json"])
+        prewrite = manifest["expected_prewrite_revision"]
+        self.assertEqual(
+            embedded["source"],
+            manifest["expected_prewrite_output_copy_binding"],
+        )
+        self.assertEqual(
+            {
+                "database_instance_fingerprint": embedded["document"][
+                    "database_instance_fingerprint"
+                ],
+                "revision_fingerprint": embedded["document"]["revision_fingerprint"],
+            },
+            prewrite["bridge_document_identity"],
+        )
+        self.assertEqual(
+            prewrite_semantic_projection(embedded),
+            prewrite["portable_prewrite_projection"],
+        )
+        self.assertEqual(
+            prewrite_semantic_projection_digest(embedded),
+            prewrite["portable_prewrite_projection_digest"],
+        )
+
+        for field in (
+            "geometry_digest",
+            "protected_semantic_digest",
+            "table_state_digest",
+        ):
+            with self.subTest(field=field):
+                forged = deepcopy(manifest)
+                forged["expected_prewrite_revision"][
+                    "portable_prewrite_projection"
+                ][field] = digest("forged-" + field)
+                forged = attach_integrity(forged)
+                with self.assertRaises(PipelineError) as raised:
+                    validate_native_contract("manifest", forged)
+                self.assertEqual(
+                    ErrorCode.NATIVE_MANIFEST_INVALID,
+                    raised.exception.code,
+                )
 
     def test_stale_audit_and_disabled_marker_fail_closed(self) -> None:
         before = geometry()
@@ -383,6 +504,142 @@ class NativeAuditPlanTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
 
+    def test_physical_slot_counts_bind_trailing_internal_gaps_and_markers(self) -> None:
+        """Markers reserve erased-inclusive Modelspace slots, not active maxima."""
+
+        before = geometry(
+            [
+                entity("10", sequence_index=0, layer="OTHER"),
+                entity("11", sequence_index=3, layer="OTHER", text="later"),
+                entity("20", sequence_index=0, space_kind="paperspace", layer="OTHER"),
+            ],
+            containers=[
+                {
+                    "owner_handle": "AA",
+                    "space": {
+                        "kind": "modelspace",
+                        "layout_handle": "BB",
+                        "block_handle": None,
+                    },
+                    "block_path": [],
+                    # Active records occupy 0 and 3. Slots 1–2 are internal
+                    # gaps and 4–7 are trailing erased slots.
+                    "physical_slot_count": 8,
+                },
+                {
+                    "owner_handle": "AA",
+                    "space": {
+                        "kind": "paperspace",
+                        "layout_handle": "BB",
+                        "block_handle": None,
+                    },
+                    "block_path": [],
+                    "physical_slot_count": 4,
+                },
+            ],
+        )
+        self.assertEqual(8, before["containers"][0]["physical_slot_count"])
+        self.assertLess(
+            max(item["sequence_index"] for item in before["entities"] if item["space"]["kind"] == "modelspace"),
+            before["containers"][0]["physical_slot_count"],
+        )
+        native_config = config()
+        native_config["operation_profiles"]["create_review_marker/v1"] = True
+        native_config["marker_policy"]["enabled"] = True
+        native_config["marker_policy"]["plugin_capability"] = True
+        audited_session = session()
+        audit = build_native_audit(before, audited_session, native_config)
+        requested = intent(
+            audit,
+            operations=[
+                {
+                    "operation_id": "native-operation-" + "a" * 24,
+                    "kind": "create_review_marker",
+                    "position": [bits_from_float(7), bits_from_float(8), bits_from_float(0)],
+                },
+                {
+                    "operation_id": "native-operation-" + "b" * 24,
+                    "kind": "create_review_marker",
+                    "position": [bits_from_float(9), bits_from_float(8), bits_from_float(0)],
+                },
+            ],
+        )
+        plan = generate_native_plan(audit, requested, native_config)
+        fresh_session = _renewed_session(audited_session, "e")
+        manifest = build_native_manifest(
+            audit,
+            plan,
+            requested,
+            _fresh_export(before, fresh_session),
+            fresh_session,
+            native_config,
+            private_source_copy={
+                "sha256": before["source"]["sha256"],
+                "byte_size": before["source"]["byte_size"],
+                "file_identity_fingerprint": "c" * 64,
+            },
+            output_path=__import__("pathlib").Path("physical-slots.dwg"),
+        )
+        operations = manifest["operations"]
+        self.assertEqual([8, 9], [item["sequence_index"] for item in operations])
+        first = _marker_from_operation(operations[0], "30")
+        second = _marker_from_operation(operations[1], "31")
+        after = _final_export(
+            manifest,
+            [*before["entities"], first, second],
+        )
+        self.assertEqual(
+            [10, 4],
+            [
+                container["physical_slot_count"]
+                for container in after["containers"]
+            ],
+        )
+        self.assertEqual(
+            ["create_review_marker", "create_review_marker"],
+            [item["kind"] for item in verify_native_transition(manifest, after)],
+        )
+
+        # A high-but-schema-valid forged count changes every v2 bound digest,
+        # so it cannot satisfy the older audit/plan preconditions.
+        forged_containers = deepcopy(before["containers"])
+        forged_containers[0]["physical_slot_count"] = 9
+        forged_fresh = geometry(
+            deepcopy(before["entities"]),
+            containers=forged_containers,
+            source_value=deepcopy(before["source"]),
+            session_value=fresh_session,
+        )
+        with self.assertRaises(PipelineError) as raised:
+            build_native_manifest(
+                audit,
+                plan,
+                requested,
+                forged_fresh,
+                fresh_session,
+                native_config,
+                private_source_copy={
+                    "sha256": before["source"]["sha256"],
+                    "byte_size": before["source"]["byte_size"],
+                    "file_identity_fingerprint": "d" * 64,
+                },
+                output_path=__import__("pathlib").Path("forged-physical-slots.dwg"),
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_DOCUMENT_CHANGED)
+
+        drifted_containers = deepcopy(after["containers"])
+        drifted_containers[0]["physical_slot_count"] += 1
+        drifted = geometry(
+            deepcopy(after["entities"]),
+            containers=drifted_containers,
+            source_value=deepcopy(after["source"]),
+            database_instance=after["document"]["database_instance_fingerprint"],
+            revision=after["document"]["revision_fingerprint"],
+        )
+        with self.assertRaises(PipelineError) as raised:
+            verify_native_transition(manifest, drifted)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
+
     def test_every_marker_policy_field_is_audit_plan_manifest_bound(self) -> None:
         """No later configuration can alter a marker after audit or planning."""
 
@@ -545,7 +802,9 @@ class NativeAuditPlanTests(unittest.TestCase):
             audit["native_host_binding"],
         )
         self.assertNotEqual(
-            manifest["expected_prewrite_revision"]["database_instance_fingerprint"],
+            manifest["expected_prewrite_revision"]["bridge_document_identity"][
+                "database_instance_fingerprint"
+            ],
             audit["document_binding"]["database_instance_fingerprint"],
         )
         self.assertNotIn("expected_final_revision_fingerprint", manifest)
@@ -886,6 +1145,98 @@ class NativeAuditPlanTests(unittest.TestCase):
             [result["operation_id"] for result in verify_native_transition(manifest, after)],
             [operation["operation_id"] for operation in manifest["operations"]],
         )
+        actual_handles = {
+            operations[0]["operation_id"]: first["handle"],
+            operations[1]["operation_id"]: second["handle"],
+        }
+        receipt = attach_integrity(
+            {
+                "schema_version": "liang-pingfa/native-console-result/v2",
+                "run_id": "native-run-" + "c" * 32,
+                "manifest_id": manifest["manifest_id"],
+                "manifest_integrity_sha256": manifest["integrity"]["sha256"],
+                "manifest_schema_version": manifest["schema_version"],
+                "nonce": manifest["nonce"],
+                "final_revision_fingerprint": after["document"][
+                    "revision_fingerprint"
+                ],
+                "final_revision_transition": "save_reopen_changed",
+                "final_document_binding": {
+                    "database_instance_fingerprint": after["document"][
+                        "database_instance_fingerprint"
+                    ],
+                    "revision_fingerprint": after["document"][
+                        "revision_fingerprint"
+                    ],
+                    "output_copy_binding": after["source"],
+                },
+                "transaction": {
+                    "preflight": "passed",
+                    "outcome": "committed",
+                    "rollback": "not_required",
+                },
+                "operation_results": [
+                    {
+                        "operation_id": operation["operation_id"],
+                        "status": "applied",
+                        "marker_handle": actual_handles[
+                            operation["operation_id"]
+                        ],
+                        "postcondition_digest": canonical_sha256(
+                            {
+                                "operation": operation,
+                                "marker_handle": actual_handles[
+                                    operation["operation_id"]
+                                ],
+                            }
+                        ),
+                    }
+                    for operation in manifest["operations"]
+                ],
+            }
+        )
+        checked_receipt = validate_console_result(
+            manifest,
+            receipt,
+            run_id=receipt["run_id"],
+        )
+        verified = verify_native_transition(
+            manifest,
+            after,
+            console_result=checked_receipt,
+        )
+        self.assertEqual(
+            ["30", "31"],
+            [
+                result["marker_handle"]
+                for result in verified
+                if result["kind"] == "create_review_marker"
+            ],
+        )
+        swapped = deepcopy(receipt)
+        for result, operation, handle in zip(
+            swapped["operation_results"],
+            manifest["operations"],
+            ("31", "30"),
+            strict=True,
+        ):
+            result["marker_handle"] = handle
+            result["postcondition_digest"] = canonical_sha256(
+                {"operation": operation, "marker_handle": handle}
+            )
+        swapped = attach_integrity(swapped)
+        checked_swapped = validate_console_result(
+            manifest,
+            swapped,
+            run_id=swapped["run_id"],
+        )
+        with self.assertRaises(PipelineError) as raised:
+            verify_native_transition(
+                manifest,
+                after,
+                console_result=checked_swapped,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
         extra = _marker_from_operation(operations[1], "32")
         extra["sequence_index"] += 4
         _rehash_entity(extra)
@@ -985,6 +1336,7 @@ class NativeAuditPlanTests(unittest.TestCase):
                     "operation_id": manifest["operations"][0]["operation_id"],
                     "status": "applied",
                     "postcondition_digest": canonical_sha256(manifest["operations"][0]),
+                    "marker_handle": None,
                 }
             ],
         }
@@ -992,12 +1344,14 @@ class NativeAuditPlanTests(unittest.TestCase):
         checked_result = validate_console_result(manifest, result, run_id=write_run)
         self.assertNotEqual(
             checked_result["final_revision_fingerprint"],
-            manifest["expected_prewrite_revision"]["revision_fingerprint"],
+            manifest["expected_prewrite_revision"]["bridge_document_identity"][
+                "revision_fingerprint"
+            ],
         )
         preserved_revision = deepcopy(result)
         preserved_revision["final_revision_fingerprint"] = manifest[
             "expected_prewrite_revision"
-        ]["revision_fingerprint"]
+        ]["bridge_document_identity"]["revision_fingerprint"]
         preserved_revision["final_revision_transition"] = (
             "preserved_by_plugin_capability"
         )
@@ -1153,6 +1507,7 @@ class NativeAuditPlanTests(unittest.TestCase):
                     "operation_id": operation["operation_id"],
                     "status": "applied",
                     "postcondition_digest": canonical_sha256(operation),
+                    "marker_handle": None,
                 }
                 for operation in manifest["operations"]
             ],
@@ -1276,13 +1631,17 @@ class NativeAuditPlanTests(unittest.TestCase):
                 "manifest_integrity_sha256": manifest["integrity"]["sha256"],
                 "manifest_schema_version": manifest["schema_version"],
                 "nonce": manifest["nonce"],
-                "final_revision_fingerprint": prewrite["revision_fingerprint"],
+                "final_revision_fingerprint": prewrite["bridge_document_identity"][
+                    "revision_fingerprint"
+                ],
                 "final_revision_transition": "preserved_by_plugin_capability",
                 "final_document_binding": {
                     "database_instance_fingerprint": prewrite[
-                        "database_instance_fingerprint"
+                        "bridge_document_identity"
+                    ]["database_instance_fingerprint"],
+                    "revision_fingerprint": prewrite["bridge_document_identity"][
+                        "revision_fingerprint"
                     ],
-                    "revision_fingerprint": prewrite["revision_fingerprint"],
                     "output_copy_binding": _actual_output_binding(manifest),
                 },
                 "transaction": {
@@ -1295,6 +1654,7 @@ class NativeAuditPlanTests(unittest.TestCase):
                         "operation_id": operation["operation_id"],
                         "status": "applied",
                         "postcondition_digest": canonical_sha256(operation),
+                        "marker_handle": None,
                     }
                     for operation in manifest["operations"]
                 ],

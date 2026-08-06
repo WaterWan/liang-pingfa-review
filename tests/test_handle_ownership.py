@@ -92,6 +92,24 @@ class PrivateInputOwnerTests(unittest.TestCase):
         with self.assertRaises(OwnershipCleanupError):
             validate_private_input_owner(administrators, user_sid=self._user)
 
+    def test_elevated_user_default_owner_does_not_trust_administrators(self) -> None:
+        """Elevation/group membership is not a substitute for TokenOwner."""
+
+        administrators = "S-1-5-32-544"
+        with mock.patch.object(
+            ownership,
+            "_current_token_owner_sid",
+            return_value=self._user,
+        ):
+            with self.assertRaises(OwnershipCleanupError):
+                validate_private_input_owner(
+                    administrators,
+                    user_sid=self._user,
+                    allow_administrators_if_token_owner=True,
+                )
+        validate_private_input_owner(self._user, user_sid=self._user)
+        validate_private_input_owner(self._system, user_sid=self._user)
+
     def test_safe_dacl_cannot_rescue_untrusted_or_drifting_handle_owner(self) -> None:
         dacl = "D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-100)"
         with (
@@ -133,6 +151,56 @@ class PrivateInputOwnerTests(unittest.TestCase):
             self.assertRaises(OwnershipCleanupError),
         ):
             ownership._verify_private_staging_dacl_on_handle(7, self._user)
+
+
+class FixedNtfsVolumeTests(unittest.TestCase):
+    """Drive type is a security property, not merely an NTFS label."""
+
+    class _Kernel32:
+        def __init__(self, drive_type: int, filesystem: str = "NTFS") -> None:
+            self._drive_type = drive_type
+            self._filesystem = filesystem
+
+            def get_drive_type(root: str) -> int:
+                del root
+                return self._drive_type
+
+            def get_volume_information(
+                root: str,
+                volume: object,
+                volume_size: int,
+                serial: object,
+                maximum_component: object,
+                flags: object,
+                filesystem: object,
+                filesystem_size: int,
+            ) -> int:
+                del root, volume, volume_size, serial, maximum_component, flags, filesystem_size
+                filesystem.value = self._filesystem
+                return 1
+
+            self.GetDriveTypeW = get_drive_type
+            self.GetVolumeInformationW = get_volume_information
+
+    def _is_ntfs(self, drive_type: int, filesystem: str = "NTFS") -> bool:
+        kernel32 = self._Kernel32(drive_type, filesystem)
+        with (
+            mock.patch.object(ownership.os, "name", "nt"),
+            mock.patch.object(ownership, "_windows_api", return_value=kernel32),
+        ):
+            return ownership._is_ntfs_volume(
+                _synthetic_windows_path("artifact.json")
+            )
+
+    def test_only_fixed_ntfs_is_accepted(self) -> None:
+        self.assertTrue(self._is_ntfs(3))
+        self.assertFalse(self._is_ntfs(3, "ReFS"))
+        for drive_type in (0, 1, 2, 4, 5, 6):
+            with self.subTest(drive_type=drive_type):
+                self.assertFalse(self._is_ntfs(drive_type))
+
+    def test_mapped_network_ntfs_is_rejected_before_volume_query(self) -> None:
+        self.assertFalse(self._is_ntfs(4, "NTFS"))
 
 
 class _RecordingKernelApi:
