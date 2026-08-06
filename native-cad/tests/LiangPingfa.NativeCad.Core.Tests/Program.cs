@@ -30,12 +30,17 @@ namespace LiangPingfa.NativeCad.Core.Tests
             Run("committed result construction boundary", TestCommittedResultConstructionBoundary);
             Run("geometry binding constructor invariants", TestGeometryBindingConstructorInvariants);
             Run("source binding transition enforcement", TestSourceBindingTransitions);
+            Run("portable prewrite projection retargeting", TestPortablePrewriteProjectionRetargeting);
             Run("stable host binding enforcement", TestStableHostBinding);
             Run("operation result transport budget", TestOperationResultTransportBudget);
             Run("translate delete marker transaction", TestAllOperationsAndReadback);
             Run("multiple markers and preflight atomicity", TestMultipleMarkersAndMixedInvalidPreflight);
             Run("marker reservations survive operation ordering", TestMarkerReservationsSurviveDeletes);
+            Run("physical container slots preserve erased gaps", TestPhysicalContainerSlotCounts);
+            Run("geometry container bounds and mappings", TestGeometryContainerBoundsAndMappings);
+            Run("actual marker handles ignore exported maxima", TestActualMarkerHandleAllocation);
             Run("atomic rollback and fault injection", TestAtomicRollbackAndFaultInjection);
+            Run("silent readback conversion guard", TestSilentReadbackConversionGuard);
             Run("in-transaction stale-state revalidation", TestInTransactionStaleStateRevalidation);
             Run("transaction disposal ordering", TestTransactionDisposalOrdering);
             Run("owner state protection", TestOwnerStateProtection);
@@ -281,10 +286,11 @@ namespace LiangPingfa.NativeCad.Core.Tests
 
             CadContainer container = MarkerContainerFromWire(operation);
             long rawSequence = AsInt64(operation["sequence_index"], "marker sequence index");
-            if (rawSequence < 1 || rawSequence > 1000000)
+            if (rawSequence < 0 ||
+                rawSequence > NativeCadProtocolV2.MaxGeometrySequenceIndex)
             {
                 throw new CanonicalJsonException(
-                    "Marker manifest runner requires a positive bounded sequence index.");
+                    "Marker manifest runner requires a bounded sequence index.");
             }
 
             int sequence = (int)rawSequence;
@@ -516,21 +522,25 @@ namespace LiangPingfa.NativeCad.Core.Tests
         {
             OverlayEvidence fillerEvidence =
                 new OverlayEvidence(false, false, false, false, true);
-            CadEntitySnapshot filler = new CadEntitySnapshot(
-                "10",
-                NativeEntityKind.DbText,
-                ownerHandle,
-                container,
-                markerSequence - 1,
-                policy.Layer,
-                "generated-marker-runner",
-                policy.Style,
-                policy.HeightBits,
-                policy.RotationBits,
-                Vector(0d, 0d, 0d),
-                Bounds(0d, 0d, 0d, 0d),
-                new CadSegment[0],
-                fillerEvidence);
+            List<CadEntitySnapshot> entities = new List<CadEntitySnapshot>();
+            if (markerSequence > 0)
+            {
+                entities.Add(new CadEntitySnapshot(
+                    "10",
+                    NativeEntityKind.DbText,
+                    ownerHandle,
+                    container,
+                    markerSequence - 1,
+                    policy.Layer,
+                    "generated-marker-runner",
+                    policy.Style,
+                    policy.HeightBits,
+                    policy.RotationBits,
+                    Vector(0d, 0d, 0d),
+                    Bounds(0d, 0d, 0d, 0d),
+                    new CadSegment[0],
+                    fillerEvidence));
+            }
             Dictionary<string, string> layers = new Dictionary<string, string>(
                 StringComparer.Ordinal)
             {
@@ -553,7 +563,14 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 Digest("marker-runner-database"),
                 Digest("marker-runner-revision"),
                 new[] { ownerHandle },
-                new[] { filler },
+                new[]
+                {
+                    new CadContainerPhysicalSlots(
+                        container,
+                        ownerHandle,
+                        markerSequence),
+                },
+                entities,
                 tables,
                 source,
                 bindingContext);
@@ -690,6 +707,9 @@ namespace LiangPingfa.NativeCad.Core.Tests
             Dictionary<string, object?> limits = AsObject(fixture["limits"], "limits");
             AssertEqual((long)NativeCadProtocolV2.MaxGeometryEntities, AsInt64(limits["max_geometry_entities"], "entity limit"), "entity limit");
             AssertEqual((long)NativeCadProtocolV2.MaxGeometrySegments, AsInt64(limits["max_geometry_segments"], "segment limit"), "segment limit");
+            AssertEqual((long)NativeCadProtocolV2.MaxGeometrySequenceIndex, AsInt64(limits["max_geometry_sequence_index"], "sequence limit"), "sequence limit");
+            AssertEqual((long)NativeCadProtocolV2.MaxGeometryContainers, AsInt64(limits["max_geometry_containers"], "container limit"), "container limit");
+            AssertEqual((long)NativeCadProtocolV2.MaxPhysicalSlotCount, AsInt64(limits["max_physical_slot_count"], "physical slot limit"), "physical slot limit");
             AssertEqual((long)NativeCadProtocolV2.MaxGeometryJsonBytes, AsInt64(limits["max_geometry_json_bytes"], "byte limit"), "geometry byte limit");
             AssertEqual((long)CanonicalJson.MaxNestingDepth, AsInt64(limits["max_json_nesting_depth"], "nesting limit"), "nesting limit");
             AssertEqual((long)NativeCadProtocolV2.MaxNativeOperations, AsInt64(limits["max_native_operations"], "operation limit"), "operation limit");
@@ -1512,7 +1532,15 @@ namespace LiangPingfa.NativeCad.Core.Tests
             CadEntitySnapshot moved = Require(after.FindByHandle("10"), "translated entity exists");
             AssertEqual(Binary64.ToBits(2d), moved.Position.X, "translated X bit");
             AssertEqual(before.FindByHandle("10")!.Position.Y, moved.Position.Y, "untranslated Y bit");
-            CadEntitySnapshot marker = Require(after.FindByHandle("14"), "generated marker exists");
+            string markerHandle = RequireMarkerHandle(
+                result,
+                OperationId('c'));
+            CadEntitySnapshot marker = Require(
+                after.FindByHandle(markerHandle),
+                "generated marker exists");
+            Assert(
+                !string.Equals(markerHandle, "14", StringComparison.Ordinal),
+                "marker handle was predicted from the exported entity maximum");
             AssertEqual("LPF-REVIEW-" + new string('c', 24), marker.Text, "derived marker text");
             AssertEqual(3, marker.SequenceIndex, "gap-safe marker append index");
             Assert(after.FindByHandle("13")!.ExactlyEquals(before.FindByHandle("13")!), "opaque record is unchanged");
@@ -1572,6 +1600,14 @@ namespace LiangPingfa.NativeCad.Core.Tests
                         fingerprint, new[] { "read.one/v1", "read.one/v1" });
                 },
                 "duplicate capabilities reject at the typed producer boundary");
+            AssertThrows<CanonicalJsonException>(
+                delegate
+                {
+                    new NativeGeometryBindingContextV2(
+                        session, "adapter", "profile", "1.0", "plugin", "1.0",
+                        fingerprint, new[] { "read.two/v1", "read.one/v1" });
+                },
+                "unsorted capabilities reject at the typed producer boundary");
             List<string> excessive = new List<string>();
             for (int index = 0; index < 17; index++)
             {
@@ -1764,6 +1800,141 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 "same-identity policy rejects replacement");
         }
 
+        private static void TestPortablePrewriteProjectionRetargeting()
+        {
+            Fixture fixture = CreateFixture();
+            GeometryExportV2 bridgeExport = ExactCadExporter.Export(fixture.Snapshot);
+            NativeSourceBindingV2 privateSource = new NativeSourceBindingV2(
+                bridgeExport.Snapshot.Source.Sha256,
+                bridgeExport.Snapshot.Source.ByteSize,
+                Digest("private-copy-path"),
+                Digest("private-copy-identity"),
+                bridgeExport.Snapshot.Source.DwgHeaderSignature);
+            GeometryExportV2 retargetedBridgeExport = ExactCadExporter.Export(
+                fixture.Snapshot.WithSource(privateSource));
+            CadDocumentSnapshot consoleSnapshot = fixture.Snapshot
+                .WithSource(privateSource)
+                .WithDatabaseInstance(Digest("core-console-database"))
+                .WithRevision(Digest("core-console-revision"));
+            GeometryExportV2 consoleExport = ExactCadExporter.Export(consoleSnapshot);
+
+            PortablePrewriteProjectionV2 bridgeProjection =
+                PortablePrewriteProjectionV2.From(bridgeExport);
+            PortablePrewriteProjectionV2 retargetedProjection =
+                PortablePrewriteProjectionV2.From(retargetedBridgeExport);
+            Dictionary<string, object?> bridgeWire = bridgeExport.ToWireValue();
+            AssertEqual(
+                bridgeProjection.Digest,
+                AsString(
+                    bridgeWire["portable_prewrite_projection_digest"],
+                    "bridge portable prewrite digest"),
+                "Bridge geometry export omitted its portable prewrite contract.");
+            AssertEqual(
+                bridgeProjection.Digest,
+                retargetedProjection.Digest,
+                "Retargeting source binding changed portable prewrite state");
+            Assert(
+                bridgeProjection.Matches(consoleExport) &&
+                retargetedProjection.Matches(consoleExport),
+                "Private Core Console copy differs only in excluded ephemeral fields.");
+            Assert(
+                !string.Equals(
+                    retargetedBridgeExport.ExportDigest,
+                    consoleExport.ExportDigest,
+                    StringComparison.Ordinal),
+                "Cross-context test did not vary source/database/revision identity.");
+
+            // The bridge intentionally has no marker-policy-selected
+            // fingerprints. They are validated separately by the manifest
+            // stable-host binding; this policy-context difference must not
+            // alter portable document state.
+            CadDocumentTables bridgeTablesWithoutPolicy =
+                new CadDocumentTables(
+                    fixture.Snapshot.Tables.TableStateDigest,
+                    fixture.Snapshot.Tables.LayoutStateDigest,
+                    fixture.Snapshot.Tables.BlockStateDigest,
+                    null,
+                    null,
+                    new Dictionary<string, string>(
+                        fixture.Snapshot.Tables.Layers,
+                        StringComparer.Ordinal),
+                    new Dictionary<string, string>(
+                        fixture.Snapshot.Tables.Styles,
+                        StringComparer.Ordinal));
+            GeometryExportV2 bridgeWithoutMarkerPolicy = ExactCadExporter.Export(
+                fixture.Snapshot.WithSource(privateSource).WithTables(
+                    bridgeTablesWithoutPolicy));
+            AssertEqual(
+                retargetedProjection.Digest,
+                PortablePrewriteProjectionV2.From(bridgeWithoutMarkerPolicy).Digest,
+                "Marker policy context leaked into portable state.");
+
+            CoreManifestV2 manifest = CreateFullManifest(
+                fixture,
+                retargetedBridgeExport);
+            InMemoryCadDatabase compatiblePrivateCopy =
+                new InMemoryCadDatabase(consoleSnapshot);
+            ManifestExecutionResultV2 result = new ManifestExecutor().Execute(
+                compatiblePrivateCopy,
+                manifest);
+            Assert(result != null, "Portable private-copy preflight did not execute.");
+
+            List<CadEntitySnapshot> changedEntities =
+                new List<CadEntitySnapshot>(consoleSnapshot.Entities);
+            changedEntities[0] = changedEntities[0].Translate(Vector(1d, 0d, 0d));
+            AssertPortablePreflightRejected(
+                manifest,
+                consoleSnapshot.WithEntities(changedEntities),
+                "content drift");
+
+            CadDocumentSnapshot protectedDrift = new CadDocumentSnapshot(
+                consoleSnapshot.DatabaseInstanceFingerprint,
+                consoleSnapshot.RevisionFingerprint,
+                new[] { "AA", "AB" },
+                consoleSnapshot.Containers,
+                consoleSnapshot.Entities,
+                consoleSnapshot.Tables,
+                consoleSnapshot.Source,
+                consoleSnapshot.BindingContext);
+            AssertPortablePreflightRejected(
+                manifest,
+                protectedDrift,
+                "protected owner drift");
+
+            CadDocumentTables markerDriftTables = new CadDocumentTables(
+                Digest("marker-resource-table-drift"),
+                consoleSnapshot.Tables.LayoutStateDigest,
+                consoleSnapshot.Tables.BlockStateDigest,
+                consoleSnapshot.Tables.MarkerLayerFingerprint,
+                consoleSnapshot.Tables.MarkerStyleFingerprint,
+                new Dictionary<string, string>(
+                    consoleSnapshot.Tables.Layers,
+                    StringComparer.Ordinal),
+                new Dictionary<string, string>(
+                    consoleSnapshot.Tables.Styles,
+                    StringComparer.Ordinal));
+            AssertPortablePreflightRejected(
+                manifest,
+                consoleSnapshot.WithTables(markerDriftTables),
+                "marker resource drift");
+        }
+
+        private static void AssertPortablePreflightRejected(
+            CoreManifestV2 manifest,
+            CadDocumentSnapshot snapshot,
+            string label)
+        {
+            InMemoryCadDatabase database = new InMemoryCadDatabase(snapshot);
+            AssertCoreCode(
+                CadCoreErrorCode.StalePrecondition,
+                delegate { new ManifestExecutor().Execute(database, manifest); },
+                "Portable prewrite did not reject " + label + ".");
+            AssertEqual(
+                0,
+                database.BeginTransactionCount,
+                "Portable prewrite admitted a transaction after " + label + ".");
+        }
+
         private static void TestStableHostBinding()
         {
             Fixture fixture = CreateFixture();
@@ -1884,8 +2055,8 @@ namespace LiangPingfa.NativeCad.Core.Tests
                             new[]
                             {
                                 "read.exact_geometry/v1",
-                                "read.inventory/v1",
                                 "read.extra/v1",
+                                "read.inventory/v1",
                             })
                     },
                 };
@@ -2236,15 +2407,86 @@ namespace LiangPingfa.NativeCad.Core.Tests
                     CadEntitySnapshot line = Require(
                         snapshot.FindByHandle("12"),
                         "reopened line");
-                    return ReplaceEntityAndSort(
+                    return ReplaceEntityAndSortWithPhysicalSlotCount(
                         snapshot,
-                        CopyWithSequenceIndex(line, 4));
+                        CopyWithSequenceIndex(line, 4),
+                        5);
                 };
             AssertReopenedReadbackMismatch(
                 fixture,
                 manifest,
                 reopenedOrderDriftFault,
                 "reopened order drift");
+        }
+
+        /// <summary>
+        /// Models the only safe unattended-code-page path: the host may
+        /// silently convert while reading, but exact fresh readback is the
+        /// fail-closed publication gate.  The generated database has no host
+        /// UI or Editor surface, so these cases also prove that success never
+        /// depends on a prompt.
+        /// </summary>
+        private static void TestSilentReadbackConversionGuard()
+        {
+            Fixture fixture = CreateFixture();
+            GeometryExportV2 before = ExactCadExporter.Export(fixture.Snapshot);
+            CoreManifestV2 manifest = CreateFullManifest(fixture, before);
+
+            InMemoryCadDatabase preservedDatabase =
+                new InMemoryCadDatabase(fixture.Snapshot);
+            ManifestExecutionResultV2 preserved =
+                new ManifestExecutor().Execute(preservedDatabase, manifest);
+            Assert(preserved != null, "Preserved silent readback constructs a result.");
+            AssertEqual(
+                1,
+                preservedDatabase.SaveReopenCount,
+                "Preserved silent readback opens exactly one fresh database.");
+
+            CadFaultInjector textConversion = new CadFaultInjector();
+            textConversion.ReopenedSnapshotTransform =
+                delegate(CadDocumentSnapshot snapshot)
+                {
+                    CadEntitySnapshot target = Require(
+                        snapshot.FindByHandle("10"),
+                        "converted readback DBText");
+                    return ReplaceEntity(
+                        snapshot,
+                        CopyDbText(
+                            target,
+                            target.Layer!,
+                            "code-page-converted-text",
+                            target.RotationBits,
+                            target.Bounds));
+                };
+            AssertReopenedReadbackMismatch(
+                fixture,
+                manifest,
+                textConversion,
+                "silent readback text conversion");
+
+            CadFaultInjector metadataConversion = new CadFaultInjector();
+            metadataConversion.ReopenedSnapshotTransform =
+                delegate(CadDocumentSnapshot snapshot)
+                {
+                    CadEntitySnapshot target = Require(
+                        snapshot.FindByHandle("10"),
+                        "converted readback DBText metadata");
+                    // A converted layer token is DBText metadata drift even
+                    // when the translated geometry itself is unchanged.
+                    return ReplaceEntity(
+                        snapshot,
+                        CopyDbText(
+                            target,
+                            "code-page-converted-layer",
+                            target.Text!,
+                            target.RotationBits,
+                            target.Bounds));
+                };
+            AssertReopenedReadbackMismatch(
+                fixture,
+                manifest,
+                metadataConversion,
+                "silent readback metadata conversion");
         }
 
         private static void TestInTransactionStaleStateRevalidation()
@@ -2320,18 +2562,20 @@ namespace LiangPingfa.NativeCad.Core.Tests
                         "target owner",
                         delegate(CadDocumentSnapshot snapshot)
                         {
-                            return ReplaceEntity(
+                            return ReplaceContainerOwnerAndEntities(
                                 snapshot,
-                                CopyWithOwner(translateTarget, "AB"));
+                                translateTarget.Container,
+                                "AB");
                         }
                     },
                     {
                         "container order",
                         delegate(CadDocumentSnapshot snapshot)
                         {
-                            return ReplaceEntityAndSort(
+                            return ReplaceEntityAndSortWithPhysicalSlotCount(
                                 snapshot,
-                                CopyWithSequenceIndex(translateTarget, 4));
+                                CopyWithSequenceIndex(translateTarget, 4),
+                                5);
                         }
                     },
                     {
@@ -2869,8 +3113,19 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 new ManifestExecutor().Execute(database, multiple);
             GeometryExportV2 after = multipleResult.FinalExport;
             AssertEqual(1, database.CommitCount, "multiple marker transaction commits once");
-            AssertEqual(3, Require(after.FindByHandle("14"), "first marker").SequenceIndex, "first marker sequence");
-            AssertEqual(4, Require(after.FindByHandle("15"), "second marker").SequenceIndex, "second marker sequence");
+            string firstHandle = RequireMarkerHandle(multipleResult, OperationId('c'));
+            string secondHandle = RequireMarkerHandle(multipleResult, OperationId('d'));
+            Assert(
+                !string.Equals(firstHandle, secondHandle, StringComparison.Ordinal),
+                "multiple marker appends must receive distinct actual handles");
+            AssertEqual(
+                3,
+                Require(after.FindByHandle(firstHandle), "first marker").SequenceIndex,
+                "first marker sequence");
+            AssertEqual(
+                4,
+                Require(after.FindByHandle(secondHandle), "second marker").SequenceIndex,
+                "second marker sequence");
             ExactReadbackVerifier.Verify(before, multiple, after, true);
 
             CreateReviewMarkerOperationV2 invalidMarker = CreateMarker(
@@ -2923,12 +3178,20 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 before,
                 new ManifestOperationV2[] { deleteMaximum, deleteFirst, first, second });
             InMemoryCadDatabase database = new InMemoryCadDatabase(fixture.Snapshot);
-            GeometryExportV2 after = new ManifestExecutor().Execute(
+            ManifestExecutionResultV2 deletedMarkersResult =
+                new ManifestExecutor().Execute(
                 database,
-                deletesBeforeMarkers).FinalExport;
-            Assert(Require(after.FindByHandle("15"), "first reserved marker").SequenceIndex == 4,
+                deletesBeforeMarkers);
+            GeometryExportV2 after = deletedMarkersResult.FinalExport;
+            Assert(Require(
+                after.FindByHandle(
+                    RequireMarkerHandle(deletedMarkersResult, OperationId('c'))),
+                "first reserved marker").SequenceIndex == 4,
                 "delete of original maximum does not lower the first reservation");
-            Assert(Require(after.FindByHandle("16"), "second reserved marker").SequenceIndex == 5,
+            Assert(Require(
+                after.FindByHandle(
+                    RequireMarkerHandle(deletedMarkersResult, OperationId('d'))),
+                "second reserved marker").SequenceIndex == 5,
                 "multiple deletes preserve every original marker reservation");
             Assert(after.FindByHandle("14") == null && after.FindByHandle("11") == null,
                 "deleted sequence slots remain gaps");
@@ -2946,10 +3209,17 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 fixture,
                 before,
                 new ManifestOperationV2[] { markerFirst, deleteAfterMarker });
-            GeometryExportV2 markerFirstAfter = new ManifestExecutor().Execute(
+            ManifestExecutionResultV2 markerFirstResult =
+                new ManifestExecutor().Execute(
                 new InMemoryCadDatabase(fixture.Snapshot),
-                markerBeforeDelete).FinalExport;
-            AssertEqual(4, Require(markerFirstAfter.FindByHandle("15"), "reserved marker").SequenceIndex,
+                markerBeforeDelete);
+            GeometryExportV2 markerFirstAfter = markerFirstResult.FinalExport;
+            AssertEqual(
+                4,
+                Require(
+                    markerFirstAfter.FindByHandle(
+                        RequireMarkerHandle(markerFirstResult, OperationId('a'))),
+                    "reserved marker").SequenceIndex,
                 "marker-before-delete uses the same original reservation");
             ExactReadbackVerifier.Verify(before, markerBeforeDelete, markerFirstAfter, true);
 
@@ -2986,6 +3256,434 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 "duplicate marker reservation rejects");
         }
 
+        private static void TestGeometryContainerBoundsAndMappings()
+        {
+            Fixture fixture = CreateFixture();
+            List<string> owners = new List<string>();
+            List<CadContainerPhysicalSlots> containers =
+                new List<CadContainerPhysicalSlots>();
+            for (
+                int index = 0;
+                index < NativeCadProtocolV2.MaxGeometryContainers;
+                index++)
+            {
+                string handle = (0x100000 + index).ToString(
+                    "X",
+                    CultureInfo.InvariantCulture);
+                owners.Add(handle);
+                containers.Add(new CadContainerPhysicalSlots(
+                    new CadContainer(
+                        NativeSpaceKind.Block,
+                        null,
+                        handle,
+                        new string[0]),
+                    handle,
+                    0));
+            }
+
+            containers.Sort(
+                delegate(CadContainerPhysicalSlots left, CadContainerPhysicalSlots right)
+                {
+                    return string.CompareOrdinal(
+                        left.Container.SortKey,
+                        right.Container.SortKey);
+                });
+            CadDocumentSnapshot atLimit = new CadDocumentSnapshot(
+                fixture.Snapshot.DatabaseInstanceFingerprint,
+                fixture.Snapshot.RevisionFingerprint,
+                owners,
+                containers,
+                new CadEntitySnapshot[0],
+                fixture.Snapshot.Tables,
+                fixture.Snapshot.Source,
+                fixture.Snapshot.BindingContext);
+            AssertEqual(
+                NativeCadProtocolV2.MaxGeometryContainers,
+                ExactCadExporter.Export(atLimit).Snapshot.Containers.Count,
+                "2001 empty physical containers export exactly at the v2 cap");
+
+            string extraHandle = "200000";
+            List<string> tooManyOwners = new List<string>(owners) { extraHandle };
+            List<CadContainerPhysicalSlots> tooManyContainers =
+                new List<CadContainerPhysicalSlots>(containers)
+                {
+                    new CadContainerPhysicalSlots(
+                        new CadContainer(
+                            NativeSpaceKind.Block,
+                            null,
+                            extraHandle,
+                            new string[0]),
+                        extraHandle,
+                        0),
+                };
+            tooManyContainers.Sort(
+                delegate(CadContainerPhysicalSlots left, CadContainerPhysicalSlots right)
+                {
+                    return string.CompareOrdinal(
+                        left.Container.SortKey,
+                        right.Container.SortKey);
+                });
+            AssertThrows<CanonicalJsonException>(
+                delegate
+                {
+                    new CadDocumentSnapshot(
+                        fixture.Snapshot.DatabaseInstanceFingerprint,
+                        fixture.Snapshot.RevisionFingerprint,
+                        tooManyOwners,
+                        tooManyContainers,
+                        new CadEntitySnapshot[0],
+                        fixture.Snapshot.Tables,
+                        fixture.Snapshot.Source,
+                        fixture.Snapshot.BindingContext);
+                },
+                "container cap plus one rejects before any export is available");
+
+            CadContainerPhysicalSlots first = containers[0];
+            AssertThrows<CanonicalJsonException>(
+                delegate
+                {
+                    new CadDocumentSnapshot(
+                        fixture.Snapshot.DatabaseInstanceFingerprint,
+                        fixture.Snapshot.RevisionFingerprint,
+                        new[] { first.OwnerHandle },
+                        new[] { first, first },
+                        new CadEntitySnapshot[0],
+                        fixture.Snapshot.Tables,
+                        fixture.Snapshot.Source,
+                        fixture.Snapshot.BindingContext);
+                },
+                "duplicate physical container rejects");
+            AssertThrows<CanonicalJsonException>(
+                delegate
+                {
+                    new CadDocumentSnapshot(
+                        fixture.Snapshot.DatabaseInstanceFingerprint,
+                        fixture.Snapshot.RevisionFingerprint,
+                        new[] { first.OwnerHandle, first.OwnerHandle },
+                        new[] { first },
+                        new CadEntitySnapshot[0],
+                        fixture.Snapshot.Tables,
+                        fixture.Snapshot.Source,
+                        fixture.Snapshot.BindingContext);
+                },
+                "duplicate owner rejects");
+        }
+
+        private static void TestPhysicalContainerSlotCounts()
+        {
+            Fixture baseline = CreateFixture();
+            CadContainer modelspace = baseline.DirectModelspace;
+            CadEntitySnapshot paperspace = Require(
+                baseline.Snapshot.FindByHandle("13"),
+                "baseline paperspace entity");
+            OverlayEvidence normal =
+                new OverlayEvidence(false, false, false, false, true);
+            OverlayEvidence eligible =
+                new OverlayEvidence(true, true, true, true, false);
+            List<CadEntitySnapshot> entities = new List<CadEntitySnapshot>
+            {
+                DbText(
+                    "10",
+                    modelspace,
+                    0,
+                    "TEMP",
+                    "move",
+                    Vector(1d, 2d, 0d),
+                    Bounds(1d, 2d, 3d, 4d),
+                    normal),
+                DbText(
+                    "11",
+                    modelspace,
+                    2,
+                    "TEMP",
+                    "middle-overlay",
+                    Vector(5d, 6d, 0d),
+                    Bounds(5d, 6d, 5d, 6d),
+                    eligible),
+                DbText(
+                    "14",
+                    modelspace,
+                    6,
+                    "TEMP",
+                    "tail-overlay",
+                    Vector(7d, 8d, 0d),
+                    Bounds(7d, 8d, 7d, 8d),
+                    eligible),
+                paperspace,
+            };
+            entities.Sort(CadDocumentSnapshot.CompareEntityOrder);
+            CadContainerPhysicalSlots paperSlots = Require(
+                baseline.Snapshot.FindContainer(paperspace.Container),
+                "baseline paperspace physical container");
+            List<CadContainerPhysicalSlots> containers =
+                new List<CadContainerPhysicalSlots>
+                {
+                    // Active Modelspace indices are 0, 2, and 6. The exact
+                    // extent retains internal and trailing erased slots 1,
+                    // 3–5, and 7 rather than deriving 7 from the active max.
+                    new CadContainerPhysicalSlots(modelspace, "AA", 8),
+                    new CadContainerPhysicalSlots(
+                        paperSlots.Container,
+                        paperSlots.OwnerHandle,
+                        3),
+                };
+            CadDocumentSnapshot snapshot = new CadDocumentSnapshot(
+                baseline.Snapshot.DatabaseInstanceFingerprint,
+                baseline.Snapshot.RevisionFingerprint,
+                baseline.Snapshot.Owners,
+                containers,
+                entities,
+                baseline.Snapshot.Tables,
+                baseline.Snapshot.Source,
+                baseline.Snapshot.BindingContext);
+            Fixture fixture = new Fixture(
+                snapshot,
+                modelspace,
+                baseline.MarkerPolicy);
+            GeometryExportV2 before = ExactCadExporter.Export(snapshot);
+            List<object?> exportedContainers = AsArray(
+                before.ToWireValue()["containers"],
+                "v2 physical containers");
+            Dictionary<string, object?> exportedModelspace =
+                AsObject(exportedContainers[0], "v2 Modelspace physical container");
+            AssertEqual(
+                8L,
+                AsInt64(
+                    exportedModelspace["physical_slot_count"],
+                    "v2 Modelspace physical slot count"),
+                "v2 geometry carries the exact physical Modelspace count");
+            AssertEqual(
+                8,
+                Require(
+                    before.Snapshot.FindContainer(modelspace),
+                    "prewrite Modelspace physical container").PhysicalSlotCount,
+                "active maximum remains below physical Modelspace count");
+            Assert(
+                before.ExportDigest != ExactCadExporter.Export(
+                    WithPhysicalSlotCount(snapshot, modelspace, 9)).ExportDigest,
+                "physical slot counts are part of stable export equality");
+
+            CadEntitySnapshot target = Require(
+                snapshot.FindByHandle("10"),
+                "gapped translation target");
+            CadEntitySnapshot middle = Require(
+                snapshot.FindByHandle("11"),
+                "gapped middle delete target");
+            CadEntitySnapshot tail = Require(
+                snapshot.FindByHandle("14"),
+                "gapped tail delete target");
+            TranslateDbTextOperationV2 translate = new TranslateDbTextOperationV2(
+                OperationId('a'),
+                target.TargetId,
+                Vector(1d, 0d, 0d),
+                TranslatedGeometryV2.From(target, Vector(1d, 0d, 0d)));
+            DeleteAuxiliaryOverlayTextOperationV2 deleteMiddle =
+                new DeleteAuxiliaryOverlayTextOperationV2(
+                    OperationId('b'),
+                    middle.TargetId,
+                    true);
+            DeleteAuxiliaryOverlayTextOperationV2 deleteTail =
+                new DeleteAuxiliaryOverlayTextOperationV2(
+                    OperationId('c'),
+                    tail.TargetId,
+                    true);
+            CreateReviewMarkerOperationV2 firstMarker = CreateMarker(
+                fixture,
+                OperationId('d'),
+                fixture.MarkerPolicy.DeriveMarkerText(OperationId('d')),
+                8);
+            CreateReviewMarkerOperationV2 secondMarker = CreateMarker(
+                fixture,
+                OperationId('e'),
+                fixture.MarkerPolicy.DeriveMarkerText(OperationId('e')),
+                9);
+            CoreManifestV2 manifest = CreateManifest(
+                fixture,
+                before,
+                new ManifestOperationV2[]
+                {
+                    translate,
+                    deleteMiddle,
+                    deleteTail,
+                    firstMarker,
+                    secondMarker,
+                });
+            ManifestExecutionResultV2 result = new ManifestExecutor().Execute(
+                new InMemoryCadDatabase(snapshot),
+                manifest);
+            CadDocumentSnapshot after = result.FinalExport.Snapshot;
+            AssertEqual(
+                10,
+                Require(
+                    after.FindContainer(modelspace),
+                    "post-save Modelspace physical container").PhysicalSlotCount,
+                "two markers append exactly two physical Modelspace slots");
+            AssertEqual(
+                3,
+                Require(
+                    after.FindContainer(paperspace.Container),
+                    "post-save Paperspace physical container").PhysicalSlotCount,
+                "unrelated container physical count is unchanged");
+            Assert(after.FindByHandle("11") == null && after.FindByHandle("14") == null,
+                "middle and tail deletes leave active gaps without shrinking count");
+            AssertEqual(
+                0,
+                Require(after.FindByHandle("10"), "translated target").SequenceIndex,
+                "translation leaves physical sequence unchanged");
+            AssertEqual(
+                8,
+                Require(
+                    after.FindByHandle(
+                        RequireMarkerHandle(result, OperationId('d'))),
+                    "first physical marker").SequenceIndex,
+                "first marker uses original physical count");
+            AssertEqual(
+                9,
+                Require(
+                    after.FindByHandle(
+                        RequireMarkerHandle(result, OperationId('e'))),
+                    "second physical marker").SequenceIndex,
+                "second marker increments physical count exactly once");
+
+            // An erased-only direct Modelspace still has a physical extent.
+            // Marker reservation must not require one active record merely
+            // to discover its append position or owner.
+            CadDocumentSnapshot erasedOnlyModelspace = new CadDocumentSnapshot(
+                snapshot.DatabaseInstanceFingerprint,
+                snapshot.RevisionFingerprint,
+                snapshot.Owners,
+                snapshot.Containers,
+                new[] { paperspace },
+                snapshot.Tables,
+                snapshot.Source,
+                snapshot.BindingContext);
+            Fixture erasedOnlyFixture = new Fixture(
+                erasedOnlyModelspace,
+                modelspace,
+                baseline.MarkerPolicy);
+            GeometryExportV2 erasedOnlyBefore =
+                ExactCadExporter.Export(erasedOnlyModelspace);
+            CreateReviewMarkerOperationV2 erasedOnlyMarker = CreateMarker(
+                erasedOnlyFixture,
+                OperationId('f'),
+                erasedOnlyFixture.MarkerPolicy.DeriveMarkerText(OperationId('f')),
+                8);
+            ManifestExecutionResultV2 erasedOnlyResult =
+                new ManifestExecutor().Execute(
+                    new InMemoryCadDatabase(erasedOnlyModelspace),
+                    CreateManifest(
+                        erasedOnlyFixture,
+                        erasedOnlyBefore,
+                        new ManifestOperationV2[] { erasedOnlyMarker }));
+            AssertEqual(
+                9,
+                Require(
+                    erasedOnlyResult.FinalExport.Snapshot.FindContainer(modelspace),
+                    "erased-only Modelspace physical container").PhysicalSlotCount,
+                "erased-only Modelspace marker uses its explicit physical count");
+
+            AssertThrows<CanonicalJsonException>(
+                delegate { WithPhysicalSlotCount(snapshot, modelspace, 6); },
+                "forged count below an active tail rejects");
+
+            CadFaultInjector countDrift = new CadFaultInjector();
+            countDrift.ReopenedSnapshotTransform =
+                delegate(CadDocumentSnapshot reopened)
+                {
+                    return WithPhysicalSlotCount(
+                        reopened,
+                        modelspace,
+                        Require(
+                            reopened.FindContainer(modelspace),
+                            "reopened Modelspace physical container")
+                            .PhysicalSlotCount + 1);
+                };
+            AssertReopenedReadbackMismatch(
+                fixture,
+                manifest,
+                countDrift,
+                "readback physical slot-count drift");
+        }
+
+        private static void TestActualMarkerHandleAllocation()
+        {
+            Fixture fixture = CreateFixture();
+            GeometryExportV2 before = ExactCadExporter.Export(fixture.Snapshot);
+            CreateReviewMarkerOperationV2 first = CreateMarker(
+                fixture,
+                OperationId('a'),
+                fixture.MarkerPolicy.DeriveMarkerText(OperationId('a')),
+                3);
+            CreateReviewMarkerOperationV2 second = CreateMarker(
+                fixture,
+                OperationId('b'),
+                fixture.MarkerPolicy.DeriveMarkerText(OperationId('b')),
+                4);
+            CoreManifestV2 manifest = CreateManifest(
+                fixture,
+                before,
+                new ManifestOperationV2[] { first, second });
+
+            // 20 and 21 model retired/non-entity objects which do not appear
+            // in geometry.  F000... models a sparse high non-entity handle.
+            // The explicit allocator state, not the exported entity maximum,
+            // determines the actual append receipts.
+            SequentialActualCadHandleAllocator allocator =
+                new SequentialActualCadHandleAllocator(
+                    0x20UL,
+                    new[]
+                    {
+                        "20",
+                        "21",
+                        "F000000000000000",
+                    });
+            ManifestExecutionResultV2 result = new ManifestExecutor().Execute(
+                new InMemoryCadDatabase(
+                    fixture.Snapshot,
+                    null,
+                    allocator),
+                manifest);
+            GeometryExportV2 after = result.FinalExport;
+            string firstHandle = RequireMarkerHandle(result, OperationId('a'));
+            string secondHandle = RequireMarkerHandle(result, OperationId('b'));
+            AssertEqual("22", firstHandle, "actual allocator skips retired handle slots");
+            AssertEqual("23", secondHandle, "actual allocator advances independently of exports");
+            Assert(
+                after.FindByHandle(firstHandle) != null &&
+                after.FindByHandle(secondHandle) != null,
+                "actual append receipts identify returned marker entities");
+            Assert(
+                after.FindByHandle("15") == null,
+                "marker handles must not be predicted from the exported maximum");
+
+            ExactReadbackVerifier.Verify(
+                before,
+                manifest,
+                after,
+                true,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    { OperationId('a'), firstHandle },
+                    { OperationId('b'), secondHandle },
+                });
+            AssertCoreCode(
+                CadCoreErrorCode.ReadbackMismatch,
+                delegate
+                {
+                    ExactReadbackVerifier.Verify(
+                        before,
+                        manifest,
+                        after,
+                        true,
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            { OperationId('a'), secondHandle },
+                            { OperationId('b'), firstHandle },
+                        });
+                },
+                "marker result handles must match readback bijectively");
+        }
+
         private static void TestPreflightErrorCodes()
         {
             Fixture fixture = CreateFixture();
@@ -2998,8 +3696,11 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 delta,
                 TranslatedGeometryV2.From(target, delta));
 
+            List<CadEntitySnapshot> staleEntities =
+                new List<CadEntitySnapshot>(fixture.Snapshot.Entities);
+            staleEntities[0] = staleEntities[0].Translate(Vector(2d, 0d, 0d));
             InMemoryCadDatabase staleDatabase = new InMemoryCadDatabase(
-                fixture.Snapshot.WithRevision(Digest("stale-revision")));
+                fixture.Snapshot.WithEntities(staleEntities));
             CoreManifestV2 staleManifest = CreateManifest(fixture, before, new ManifestOperationV2[] { translate });
             AssertCoreCode(
                 CadCoreErrorCode.StalePrecondition,
@@ -3404,6 +4105,11 @@ namespace LiangPingfa.NativeCad.Core.Tests
                 Digest("database"),
                 Digest("revision"),
                 owners ?? new[] { "AA" },
+                new[]
+                {
+                    new CadContainerPhysicalSlots(modelspace, "AA", 3),
+                    new CadContainerPhysicalSlots(paperspace, "AA", 1),
+                },
                 entities,
                 tables,
                 NativeSourceBindingV2.CreateGenerated(),
@@ -3429,10 +4135,24 @@ namespace LiangPingfa.NativeCad.Core.Tests
                     Bounds(9d, 9d, 9d, 9d),
                     eligible));
             entities.Sort(CadDocumentSnapshot.CompareEntityOrder);
+            List<CadContainerPhysicalSlots> containers =
+                new List<CadContainerPhysicalSlots>();
+            for (int index = 0; index < original.Snapshot.Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots current =
+                    original.Snapshot.Containers[index];
+                containers.Add(new CadContainerPhysicalSlots(
+                    current.Container,
+                    current.OwnerHandle,
+                    current.Container.Equals(original.DirectModelspace)
+                        ? 4
+                        : current.PhysicalSlotCount));
+            }
             CadDocumentSnapshot snapshot = new CadDocumentSnapshot(
                 original.Snapshot.DatabaseInstanceFingerprint,
                 original.Snapshot.RevisionFingerprint,
                 original.Snapshot.Owners,
+                containers,
                 entities,
                 original.Snapshot.Tables,
                 original.Snapshot.Source,
@@ -3572,6 +4292,88 @@ namespace LiangPingfa.NativeCad.Core.Tests
             return snapshot.WithEntities(entities);
         }
 
+        private static CadDocumentSnapshot ReplaceEntityAndSortWithPhysicalSlotCount(
+            CadDocumentSnapshot snapshot,
+            CadEntitySnapshot replacement,
+            int physicalSlotCount)
+        {
+            List<CadContainerPhysicalSlots> containers =
+                new List<CadContainerPhysicalSlots>();
+            for (int index = 0; index < snapshot.Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots current = snapshot.Containers[index];
+                containers.Add(new CadContainerPhysicalSlots(
+                    current.Container,
+                    current.OwnerHandle,
+                    current.Container.Equals(replacement.Container)
+                        ? physicalSlotCount
+                        : current.PhysicalSlotCount));
+            }
+
+            return ReplaceEntityAndSort(
+                snapshot.WithContainers(containers),
+                replacement);
+        }
+
+        private static CadDocumentSnapshot WithPhysicalSlotCount(
+            CadDocumentSnapshot snapshot,
+            CadContainer container,
+            int physicalSlotCount)
+        {
+            List<CadContainerPhysicalSlots> containers =
+                new List<CadContainerPhysicalSlots>();
+            for (int index = 0; index < snapshot.Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots current = snapshot.Containers[index];
+                containers.Add(new CadContainerPhysicalSlots(
+                    current.Container,
+                    current.OwnerHandle,
+                    current.Container.Equals(container)
+                        ? physicalSlotCount
+                        : current.PhysicalSlotCount));
+            }
+
+            return snapshot.WithContainers(containers);
+        }
+
+        private static CadDocumentSnapshot ReplaceContainerOwnerAndEntities(
+            CadDocumentSnapshot snapshot,
+            CadContainer container,
+            string ownerHandle)
+        {
+            List<CadContainerPhysicalSlots> containers =
+                new List<CadContainerPhysicalSlots>();
+            for (int index = 0; index < snapshot.Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots current = snapshot.Containers[index];
+                containers.Add(new CadContainerPhysicalSlots(
+                    current.Container,
+                    current.Container.Equals(container)
+                        ? ownerHandle
+                        : current.OwnerHandle,
+                    current.PhysicalSlotCount));
+            }
+
+            List<CadEntitySnapshot> entities = new List<CadEntitySnapshot>();
+            for (int index = 0; index < snapshot.Entities.Count; index++)
+            {
+                CadEntitySnapshot current = snapshot.Entities[index];
+                entities.Add(current.Container.Equals(container)
+                    ? CopyWithOwner(current, ownerHandle)
+                    : current);
+            }
+
+            return new CadDocumentSnapshot(
+                snapshot.DatabaseInstanceFingerprint,
+                snapshot.RevisionFingerprint,
+                snapshot.Owners,
+                containers,
+                entities,
+                snapshot.Tables,
+                snapshot.Source,
+                snapshot.BindingContext);
+        }
+
         private static CadEntitySnapshot CopyWithSequenceIndex(
             CadEntitySnapshot original,
             int sequenceIndex)
@@ -3684,6 +4486,35 @@ namespace LiangPingfa.NativeCad.Core.Tests
             }
 
             return (long)value;
+        }
+
+        private static string RequireMarkerHandle(
+            ManifestExecutionResultV2 result,
+            string operationId)
+        {
+            for (int index = 0; index < result.OperationResults.Count; index++)
+            {
+                OperationExecutionResultV2 operation =
+                    result.OperationResults[index];
+                if (!string.Equals(
+                        operation.OperationId,
+                        operationId,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (operation.MarkerHandle == null)
+                {
+                    throw new InvalidOperationException(
+                        "marker operation result has no actual handle.");
+                }
+
+                return operation.MarkerHandle;
+            }
+
+            throw new InvalidOperationException(
+                "marker operation result is absent.");
         }
 
         private static T Require<T>(T? value, string label)
@@ -3879,12 +4710,12 @@ namespace LiangPingfa.NativeCad.Core.Tests
                     innerTransaction.EraseExact(expectedState, expectedTarget);
                 }
 
-                public void AppendExact(
+                public CadEntitySnapshot AppendExact(
                     CadDocumentSnapshot expectedState,
-                    CadEntitySnapshot entity)
+                    MarkerAppendRequestV2 request)
                 {
                     owner.events.Add("append");
-                    innerTransaction.AppendExact(expectedState, entity);
+                    return innerTransaction.AppendExact(expectedState, request);
                 }
 
                 public void PrepareCommit()
