@@ -34,11 +34,15 @@ from liang_pingfa_review.canonical import (
 from liang_pingfa_review.errors import ErrorCode, PipelineError
 from liang_pingfa_review.native_audit import build_native_audit
 from liang_pingfa_review.native_contracts import (
+    AUTOCAD_ADAPTER_ID,
     MAX_NATIVE_SESSION_LIFETIME,
     canonical_geometry_json_bytes,
+    MAX_NATIVE_GEOMETRY_CONTAINERS,
     MAX_NATIVE_GEOMETRY_ENTITIES,
     MAX_NATIVE_GEOMETRY_JSON_BYTES,
+    MAX_NATIVE_GEOMETRY_SEQUENCE_INDEX,
     MAX_NATIVE_GEOMETRY_SEGMENTS,
+    MAX_NATIVE_PHYSICAL_SLOT_COUNT,
     MAX_NATIVE_GEOMETRY_STRING_CODEPOINTS,
     bits_from_float,
     load_native_artifact,
@@ -53,6 +57,7 @@ from liang_pingfa_review.native_contracts import (
 from liang_pingfa_review.native_manifest import build_native_manifest
 from liang_pingfa_review.native_plan import generate_native_plan
 from liang_pingfa_review.native_protocol import (
+    MAX_NATIVE_CONSOLE_EXPORT_BYTES,
     NativeProtocolError,
     derive_challenge_response,
 )
@@ -97,6 +102,34 @@ class NativeContractTests(unittest.TestCase):
             },
         )
 
+    def test_autocad_config_rejects_delete_and_requires_advertised_profiles(self) -> None:
+        native_config = config()
+        native_config["adapter"] = {
+            "id": AUTOCAD_ADAPTER_ID,
+            "profile": "autocad2025",
+            "version": "2.0.0",
+        }
+        native_config["required_capabilities"].append("translate_dbtext/v1")
+        with self.assertRaises(PipelineError) as rejected_delete:
+            validate_native_contract("config", native_config)
+        self.assertEqual(rejected_delete.exception.code, ErrorCode.NATIVE_CONFIG_INVALID)
+
+        native_config["operation_profiles"]["delete_auxiliary_overlay_text/v1"] = False
+        self.assertEqual(
+            validate_native_contract("config", native_config)["operation_profiles"][
+                "translate_dbtext/v1"
+            ],
+            True,
+        )
+
+        native_config["required_capabilities"].remove("translate_dbtext/v1")
+        with self.assertRaises(PipelineError) as rejected_unadvertised:
+            validate_native_contract("config", native_config)
+        self.assertEqual(
+            rejected_unadvertised.exception.code,
+            ErrorCode.NATIVE_CONFIG_INVALID,
+        )
+
     def test_all_packaged_native_schemas_are_strict_recursively(self) -> None:
         def check(value: object) -> None:
             if not isinstance(value, dict):
@@ -129,6 +162,39 @@ class NativeContractTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 check(schema_for_native(kind))
 
+    def test_portable_prewrite_schema_excludes_copy_ephemeral_identity(self) -> None:
+        geometry_schema = schema_for_native("geometry")
+        self.assertEqual(
+            {
+                "portable_prewrite_projection",
+                "portable_prewrite_projection_digest",
+            },
+            {
+                key
+                for key in geometry_schema["properties"]
+                if key.startswith("portable_prewrite_projection")
+            },
+        )
+        manifest_schema = schema_for_native("manifest")
+        prewrite = manifest_schema["$defs"]["prewriteRevision"]
+        self.assertTrue(
+            {
+                "bridge_document_identity",
+                "portable_prewrite_projection",
+                "portable_prewrite_projection_digest",
+            }.issubset(prewrite["required"])
+        )
+        self.assertFalse(
+            {
+                "database_instance_fingerprint",
+                "revision_fingerprint",
+                "protected_state_digest",
+                "document_state_digest",
+            }
+            & set(prewrite["required"])
+        )
+        self.assertEqual(32 * 1024 * 1024, MAX_NATIVE_CONSOLE_EXPORT_BYTES)
+
     def test_geometry_rejects_extra_field_and_noncanonical_bits(self) -> None:
         valid = geometry()
         forged = deepcopy(valid)
@@ -143,6 +209,42 @@ class NativeContractTests(unittest.TestCase):
         invalid_bits = attach_integrity(invalid_bits)
         with self.assertRaises(PipelineError) as raised:
             validate_native_contract("geometry", invalid_bits)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+    def test_v2_geometry_requires_bound_physical_container_slot_counts(self) -> None:
+        valid = geometry()
+        missing = deepcopy(valid)
+        del missing["containers"]
+        missing = attach_integrity(missing)
+        with self.assertRaises(PipelineError) as raised:
+            validate_native_contract("geometry", missing)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+        forged = deepcopy(valid)
+        forged["containers"][0]["physical_slot_count"] += 1
+        forged = attach_integrity(forged)
+        with self.assertRaises(PipelineError) as raised:
+            validate_native_contract("geometry", forged)
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
+
+        with self.assertRaises(PipelineError) as raised:
+            geometry(
+                [
+                    entity("10", sequence_index=2),
+                ],
+                containers=[
+                    {
+                        "owner_handle": "AA",
+                        "space": {
+                            "kind": "modelspace",
+                            "layout_handle": "BB",
+                            "block_handle": None,
+                        },
+                        "block_path": [],
+                        "physical_slot_count": 2,
+                    }
+                ],
+            )
         self.assertEqual(raised.exception.code, ErrorCode.NATIVE_GEOMETRY_INVALID)
 
     def test_geometry_export_requires_every_exact_session_document_binding(self) -> None:
@@ -413,6 +515,16 @@ class NativeContractTests(unittest.TestCase):
             MAX_NATIVE_GEOMETRY_ENTITIES,
         )
         self.assertEqual(
+            geometry_schema["properties"]["containers"]["maxItems"],
+            MAX_NATIVE_GEOMETRY_CONTAINERS,
+        )
+        self.assertEqual(
+            geometry_schema["$defs"]["container"]["properties"][
+                "physical_slot_count"
+            ]["maximum"],
+            MAX_NATIVE_PHYSICAL_SLOT_COUNT,
+        )
+        self.assertEqual(
             geometry_schema["$defs"]["entity"]["properties"]["segments"]["maxItems"],
             MAX_NATIVE_GEOMETRY_SEGMENTS,
         )
@@ -424,11 +536,14 @@ class NativeContractTests(unittest.TestCase):
         for declaration in (
             "MaxNativeGeometryEntities = 2_000",
             "MaxNativeGeometrySegments = 10_000",
+            "MaxGeometrySequenceIndex = 1_000_000",
+            "MaxPhysicalSlotCount = MaxGeometrySequenceIndex + 1",
             "MaxGeometryJsonBytes = 16 * 1024 * 1024",
             "MaxInventoryJsonBytes = 64 * 1024",
         ):
             self.assertIn(declaration, protocol_dtos)
         self.assertIn("MaxNativeOperations = 1_024", protocol_dtos)
+        self.assertEqual(1_000_000, MAX_NATIVE_GEOMETRY_SEQUENCE_INDEX)
 
         too_many_segments = geometry([entity("10", native_type="LWPOLYLINE")])
         too_many_segments["entities"][0]["segments"] = [

@@ -72,7 +72,12 @@ from liang_pingfa_review.native_protocol import (
     response_limit_for_method,
     write_all,
 )
-from tests.support.mock_native_bridge import ScriptedPipe, health_response
+from tests.support.mock_native_bridge import (
+    ScriptedPipe,
+    _GeneratedAdapterSessionGate,
+    _handshake_response,
+    health_response,
+)
 from tests.support.synthetic_native import config, digest, entity, geometry, session
 
 
@@ -724,11 +729,23 @@ class NativeProtocolTests(unittest.TestCase):
             r"\\.\pipe\liang-pingfa-native-a1b2c3d4e5f6g7h8",
         )
         prefix = chr(92) * 2 + "." + chr(92) + "pipe" + chr(92)
+        for token in (
+            "ABCDEFG0" * 4,
+            "Ab0Cd1Ef2Gh3Ij4Kl5Mn6Op7Qr8St9Uv",
+        ):
+            candidate = prefix + "liang-pingfa-native-" + token
+            with self.subTest(accepted_token=token):
+                self.assertEqual(candidate, validate_pipe_name(candidate))
         for candidate in (
             chr(92) * 2 + "server" + chr(92) + "pipe" + chr(92) + "liang-pingfa-native-a1b2c3d4e5f6g7h8",
             prefix + "other-a1b2c3d4e5f6g7h8",
             prefix + "liang-pingfa-native-a1b2c3d4e5f6g7h8\n",
             r"\\.\pipe\liang-pingfa-native-aaaaaaaaaaaaaaaa",
+            prefix + "liang-pingfa-native-" + ("A" * 32),
+            prefix + "liang-pingfa-native-" + ("0" * 32),
+            prefix + "liang-pingfa-native-" + (("AA0" * 10) + "AA"),
+            prefix + "liang-pingfa-native-" + (("ABCDEF0" * 4) + "ABCD"),
+            prefix + "liang-pingfa-native-" + (("ABCDEFG0" * 3) + "ABCDEFG-"),
         ):
             with self.subTest(candidate=candidate):
                 with self.assertRaises(PipelineError) as raised:
@@ -2199,6 +2216,45 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
             monotonic_issued=descriptor["monotonic_issued"],
             monotonic_expires=descriptor["monotonic_expires"],
         )
+
+    def test_generated_adapter_gate_binds_the_first_client_health_id(self) -> None:
+        """The real-pipe double mirrors adapter-owned binding, not an ID mint."""
+
+        selected = session()
+        alternate = "native-session-" + "f" * 32
+        gate = _GeneratedAdapterSessionGate()
+        health = {
+            "protocol_version": PROTOCOL_VERSION,
+            "id": "1" * 32,
+            "method": "health",
+            "params": {"session_id": selected["session_id"]},
+        }
+        self.assertEqual(
+            _handshake_response(health, session_gate=gate)["result"]["kind"],
+            "health",
+        )
+        handshake = {
+            "protocol_version": PROTOCOL_VERSION,
+            "id": "2" * 32,
+            "method": "get_session",
+            "params": {
+                "session_id": selected["session_id"],
+                "client_nonce": selected["client_nonce"],
+                "challenge": selected["challenge"],
+            },
+        }
+        self.assertEqual(
+            _handshake_response(handshake, session_gate=gate)["result"]["kind"],
+            "session",
+        )
+        mismatch = {
+            "protocol_version": PROTOCOL_VERSION,
+            "id": "3" * 32,
+            "method": "health",
+            "params": {"session_id": alternate},
+        }
+        with self.assertRaises(ValueError):
+            _handshake_response(mismatch, session_gate=gate)
 
     @staticmethod
     def _clocked_descriptor(
