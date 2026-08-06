@@ -228,10 +228,28 @@ def _match_markers(
     return matched
 
 
+def _operation_postcondition_digest(
+    operation: Mapping[str, Any],
+    marker_handle: str | None,
+) -> str:
+    """Mirror the core's v2 operation-result digest construction."""
+
+    if marker_handle is None:
+        return canonical_sha256(operation)
+    return canonical_sha256(
+        {
+            "operation": dict(operation),
+            "marker_handle": marker_handle,
+        }
+    )
+
+
 def _require_protected_order(
     before_entities: list[Mapping[str, Any]],
     after_entities: list[Mapping[str, Any]],
     *,
+    before_containers: list[Mapping[str, Any]],
+    after_containers: list[Mapping[str, Any]],
     after_document: Mapping[str, Any],
     after_owners: list[str],
     delete_handles: set[str],
@@ -244,6 +262,46 @@ def _require_protected_order(
     but every non-target retains its original sequence index and relative
     order.  A host that renumbers container records is therefore rejected.
     """
+
+    before_physical = {
+        _container_key(container): container for container in before_containers
+    }
+    after_physical = {
+        _container_key(container): container for container in after_containers
+    }
+    if set(before_physical) != set(after_physical):
+        raise PipelineError(
+            ErrorCode.NATIVE_READBACK_INVALID,
+            "physical container set changed",
+        )
+
+    marker_count_by_container: dict[
+        tuple[str, str, str, tuple[str, ...]], int
+    ] = {}
+    for operation in operations:
+        if operation["kind"] != "create_review_marker":
+            continue
+        key = _container_key(
+            {
+                "space": operation["space"],
+                "block_path": operation["block_path"],
+            }
+        )
+        marker_count_by_container[key] = marker_count_by_container.get(key, 0) + 1
+    for key, before_container in before_physical.items():
+        after_container = after_physical[key]
+        expected_count = (
+            int(before_container["physical_slot_count"])
+            + marker_count_by_container.get(key, 0)
+        )
+        if (
+            before_container["owner_handle"] != after_container["owner_handle"]
+            or int(after_container["physical_slot_count"]) != expected_count
+        ):
+            raise PipelineError(
+                ErrorCode.NATIVE_READBACK_INVALID,
+                "physical container slot count drift",
+            )
 
     before_by_handle = {entity["handle"]: entity for entity in before_entities}
     after_by_handle = {entity["handle"]: entity for entity in after_entities}
@@ -259,6 +317,18 @@ def _require_protected_order(
             raise PipelineError(
                 ErrorCode.NATIVE_READBACK_INVALID,
                 "existing entity sequence or container changed",
+            )
+    for entity in after_entities:
+        physical = after_physical.get(_container_key(entity))
+        if (
+            physical is None
+            or physical["owner_handle"] != entity["owner_handle"]
+            or int(entity["sequence_index"])
+            >= int(physical["physical_slot_count"])
+        ):
+            raise PipelineError(
+                ErrorCode.NATIVE_READBACK_INVALID,
+                "active entity physical index/gap drift",
             )
 
     before_groups = _group_by_container(before_entities)
@@ -313,7 +383,7 @@ def _require_protected_order(
     # The geometry schema independently recomputes this digest.  Rechecking
     # it here ensures a transition cannot bypass the container-order binding
     # even when a forged export recomputes unrelated document fields.
-    sequences = native_container_sequences(after_entities)
+    sequences = native_container_sequences(after_entities, after_containers)
     if canonical_sha256(sequences) != after_document["container_order_digest"]:
         raise PipelineError(ErrorCode.NATIVE_READBACK_INVALID, "container order digest drift")
     if canonical_sha256(
@@ -329,6 +399,8 @@ def _require_protected_order(
 def verify_native_transition(
     manifest: Mapping[str, Any],
     after_export: Mapping[str, Any],
+    *,
+    console_result: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compare raw before/exported-after geometry against the exact allowlist."""
 
@@ -400,6 +472,42 @@ def verify_native_transition(
         entity for entity in after_entities if entity["handle"] not in before_by_handle
     ]
     marker_handles_by_operation = _match_markers(operations, additions)
+    if console_result is not None:
+        checked_result = require_active_native_contract(
+            "console_result",
+            console_result,
+        )
+        results_by_operation = {
+            item["operation_id"]: item
+            for item in checked_result["operation_results"]
+        }
+        for operation in operations:
+            if operation["kind"] != "create_review_marker":
+                continue
+            receipt = results_by_operation.get(operation["operation_id"])
+            if (
+                receipt is None
+                or receipt["marker_handle"]
+                != marker_handles_by_operation[operation["operation_id"]]
+            ):
+                raise PipelineError(
+                    ErrorCode.NATIVE_READBACK_INVALID,
+                    "marker append receipt differs from exact readback",
+                )
+        for result in results:
+            if result["kind"] == "create_review_marker":
+                result["marker_handle"] = marker_handles_by_operation[
+                    result["operation_id"]
+                ]
+            else:
+                result["marker_handle"] = None
+    else:
+        for result in results:
+            result["marker_handle"] = (
+                marker_handles_by_operation[result["operation_id"]]
+                if result["kind"] == "create_review_marker"
+                else None
+            )
     marker_handles = set(marker_handles_by_operation.values())
     expected_handles = set(before_by_handle) - delete_handles | marker_handles
     if set(after_by_handle) != expected_handles:
@@ -407,6 +515,8 @@ def verify_native_transition(
     _require_protected_order(
         before_entities,
         after_entities,
+        before_containers=list(before["containers"]),
+        after_containers=list(after["containers"]),
         after_document=after["document"],
         after_owners=after["owners"],
         delete_handles=delete_handles,
@@ -460,14 +570,10 @@ def validate_console_result(
     if transition_policy == "save_reopen_changes_revision":
         transition_valid = (
             checked["final_revision_transition"] == "save_reopen_changed"
-            and checked["final_revision_fingerprint"]
-            != prewrite["revision_fingerprint"]
         )
     elif transition_policy == "preserved_by_plugin_capability":
         transition_valid = (
             checked["final_revision_transition"] == "preserved_by_plugin_capability"
-            and checked["final_revision_fingerprint"]
-            == prewrite["revision_fingerprint"]
         )
     else:
         transition_valid = False
@@ -477,19 +583,33 @@ def validate_console_result(
             "console final revision transition differs",
         )
     expected_operations = {
-        operation["operation_id"]: canonical_sha256(operation)
+        operation["operation_id"]: operation
         for operation in checked_manifest["operations"]
     }
     observed = {
         item["operation_id"]: item
         for item in checked["operation_results"]
     }
-    if set(observed) != set(expected_operations) or any(
-        item["status"] != "applied"
-        or item["postcondition_digest"] != expected_operations[operation_id]
-        for operation_id, item in observed.items()
-    ):
+    if set(observed) != set(expected_operations):
         raise PipelineError(ErrorCode.NATIVE_CONSOLE_RESULT_INVALID, "console operation result differs")
+    for operation_id, operation in expected_operations.items():
+        item = observed[operation_id]
+        marker_handle = item["marker_handle"]
+        is_marker = operation["kind"] == "create_review_marker"
+        if (
+            item["status"] != "applied"
+            or (is_marker and not isinstance(marker_handle, str))
+            or (not is_marker and marker_handle is not None)
+            or item["postcondition_digest"]
+            != _operation_postcondition_digest(
+                operation,
+                marker_handle,
+            )
+        ):
+            raise PipelineError(
+                ErrorCode.NATIVE_CONSOLE_RESULT_INVALID,
+                "console operation result differs",
+            )
     return checked
 
 
@@ -592,7 +712,11 @@ def build_native_verification(
             ErrorCode.NATIVE_VERIFICATION_INVALID,
             "verification input version bindings differ",
         )
-    results = verify_native_transition(checked_manifest, checked_after)
+    results = verify_native_transition(
+        checked_manifest,
+        checked_after,
+        console_result=checked_result,
+    )
     try:
         if any(
             output_description[key] != checked_after["source"][key]

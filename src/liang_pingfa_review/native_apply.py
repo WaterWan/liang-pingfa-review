@@ -390,7 +390,11 @@ def native_apply(
                     run_id=readback_outcome.run_id,
                     result=write_result,
                 )
-                verify_native_transition(manifest, after_export)
+                verify_native_transition(
+                    manifest,
+                    after_export,
+                    console_result=write_result,
+                )
                 saved_binding, saved_source = _require_readback_matches_private_copy(
                     workspace,
                     private_dwg,
