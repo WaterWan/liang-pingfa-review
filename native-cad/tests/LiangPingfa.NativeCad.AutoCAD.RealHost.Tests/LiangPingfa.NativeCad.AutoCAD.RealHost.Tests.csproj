@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- This project is intentionally opt-in and is not in the public solution. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>LiangPingfa.NativeCad.AutoCAD.RealHost.Tests</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.AutoCAD.RealHost.Tests</RootNamespace>
+    <BuildRealHostTests Condition="'$(BuildRealHostTests)' == ''">false</BuildRealHostTests>
+    <RealHostSdkDir Condition="'$(RealHostSdkDir)' == ''"></RealHostSdkDir>
+    <RealHostCoreConsole Condition="'$(RealHostCoreConsole)' == ''"></RealHostCoreConsole>
+    <RealHostPrivateFixture Condition="'$(RealHostPrivateFixture)' == ''"></RealHostPrivateFixture>
+    <CadHostProfile Condition="'$(CadHostProfile)' == ''">autocad2025</CadHostProfile>
+    <NativeCadPolicyMode>checkpoint-2-realhost-tests</NativeCadPolicyMode>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(BuildRealHostTests)' == 'true'">
+    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.AutoCAD.Adapter\LiangPingfa.NativeCad.AutoCAD.Adapter.csproj">
+      <AdditionalProperties>BuildAutoCadAdapter=true;UseAutodeskApiStubs=false;CadHostProfile=$(CadHostProfile);CadSdkDir=$(RealHostSdkDir)</AdditionalProperties>
+      <Private>false</Private>
+      <CopyLocal>false</CopyLocal>
+    </ProjectReference>
+  </ItemGroup>
+  <Target Name="ValidateRealHostGate" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(BuildRealHostTests)' != 'true' And '$(BuildRealHostTests)' != 'false'"
+           Text="LiangPingfa.RealHostTests: BuildRealHostTests must be exactly true or false." />
+    <Error Condition="'$(BuildRealHostTests)' == 'true' And ('$(RealHostSdkDir)' == '' Or '$(RealHostCoreConsole)' == '' Or '$(RealHostPrivateFixture)' == '')"
+           Text="LiangPingfa.RealHostTests: explicit licensed SDK, Core Console, and generated private fixture paths are required." />
+    <Error Condition="'$(BuildRealHostTests)' == 'true' And !Exists('$(RealHostCoreConsole)')"
+           Text="LiangPingfa.RealHostTests: configured Core Console is unavailable." />
+    <Error Condition="'$(BuildRealHostTests)' == 'true' And !Exists('$(RealHostPrivateFixture)')"
+           Text="LiangPingfa.RealHostTests: generated private fixture is unavailable." />
+  </Target>
+  <Target Name="RejectRealHostPack" BeforeTargets="Pack;Publish">
+    <Error Text="LiangPingfa.RealHostTests cannot be packaged or published." />
+  </Target>
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>
