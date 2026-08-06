@@ -267,6 +267,7 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                                     "operation_id": "native-operation-" + "a" * 24,
                                     "status": "applied",
                                     "postcondition_digest": digest("postcondition"),
+                                    "marker_handle": None,
                                 }
                             ],
                             }

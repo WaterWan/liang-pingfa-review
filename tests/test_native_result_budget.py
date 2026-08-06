@@ -5,7 +5,11 @@ from __future__ import annotations
 from copy import deepcopy
 import unittest
 
-from liang_pingfa_review.canonical import attach_integrity, canonical_json_bytes
+from liang_pingfa_review.canonical import (
+    attach_integrity,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from liang_pingfa_review.errors import ErrorCode, PipelineError
 from liang_pingfa_review.native_audit import build_native_audit
 from liang_pingfa_review.native_contracts import (
@@ -151,8 +155,9 @@ class NativeResultBudgetTests(unittest.TestCase):
                     "postcondition_digest": digest(
                         "budget-postcondition-" + operation["operation_id"]
                     ),
+                    "marker_handle": f"{index + 0x100:X}",
                 }
-                for operation in manifest["operations"]
+                for index, operation in enumerate(manifest["operations"])
             ],
         }
         return attach_integrity(result)
@@ -167,10 +172,12 @@ class NativeResultBudgetTests(unittest.TestCase):
             manifest_623["operations"],
             strict=True,
         ):
-            item["postcondition_digest"] = __import__(
-                "liang_pingfa_review.canonical",
-                fromlist=["canonical_sha256"],
-            ).canonical_sha256(operation)
+            item["postcondition_digest"] = canonical_sha256(
+                {
+                    "operation": operation,
+                    "marker_handle": item["marker_handle"],
+                }
+            )
         result_623 = attach_integrity(result_623)
         self.assertEqual(
             result_623,
