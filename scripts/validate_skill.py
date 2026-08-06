@@ -88,12 +88,21 @@ NATIVE_CAD_PROJECT_PATHS = (
     "native-cad/src/LiangPingfa.NativeCad.Core/LiangPingfa.NativeCad.Core.csproj",
     "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj",
     "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/LiangPingfa.NativeCad.Core.Tests.csproj",
+    "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/LiangPingfa.NativeCad.AutoCAD.Adapter.csproj",
+    "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj",
+    "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj",
 )
+NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT = NATIVE_CAD_PROJECT_PATHS[4]
+NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT = NATIVE_CAD_PROJECT_PATHS[5]
+NATIVE_CAD_REALHOST_TEST_PROJECT = NATIVE_CAD_PROJECT_PATHS[6]
 NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS = {
     NATIVE_CAD_PROJECT_PATHS[0]: "netstandard2.0",
     NATIVE_CAD_PROJECT_PATHS[1]: "netstandard2.0",
     NATIVE_CAD_PROJECT_PATHS[2]: "netstandard2.0",
     NATIVE_CAD_PROJECT_PATHS[3]: "net8.0",
+    NATIVE_CAD_PROJECT_PATHS[4]: "profile-selected",
+    NATIVE_CAD_PROJECT_PATHS[5]: "net8.0-windows",
+    NATIVE_CAD_PROJECT_PATHS[6]: "net8.0-windows",
 }
 NATIVE_CAD_STUB_SOURCE_PATH = (
     "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/AutodeskApiStubs.cs"
@@ -112,14 +121,10 @@ NATIVE_CAD_POLICY_MODES = {
     NATIVE_CAD_PROJECT_PATHS[1]: "checkpoint-1-core",
     NATIVE_CAD_PROJECT_PATHS[2]: "syntax-only-stub",
     NATIVE_CAD_PROJECT_PATHS[3]: "checkpoint-1-tests",
+    NATIVE_CAD_PROJECT_PATHS[4]: "reviewed-autocad-adapter",
+    NATIVE_CAD_PROJECT_PATHS[5]: "checkpoint-2-adapter-tests",
+    NATIVE_CAD_PROJECT_PATHS[6]: "checkpoint-2-realhost-tests",
 }
-NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_PROJECT = (
-    "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/"
-    "LiangPingfa.NativeCad.AutoCAD.Adapter.csproj"
-)
-NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_CONDITION = (
-    "'$(LiangPingfaReviewedAutoCadAdapterReferences)' == 'true'"
-)
 NATIVE_CAD_GENERATED_DIRECTORIES = frozenset(
     {
         "native-cad/src/LiangPingfa.NativeCad.Protocol/bin",
@@ -130,6 +135,12 @@ NATIVE_CAD_GENERATED_DIRECTORIES = frozenset(
         "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/obj",
         "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/bin",
         "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/obj",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/bin",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/obj",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/bin",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/obj",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/bin",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/obj",
     }
 )
 NATIVE_PROTOCOL_TEXT_PATHS = frozenset(
@@ -147,6 +158,9 @@ NATIVE_PIPE_LITERAL_CONTEXTS = NATIVE_PROTOCOL_TEXT_PATHS | frozenset(
     {
         ".github/skills/liang-pingfa-tuzhi-shencha/references/native-cad-bridge.md",
         "scripts/validate_skill.py",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePipeBridge.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/ProfileDispatch.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/PrivatePaths.cs",
     }
 )
 TOPOLOGY_ROLE_ARRAYS = (
@@ -380,9 +394,11 @@ ALLOWED_FILES = frozenset(
         "native-cad/Directory.Build.props",
         "native-cad/Directory.Build.targets",
         "native-cad/NativeCad.RepositoryPolicy.targets",
+        "native-cad/scripts/verify-autocad-adapter.ps1",
         "native-cad/LiangPingfa.NativeCad.sln",
         "native-cad/README.md",
         "native-cad/ADR-0001-sdk-free-transaction-core.md",
+        "native-cad/ADR-0002-licensed-autocad-adapter.md",
         "native-cad/src/LiangPingfa.NativeCad.Protocol/LiangPingfa.NativeCad.Protocol.csproj",
         "native-cad/src/LiangPingfa.NativeCad.Protocol/CanonicalJson.cs",
         "native-cad/src/LiangPingfa.NativeCad.Protocol/CanonicalJsonOptions.cs",
@@ -396,10 +412,25 @@ ALLOWED_FILES = frozenset(
         "native-cad/src/LiangPingfa.NativeCad.Core/NativeGeometryJsonV2.cs",
         "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj",
         "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/AutodeskApiStubs.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/LiangPingfa.NativeCad.AutoCAD.Adapter.csproj",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AdapterIdentity.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/PrivatePaths.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AutodeskCadDatabase.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AutodeskDocumentReadGate.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/ManifestProjectionReader.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePluginCommands.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePipeBridge.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/ProfileDispatch.cs",
         "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/LiangPingfa.NativeCad.Core.Tests.csproj",
         "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/Program.cs",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/BridgeExpiryLifetimeTests.cs",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/Program.cs",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj",
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/Program.cs",
         "native-cad/tests/fixtures/native-cad-v2-golden.json",
         "tests/test_native_cad_core.py",
+        "tests/test_autocad_adapter.py",
     }
 )
 
@@ -890,15 +921,18 @@ def _text_safety_issue(
 
     if WINDOWS_ABSOLUTE_PATH_PATTERN.search(value):
         return f"obvious Windows absolute local path found in {relative}"
-    for unc_match in UNC_PATH_PATTERN.finditer(value):
-        if not _unc_span_is_allowed(
-            value,
-            unc_match.start(),
-            unc_match.end(),
-            relative=relative,
-            path=path,
-        ):
-            return f"UNC local path found in {relative}"
+    if not relative.startswith(
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/"
+    ):
+        for unc_match in UNC_PATH_PATTERN.finditer(value):
+            if not _unc_span_is_allowed(
+                value,
+                unc_match.start(),
+                unc_match.end(),
+                relative=relative,
+                path=path,
+            ):
+                return f"UNC local path found in {relative}"
     if POSIX_LOCAL_PATH_PATTERN.search(value):
         return f"obvious POSIX local path found in {relative}"
     # The one checked source-free golden vector intentionally contains its
@@ -1905,6 +1939,8 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
         "dotnet run --project native-bridge-contracts/tests/LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj -c Release --nologo",
         "dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo",
         "dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build",
+        "native-cad\\scripts\\verify-autocad-adapter.ps1 -Configuration Release",
+        "LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj",
         "python -m liang_pingfa_review doctor",
         "python -m liang_pingfa_review native-doctor",
     ):
@@ -2020,42 +2056,35 @@ def _is_exact_native_cad_policy_import(
     )
 
 
-def _is_future_reviewed_autocad_adapter_block(
+def _is_reviewed_autocad_adapter_sdk_element(
     *,
     relative: str,
     element: ElementTree.Element,
     parents: dict[ElementTree.Element, ElementTree.Element],
 ) -> bool:
-    """Recognize only the one future adapter block without exempting files broadly."""
+    """Recognize only an exact real-SDK reference element in the adapter project."""
 
-    if relative != NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_PROJECT:
+    if relative != NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
         return False
     parent = parents.get(element)
     if parent is None:
         return False
-    group = parent
-    if _msbuild_local_name(group.tag) != "ItemGroup":
-        group = parents.get(parent)
-        if group is None or _msbuild_local_name(group.tag) != "ItemGroup":
-            return False
+    reference = element
+    if _msbuild_local_name(reference.tag) != "Reference":
+        reference = parent
+    if _msbuild_local_name(reference.tag) != "Reference":
+        return False
+    group = parents.get(reference)
+    if group is None or _msbuild_local_name(group.tag) != "ItemGroup":
+        return False
     if _normalized_msbuild_condition(group.attrib.get("Condition", "")) != (
-        _normalized_msbuild_condition(NATIVE_CAD_FUTURE_AUTOCAD_ADAPTER_CONDITION)
+        _normalized_msbuild_condition(
+            "'$(BuildAutoCadAdapter)' == 'true' And "
+            "'$(UseAutodeskApiStubs)' != 'true'"
+        )
     ):
         return False
-    # This is intentionally design-only at checkpoint 1: the adapter project
-    # does not exist and every recognized reference still produces a failure
-    # below. If a reviewed future adapter is admitted, only this conditional
-    # proprietary <Reference> item shape may be considered; HintPath, package,
-    # SDK, import, and arbitrary assembly exemptions remain forbidden.
-    return (
-        _msbuild_local_name(element.tag) == "Reference"
-        and element.attrib.get("Include")
-        in {
-            "Autodesk.AutoCAD",
-            "Autodesk.AutoCAD.DatabaseServices",
-            "Autodesk.AutoCAD.Runtime",
-        }
-    )
+    return reference.attrib.get("Include") in {"AcMgd", "AcDbMgd", "AcCoreMgd"}
 
 
 def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
@@ -2188,6 +2217,8 @@ def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
                         "native CAD projects must not define TargetFrameworks: "
                         + relative
                     )
+                elif relative == NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
+                    target_framework_count += 1
                 elif expected_framework is None:
                     issues.append(
                         "native CAD TargetFramework definition is only allowed "
@@ -2229,15 +2260,12 @@ def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
             if name in forbidden_elements and not (
                 name == "Import" and is_exact_policy_import
             ):
-                if _is_future_reviewed_autocad_adapter_block(
+                if _is_reviewed_autocad_adapter_sdk_element(
                     relative=relative,
                     element=element,
                     parents=parents,
                 ):
-                    issues.append(
-                        "native CAD future AutoCAD adapter reference block is unavailable "
-                        f"at checkpoint 1: {relative}"
-                    )
+                    continue
                 else:
                     issues.append(
                         "native CAD MSBuild file contains forbidden "
@@ -2262,6 +2290,7 @@ def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
                     in {
                         "EnforceNativeCadRepositoryPolicy",
                         "RejectUnapprovedNativeCadDependencies",
+                        "ValidateAutoCadAdapterBuild",
                     }
                     and "restore" in element.attrib.get("BeforeTargets", "").casefold()
                 )
@@ -2321,19 +2350,35 @@ def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
                     _msbuild_local_name(child.tag): (child.text or "").strip()
                     for child in element
                 }
-                if metadata.get("Private", "").casefold() != "false" or (
-                    metadata.get("CopyLocal", "").casefold() != "false"
+                is_adapter_test_host = (
+                    relative == NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT
+                )
+                expected_copy = "true" if is_adapter_test_host else "false"
+                if (
+                    metadata.get("Private", "").casefold() != expected_copy
+                    or metadata.get("CopyLocal", "").casefold() != expected_copy
                 ):
-                    issues.append(
-                        "native CAD syntax-stub ProjectReference must disable copy-local: "
-                        + relative
-                    )
+                    if is_adapter_test_host:
+                        issues.append(
+                            "native CAD adapter syntax-stub test host must copy its isolated test dependency: "
+                            + relative
+                        )
+                    else:
+                        issues.append(
+                            "native CAD syntax-stub ProjectReference must disable copy-local: "
+                            + relative
+                        )
 
         if is_project_file and relative in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS:
-            if target_framework_count != 1:
+            expected_target_framework_count = (
+                4
+                if relative == NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT
+                else 1
+            )
+            if target_framework_count != expected_target_framework_count:
                 issues.append(
-                    "native CAD project must have exactly one authoritative "
-                    f"TargetFramework definition: {relative}"
+                    "native CAD project has an invalid authoritative "
+                    f"TargetFramework definition count: {relative}"
                 )
 
             direct_imports = [
@@ -2429,6 +2474,10 @@ def _validate_native_cad_evaluated_target_frameworks(
         return
 
     for relative, expected in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items():
+        if relative == NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
+            # The adapter's TFM is intentionally selected only by an explicit
+            # host profile; a default evaluator must never choose one.
+            continue
         project = root / relative
         try:
             completed = subprocess.run(
@@ -2479,7 +2528,7 @@ def _validate_native_cad_evaluated_target_frameworks(
 
 
 def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
-    """Keep checkpoint 1 source-only, generated, and explicitly non-runtime."""
+    """Keep SDK-free core proof and licensed adapter source fail-closed."""
 
     required_paths = (
         "native-cad/LiangPingfa.NativeCad.sln",
@@ -2498,11 +2547,102 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
         "native-cad/src/LiangPingfa.NativeCad.Core/ExactReadbackVerifier.cs",
         NATIVE_CAD_STUB_SOURCE_PATH,
         "native-cad/tests/LiangPingfa.NativeCad.Core.Tests/Program.cs",
+        NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AdapterIdentity.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/PrivatePaths.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AutodeskCadDatabase.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AutodeskDocumentReadGate.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/ManifestProjectionReader.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePluginCommands.cs",
+        "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePipeBridge.cs",
+        NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/Program.cs",
+        NATIVE_CAD_REALHOST_TEST_PROJECT,
+        "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/Program.cs",
         NATIVE_CAD_GOLDEN_FIXTURE_PATH,
     )
     for relative in required_paths:
         if not (root / relative).is_file():
             issues.append(f"native CAD checkpoint path is missing: {relative}")
+
+    adapter_root = root / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter"
+    adapter_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(adapter_root.glob("*.cs"))
+    )
+    stub_source = _read_text(root / NATIVE_CAD_STUB_SOURCE_PATH, issues)
+    adapter_test_source = _read_text(
+        root / "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/Program.cs",
+        issues,
+    )
+    if (
+        "document.Saved" in adapter_source
+        or ".TopTransaction" in adapter_source
+        or ".NumberOfActiveTransactions" in adapter_source
+    ):
+        issues.append(
+            "AutoCAD adapter document gate uses an unreviewed clean-state API"
+        )
+    if stub_source is not None and (
+        "public bool Saved" in stub_source
+        or "public Transaction TopTransaction" in stub_source
+    ):
+        issues.append(
+            "syntax-only Autodesk stubs expose an unreviewed clean-state API"
+        )
+    if (
+        adapter_test_source is None
+        or "CheckDocumentedDocumentGateApiAllowlist" not in adapter_test_source
+        or "CanonicalizeConsoleExportPayload" not in adapter_test_source
+        or "CheckInitialWriteCapabilityBoundary" not in adapter_test_source
+    ):
+        issues.append(
+            "AutoCAD adapter tests lack documented API, ConsoleExport, or write-profile checks"
+        )
+    adapter_identity = _read_text(
+        root / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AdapterIdentity.cs",
+        issues,
+    )
+    adapter_database = _read_text(
+        root / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AutodeskCadDatabase.cs",
+        issues,
+    )
+    adapter_manifest_reader = _read_text(
+        root / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/ManifestProjectionReader.cs",
+        issues,
+    )
+    if (
+        adapter_identity is None
+        or '"translate_dbtext/v1"' not in adapter_identity
+        or '"create_review_marker/v1"' not in adapter_identity
+        or '"delete_auxiliary_overlay_text/v1"' in adapter_identity
+    ):
+        issues.append(
+            "AutoCAD adapter capability advertisement must exclude native delete"
+        )
+    if adapter_database is None or ".Erase()" in adapter_database:
+        issues.append("AutoCAD adapter source must not call DBText.Erase")
+    if (
+        adapter_manifest_reader is None
+        or "LPF_UNSUPPORTED_OPERATION" not in adapter_manifest_reader
+        or adapter_manifest_reader.index("LPF_UNSUPPORTED_OPERATION")
+        < adapter_manifest_reader.index('"delete_auxiliary_overlay_text"')
+    ):
+        issues.append(
+            "AutoCAD delete manifest must fail at pretransaction unsupported-operation preflight"
+        )
+    core_manifest_source = _read_text(
+        root / "native-cad/src/LiangPingfa.NativeCad.Core/ManifestExecution.cs",
+        issues,
+    )
+    if (
+        core_manifest_source is None
+        or "PortablePrewriteProjectionV2" not in core_manifest_source
+        or "portable prewrite projection" not in core_manifest_source.casefold()
+    ):
+        issues.append(
+            "native CAD core lacks the portable bridge/Core Console prewrite contract"
+        )
 
     _validate_native_cad_msbuild_files(root, issues)
     _validate_native_cad_evaluated_target_frameworks(root, issues)
@@ -2541,6 +2681,7 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
     expected_frameworks = {
         relative: f"<TargetFramework>{framework}</TargetFramework>"
         for relative, framework in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items()
+        if relative != NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT
     }
     forbidden_project_text = (
         "packagereference",
@@ -2564,11 +2705,126 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                     "native CAD project contains forbidden package/proprietary "
                     f"reference: {relative}"
                 )
-        if relative != NATIVE_CAD_PROJECT_PATHS[2] and "autodesk" in lowered:
+        if (
+            relative not in {
+                NATIVE_CAD_PROJECT_PATHS[2],
+                NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+                NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+                NATIVE_CAD_REALHOST_TEST_PROJECT,
+            }
+            and "autodesk" in lowered
+        ):
             issues.append(
                 "native CAD non-stub project must not mention a proprietary namespace: "
                 + relative
             )
+
+    adapter_project = _read_text(root / NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT, issues)
+    if adapter_project is not None:
+        for required in (
+            "<BuildAutoCadAdapter",
+            "<UseAutodeskApiStubs",
+            "<CadHostProfile",
+            "<CadSdkDir",
+            "autocad2024",
+            "tssd2024",
+            "autocad2025",
+            "tssd2025",
+            "autocad2026",
+            "tssd2026",
+            "net48",
+            "net8.0-windows",
+            "AcMgd.dll",
+            "AcDbMgd.dll",
+            "AcCoreMgd.dll",
+            "<Private>false</Private>",
+            "<CopyLocal>false</CopyLocal>",
+            "RejectAutoCadAdapterPack",
+            "RejectAutoCadAdapterPublish",
+            "RejectCopiedAutodeskAssemblies",
+            "CadSdkDir must be an explicit absolute path",
+            "must not be a reparse point",
+        ):
+            if required not in adapter_project:
+                issues.append(
+                    "native CAD adapter lacks required fail-closed build guard: "
+                    + required
+                )
+        for forbidden in (
+            "packagereference",
+            "teigha",
+            "odafileconverter",
+            "realdwg",
+            "tssd.dll",
+        ):
+            if forbidden in adapter_project.casefold():
+                issues.append(
+                    "native CAD adapter project contains forbidden dependency text: "
+                    + forbidden
+                )
+        try:
+            adapter_document = ElementTree.fromstring(adapter_project)
+        except ElementTree.ParseError:
+            issues.append("native CAD adapter project XML is malformed")
+        else:
+            sdk_references = [
+                element
+                for element in adapter_document.iter()
+                if _msbuild_local_name(element.tag) == "Reference"
+            ]
+            expected_sdk_names = {"AcMgd", "AcDbMgd", "AcCoreMgd"}
+            if {item.attrib.get("Include") for item in sdk_references} != expected_sdk_names:
+                issues.append(
+                    "native CAD adapter must contain exactly the three approved SDK references"
+                )
+            for reference in sdk_references:
+                name = reference.attrib.get("Include")
+                metadata = {
+                    _msbuild_local_name(child.tag): (child.text or "").strip()
+                    for child in reference
+                }
+                expected_hint = f"$(CadSdkDir)\\{name}.dll"
+                parent_map = {
+                    child: parent
+                    for parent in adapter_document.iter()
+                    for child in parent
+                }
+                group = parent_map.get(reference)
+                if (
+                    name not in expected_sdk_names
+                    or group is None
+                    or _msbuild_local_name(group.tag) != "ItemGroup"
+                    or _normalized_msbuild_condition(group.attrib.get("Condition", ""))
+                    != _normalized_msbuild_condition(
+                        "'$(BuildAutoCadAdapter)' == 'true' And "
+                        "'$(UseAutodeskApiStubs)' != 'true'"
+                    )
+                    or metadata.get("HintPath") != expected_hint
+                    or metadata.get("Private", "").casefold() != "false"
+                    or metadata.get("CopyLocal", "").casefold() != "false"
+                ):
+                    issues.append(
+                        "native CAD adapter SDK reference is not exact/copy-local-disabled: "
+                        + str(name)
+                    )
+
+    realhost_project = _read_text(root / NATIVE_CAD_REALHOST_TEST_PROJECT, issues)
+    if realhost_project is not None:
+        for required in (
+            "BuildRealHostTests",
+            "RealHostSdkDir",
+            "RealHostCoreConsole",
+            "RealHostPrivateFixture",
+            "ValidateRealHostGate",
+            "RejectRealHostPack",
+            "BuildAutoCadAdapter=true",
+            "UseAutodeskApiStubs=false",
+        ):
+            if required not in realhost_project:
+                issues.append(
+                    "native CAD optional real-host test lacks explicit gate: "
+                    + required
+                )
 
     native_root = root / NATIVE_CAD_ROOT
     if native_root.is_dir():
@@ -2607,6 +2863,48 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                             "native CAD API stubs must contain no runtime/proprietary "
                             f"loading behavior: {forbidden}"
                         )
+            elif relative.startswith(
+                "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/"
+            ):
+                for forbidden in (
+                    "editor.command",
+                    "sendstringtoexecute",
+                    "sendkeys",
+                    "sendinput",
+                    "getselection",
+                    "marshal.getactiveobject",
+                    "acadapplication",
+                    "runcommand",
+                    "application.showmodaldialog",
+                    "geometricextents",
+                ):
+                    if forbidden in lowered:
+                        issues.append(
+                            "native CAD adapter source contains forbidden UI/arbitrary command API: "
+                            + relative
+                        )
+                for required in (
+                    "CommandMethod",
+                    "IExtensionApplication",
+                    "GetObjectId",
+                    "StartTransaction",
+                    "Abort",
+                    "Commit",
+                    "SaveAs",
+                    "ReadDwgFile",
+                    "ExecuteInCommandContextAsync",
+                    "CreateNamedPipe",
+                ):
+                    if required not in text and not any(
+                        required in _read_text(candidate, issues)
+                        for candidate in sorted(
+                            (root / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter").glob("*.cs")
+                        )
+                    ):
+                        issues.append(
+                            "native CAD adapter source lacks required real-host boundary: "
+                            + required
+                        )
             else:
                 for forbidden in (
                     "autodesk",
@@ -2619,7 +2917,10 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                 ):
                     if (
                         forbidden == "autodesk"
-                        and relative == NATIVE_CAD_STUB_TEST_SOURCE_PATH
+                        and relative in {
+                            NATIVE_CAD_STUB_TEST_SOURCE_PATH,
+                            "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/Program.cs",
+                        }
                     ):
                         continue
                     if forbidden in lowered:
@@ -2638,16 +2939,6 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
         ):
             if required not in solution:
                 issues.append(f"native CAD solution is missing project: {required}")
-        for forbidden in (
-            "AutoCAD.Adapter",
-            "RealHost",
-            "RuntimeAdapter",
-        ):
-            if forbidden.casefold() in solution.casefold():
-                issues.append(
-                    "checkpoint 1 solution must not include a real-host adapter: "
-                    + forbidden
-                )
 
     stub_project = _read_text(root / NATIVE_CAD_PROJECT_PATHS[2], issues)
     if stub_project is not None:
@@ -2874,6 +3165,9 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                 "max_json_nesting_depth": 128,
                 "max_geometry_entities": 2000,
                 "max_geometry_segments": 10000,
+                "max_geometry_sequence_index": 1000000,
+                "max_geometry_containers": 2001,
+                "max_physical_slot_count": 1000001,
                 "max_geometry_json_bytes": 16 * 1024 * 1024,
                 "max_native_operations": 1024,
                 "max_console_result_bytes": 256 * 1024,
@@ -2904,6 +3198,33 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                     "native CAD README lacks syntax-stub deployment boundary: "
                     + required
                 )
+
+    runtime_claim_marker = "LPF_PRIVATE_LICENSED_HOST_EVIDENCE="
+    for relative in (
+        "native-cad/README.md",
+        "native-cad/ADR-0002-licensed-autocad-adapter.md",
+        ".github/skills/liang-pingfa-tuzhi-shencha/references/native-cad-bridge.md",
+    ):
+        text = _read_text(root / relative, issues)
+        if text is None:
+            continue
+        lowered = text.casefold()
+        if (
+            any(
+                claim in lowered
+                for claim in (
+                    "runtime qualified",
+                    "runtime qualification passed",
+                    "tssd qualified",
+                    "real-host qualified",
+                )
+            )
+            and runtime_claim_marker.casefold() not in lowered
+        ):
+            issues.append(
+                "native CAD runtime qualification claim lacks private evidence marker: "
+                + relative
+            )
 
 
 def _validate_native_v1_baseline(root: Path, issues: list[str]) -> None:
@@ -3149,6 +3470,21 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
                 not in manifest_properties
                 or "final_output_constraints" not in manifest_properties
                 or "stable_host_binding_digest" not in prewrite_required
+                or {
+                    "bridge_document_identity",
+                    "portable_prewrite_projection",
+                    "portable_prewrite_projection_digest",
+                }
+                - set(prewrite_required)
+                or {
+                    "database_instance_fingerprint",
+                    "revision_fingerprint",
+                    "geometry_digest",
+                    "protected_state_digest",
+                    "protected_order_digest",
+                    "document_state_digest",
+                }
+                & set(prewrite_required)
                 or "audit_schema_version" not in audit_binding_required
                 or "plan_schema_version" not in plan_binding_required
                 or "intent_schema_version" not in intent_binding_required
@@ -3170,8 +3506,84 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
                 or '"expected_final_revision_fingerprint"' in manifest_schema
             ):
                 issues.append(
-                    "native v2 manifest must bind exact prewrite bytes and "
-                    "final-output constraints without predicting final bytes/revision"
+                    "native v2 manifest must bind exact private bytes, a "
+                    "portable prewrite projection, and final-output constraints"
+                )
+
+    geometry_schema = _read_text(
+        root
+        / "src"
+        / "liang_pingfa_review"
+        / "schemas"
+        / "native-geometry-export-v2.schema.json",
+        issues,
+    )
+    if geometry_schema is not None:
+        try:
+            parsed_geometry_schema = json.loads(geometry_schema)
+            geometry_required = set(parsed_geometry_schema["required"])
+            geometry_properties = parsed_geometry_schema["properties"]
+            container_required = set(
+                parsed_geometry_schema["$defs"]["container"]["required"]
+            )
+            physical_slot_schema = parsed_geometry_schema["$defs"]["container"][
+                "properties"
+            ]["physical_slot_count"]
+            portable_required = set(
+                parsed_geometry_schema["$defs"]["portablePrewriteProjection"][
+                    "required"
+                ]
+            )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append("native geometry schema is structurally invalid")
+        else:
+            if (
+                {
+                    "portable_prewrite_projection",
+                    "portable_prewrite_projection_digest",
+                }
+                - geometry_required
+                or "portable_prewrite_projection" not in geometry_properties
+                or {
+                    "schema_version",
+                    "ordered_entity_digest",
+                    "container_order_digest",
+                    "geometry_digest",
+                    "protected_semantic_digest",
+                    "table_state_digest",
+                    "layout_state_digest",
+                    "block_state_digest",
+                }
+                - portable_required
+            ):
+                issues.append(
+                    "native geometry export must publish the exact portable "
+                    "prewrite projection and digest"
+                )
+            if (
+                "containers" not in geometry_required
+                or "containers" not in geometry_properties
+                or {
+                    "owner_handle",
+                    "space",
+                    "block_path",
+                    "physical_slot_count",
+                }
+                - container_required
+                or physical_slot_schema
+                != {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000001,
+                    "description": (
+                        "Erased-inclusive physical slot extent. It exposes no "
+                        "erased entity identity or payload."
+                    ),
+                }
+            ):
+                issues.append(
+                    "active v2 geometry must require bounded per-container "
+                    "erased-inclusive physical slot counts"
                 )
 
     for filename, required in (
@@ -3454,11 +3866,16 @@ def _validate_native_bridge_contract(root: Path, issues: list[str]) -> None:
     if protocol_v2_dtos is not None:
         for required in (
             "NativeSourceBindingV2",
+            "NativePortablePrewriteProjectionV2",
+            "NativeBridgeDocumentIdentityV2",
+            "NativeGeometryContainerV2",
             "NativeFinalOutputConstraintsV2",
             "NativeManifestExecutionResultV2",
             "NativeConsoleExportV2",
             "SessionMonotonicClock",
             "MaxNativeOperations = 1_024",
+            "MaxPhysicalSlotCount = MaxGeometrySequenceIndex + 1",
+            "MaxConsoleExportBytes = 32 * 1024 * 1024",
         ):
             if required not in protocol_v2_dtos:
                 issues.append(f"active v2 C# contracts lack required DTO: {required}")

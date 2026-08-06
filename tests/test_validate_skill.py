@@ -596,6 +596,60 @@ class ValidateSkillTests(unittest.TestCase):
             "LiangPingfa.NativeCad.Core.Tests.csproj"
         )
 
+    def test_autocad_adapter_sdk_reference_must_remain_copylocal_false(self) -> None:
+        """The reviewed adapter exception cannot turn into a deployable SDK copy."""
+
+        path = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter"
+            / "LiangPingfa.NativeCad.AutoCAD.Adapter.csproj"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "<Reference Include=\"AcMgd\">\n"
+                "      <HintPath>$(CadSdkDir)\\AcMgd.dll</HintPath>\n"
+                "      <Private>false</Private>",
+                "<Reference Include=\"AcMgd\">\n"
+                "      <HintPath>$(CadSdkDir)\\AcMgd.dll</HintPath>\n"
+                "      <Private>true</Private>",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD adapter SDK reference is not exact/copy-local-disabled: AcMgd"
+        )
+
+    def test_autocad_adapter_delete_capability_or_erase_fails_validation(self) -> None:
+        identity = (
+            self.repository
+            / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/AdapterIdentity.cs"
+        )
+        identity.write_text(
+            identity.read_text(encoding="utf-8").replace(
+                '"create_review_marker/v1",',
+                '"create_review_marker/v1",\n                    '
+                '"delete_auxiliary_overlay_text/v1",',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "AutoCAD adapter capability advertisement must exclude native delete"
+        )
+
+    def test_autocad_runtime_qualification_claim_requires_private_marker(self) -> None:
+        path = self.repository / "native-cad/README.md"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + "\nThis adapter is runtime qualified for every host.\n",
+            encoding="utf-8",
+        )
+        self.assert_validation_fails_with(
+            "native CAD runtime qualification claim lacks private evidence marker: "
+            "native-cad/README.md"
+        )
+
     def test_native_cad_stub_runtime_disclosure_removal_fails(self) -> None:
         source = (
             self.repository
@@ -836,6 +890,10 @@ class ValidateSkillTests(unittest.TestCase):
         for relative, expected in (
             validate_skill.NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items()
         ):
+            if relative == validate_skill.NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
+                # The adapter refuses a default profile; individual explicit
+                # profile builds are covered by test_autocad_adapter.py.
+                continue
             with self.subTest(project=relative):
                 result = subprocess.run(
                     [
