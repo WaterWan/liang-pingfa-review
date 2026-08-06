@@ -32,13 +32,25 @@
     <_ExpectedNativeCadPolicyMode
       Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Core.Tests'">checkpoint-1-tests</_ExpectedNativeCadPolicyMode>
 
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter.Tests'">net8.0-windows</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter.Tests'">checkpoint-2-adapter-tests</_ExpectedNativeCadPolicyMode>
+
+    <_ExpectedNativeCadTargetFramework
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.RealHost.Tests'">net8.0-windows</_ExpectedNativeCadTargetFramework>
+    <_ExpectedNativeCadPolicyMode
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.RealHost.Tests'">checkpoint-2-realhost-tests</_ExpectedNativeCadPolicyMode>
+
     <!-- This is an explicit future policy mode, not an import bypass. -->
     <_ExpectedNativeCadTargetFramework
-      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter'">net48</_ExpectedNativeCadTargetFramework>
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter'">$(LiangPingfaAdapterExpectedTargetFramework)</_ExpectedNativeCadTargetFramework>
     <_ExpectedNativeCadPolicyMode
       Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter'">reviewed-autocad-adapter</_ExpectedNativeCadPolicyMode>
+    <_NativeCadReviewedAdapterProject
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter' And '$(NativeCadPolicyMode)' == 'reviewed-autocad-adapter' And '$(LiangPingfaReviewedAutoCadAdapterReferences)' == 'true'">true</_NativeCadReviewedAdapterProject>
     <_NativeCadFutureAdapterReferencesAllowed
-      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter' And '$(NativeCadPolicyMode)' == 'reviewed-autocad-adapter' And '$(LiangPingfaReviewedAutoCadAdapterReferences)' == 'true'">true</_NativeCadFutureAdapterReferencesAllowed>
+      Condition="'$(_NativeCadReviewedAdapterProject)' == 'true' And '$(BuildAutoCadAdapter)' == 'true' And '$(UseAutodeskApiStubs)' != 'true'">true</_NativeCadFutureAdapterReferencesAllowed>
   </PropertyGroup>
 
   <Target Name="EnforceNativeCadRepositoryPolicy"
@@ -74,9 +86,11 @@
         Condition="'%(FrameworkReference.Identity)' != 'Microsoft.NETCore.App' Or '%(FrameworkReference.IsImplicitlyDefined)' != 'true'" />
       <!-- netstandard2.0 resolves framework facades as Reference items. -->
       <_UnapprovedNativeCadReference Include="@(Reference)"
-        Condition="('%(Reference.NuGetPackageId)' != 'NETStandard.Library' And '%(Reference.NuGetPackageId)' != 'Microsoft.NETCore.App.Ref' And '%(Reference.ReferenceSourceTarget)' != 'ResolveProjectReferences') And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'Autodesk.AutoCAD' Or '%(Reference.Identity)' == 'Autodesk.AutoCAD.DatabaseServices' Or '%(Reference.Identity)' == 'Autodesk.AutoCAD.Runtime'))" />
+        Condition="('%(Reference.NuGetPackageId)' != 'NETStandard.Library' And '%(Reference.NuGetPackageId)' != 'Microsoft.NETCore.App.Ref' And '%(Reference.ReferenceSourceTarget)' != 'ResolveProjectReferences') And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'AcMgd' Or '%(Reference.Identity)' == 'AcDbMgd' Or '%(Reference.Identity)' == 'AcCoreMgd')) And !('$(_NativeCadReviewedAdapterProject)' == 'true' And '$(TargetFramework)' == 'net48' And ('%(Reference.Identity)' == 'System' Or '%(Reference.Identity)' == 'System.Data' Or '%(Reference.Identity)' == 'System.Drawing' Or '%(Reference.Identity)' == 'System.Xml' Or '%(Reference.Identity)' == 'System.Core' Or '%(Reference.Identity)' == 'System.Runtime.Serialization' Or '%(Reference.Identity)' == 'System.Xml.Linq' Or '%(Reference.Identity)' == 'System.Numerics' Or '%(Reference.Identity)' == 'System.IO.Compression.FileSystem'))" />
       <_NativeCadReferenceWithHintPath Include="@(Reference)"
-        Condition="'%(Reference.HintPath)' != ''" />
+        Condition="'%(Reference.HintPath)' != '' And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'AcMgd' Or '%(Reference.Identity)' == 'AcDbMgd' Or '%(Reference.Identity)' == 'AcCoreMgd')) And !('$(_NativeCadReviewedAdapterProject)' == 'true' And '$(UseAutodeskApiStubs)' == 'true' And '%(Reference.ReferenceSourceTarget)' == 'ResolveProjectReferences')" />
+      <_NativeCadAdapterReferenceWithoutPrivateFalse Include="@(Reference)"
+        Condition="'$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'AcMgd' Or '%(Reference.Identity)' == 'AcDbMgd' Or '%(Reference.Identity)' == 'AcCoreMgd') And $([System.String]::Copy('%(Reference.Private)').ToLowerInvariant()) != 'false'" />
     </ItemGroup>
     <Error
       Condition="'@(_UnapprovedNativeCadPackageReference)' != ''"
@@ -88,7 +102,10 @@
       Condition="'@(_UnapprovedNativeCadReference)' != '' Or '@(_NativeCadReferenceWithHintPath)' != ''"
       Text="$(_NativeCadPolicyErrorPrefix) projects must not use assembly Reference/HintPath at checkpoint 1." />
     <Error
-      Condition="'$(_NativeCadFutureAdapterReferencesAllowed)' != 'true' And ($([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('autodesk')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('teigha')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('tssd')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('oda')))"
+      Condition="'@(_NativeCadAdapterReferenceWithoutPrivateFalse)' != ''"
+      Text="$(_NativeCadPolicyErrorPrefix) adapter SDK references must set Private=false." />
+    <Error
+      Condition="'$(_NativeCadReviewedAdapterProject)' != 'true' And ($([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('autodesk')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('teigha')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('tssd')) Or $([System.String]::Copy('@(ProjectReference);@(Reference)').ToLowerInvariant().Contains('oda')))"
       Text="$(_NativeCadPolicyErrorPrefix) projects must not reference proprietary CAD assemblies." />
   </Target>
 </Project>
