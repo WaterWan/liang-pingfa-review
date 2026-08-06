@@ -19,7 +19,8 @@ namespace LiangPingfa.NativeCad.Core
             GeometryExportV2 before,
             CoreManifestV2 manifest,
             GeometryExportV2 after,
-            bool requireFinalRevisionTransition)
+            bool requireFinalRevisionTransition,
+            IReadOnlyDictionary<string, string>? actualMarkerHandles = null)
         {
             if (before == null)
             {
@@ -91,6 +92,13 @@ namespace LiangPingfa.NativeCad.Core
                 Dictionary<string, string> markerHandles = MatchMarkers(
                     beforeByHandle,
                     afterByHandle,
+                    markerOperations);
+                RequireActualMarkerHandleBindings(
+                    markerHandles,
+                    actualMarkerHandles);
+                RequirePhysicalContainerSlots(
+                    before.Snapshot,
+                    after.Snapshot,
                     markerOperations);
                 RequireNoUnplannedChanges(
                     beforeByHandle,
@@ -194,6 +202,80 @@ namespace LiangPingfa.NativeCad.Core
                 if (!string.Equals(before[index], after[index], StringComparison.Ordinal))
                 {
                     Fail("Protected owner state changed.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Verifies every per-container physical extent independently of the
+        /// active entity list. Deletes leave their physical slot behind,
+        /// translations leave all extents untouched, and each marker appends
+        /// exactly one new slot in its declared container.
+        /// </summary>
+        private static void RequirePhysicalContainerSlots(
+            CadDocumentSnapshot before,
+            CadDocumentSnapshot after,
+            IReadOnlyList<CreateReviewMarkerOperationV2> markerOperations)
+        {
+            if (before.Containers.Count != after.Containers.Count)
+            {
+                Fail("Physical container set changed.");
+            }
+
+            Dictionary<string, int> markerCountByContainer =
+                new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int index = 0; index < markerOperations.Count; index++)
+            {
+                CreateReviewMarkerOperationV2 operation = markerOperations[index];
+                int currentCount;
+                markerCountByContainer.TryGetValue(
+                    operation.Container.SortKey,
+                    out currentCount);
+                markerCountByContainer[operation.Container.SortKey] =
+                    currentCount + 1;
+            }
+
+            for (int index = 0; index < before.Containers.Count; index++)
+            {
+                CadContainerPhysicalSlots expectedBefore = before.Containers[index];
+                CadContainerPhysicalSlots? observedAfter =
+                    after.FindContainer(expectedBefore.Container);
+                int markerCount;
+                markerCountByContainer.TryGetValue(
+                    expectedBefore.Container.SortKey,
+                    out markerCount);
+                int expectedCount = expectedBefore.PhysicalSlotCount + markerCount;
+                if (observedAfter == null ||
+                    !string.Equals(
+                        observedAfter.OwnerHandle,
+                        expectedBefore.OwnerHandle,
+                        StringComparison.Ordinal) ||
+                    observedAfter.PhysicalSlotCount != expectedCount)
+                {
+                    Fail("Physical container slot count drifted.");
+                }
+            }
+
+            RequireActiveIndicesWithinPhysicalExtent(before);
+            RequireActiveIndicesWithinPhysicalExtent(after);
+        }
+
+        private static void RequireActiveIndicesWithinPhysicalExtent(
+            CadDocumentSnapshot snapshot)
+        {
+            for (int index = 0; index < snapshot.Entities.Count; index++)
+            {
+                CadEntitySnapshot entity = snapshot.Entities[index];
+                CadContainerPhysicalSlots? container =
+                    snapshot.FindContainer(entity.Container);
+                if (container == null ||
+                    !string.Equals(
+                        container.OwnerHandle,
+                        entity.OwnerHandle,
+                        StringComparison.Ordinal) ||
+                    entity.SequenceIndex >= container.PhysicalSlotCount)
+                {
+                    Fail("Active entity physical index/gap drifted.");
                 }
             }
         }
@@ -310,6 +392,40 @@ namespace LiangPingfa.NativeCad.Core
             }
 
             return matched;
+        }
+
+        /// <summary>
+        /// Binds each operation's host append receipt to the exact marker
+        /// identified during readback.  This proves both directions: every
+        /// operation result names its one marker and every marker addition is
+        /// claimed by exactly one operation.
+        /// </summary>
+        private static void RequireActualMarkerHandleBindings(
+            IDictionary<string, string> readbackHandles,
+            IReadOnlyDictionary<string, string>? actualHandles)
+        {
+            if (actualHandles == null)
+            {
+                return;
+            }
+
+            if (readbackHandles.Count != actualHandles.Count)
+            {
+                Fail("Marker append receipt cardinality differs from readback.");
+            }
+
+            foreach (KeyValuePair<string, string> receipt in actualHandles)
+            {
+                string? readback;
+                if (!readbackHandles.TryGetValue(receipt.Key, out readback) ||
+                    !string.Equals(
+                        readback,
+                        receipt.Value,
+                        StringComparison.Ordinal))
+                {
+                    Fail("Marker append receipt differs from exact readback.");
+                }
+            }
         }
 
         private static bool MarkerMatches(
