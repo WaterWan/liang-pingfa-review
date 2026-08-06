@@ -5,10 +5,11 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace Autodesk.AutoCAD.Runtime
 {
-    /// <summary>Syntax-only command flags for a future adapter.</summary>
+    /// <summary>Syntax-only command flags needed by the adapter source.</summary>
     [Flags]
     public enum CommandFlags
     {
@@ -16,11 +17,16 @@ namespace Autodesk.AutoCAD.Runtime
         Session = 1,
     }
 
-    /// <summary>Syntax-only attribute declaration; it has no host behavior.</summary>
+    /// <summary>Syntax-only command metadata; it has no host behavior.</summary>
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
     public sealed class CommandMethodAttribute : Attribute
     {
         public CommandMethodAttribute(string globalName)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public CommandMethodAttribute(string globalName, CommandFlags flags)
         {
             throw Stub.NotSupported();
         }
@@ -31,7 +37,7 @@ namespace Autodesk.AutoCAD.Runtime
         }
     }
 
-    /// <summary>Syntax-only extension-application attribute declaration.</summary>
+    /// <summary>Syntax-only extension-application metadata.</summary>
     [AttributeUsage(AttributeTargets.Assembly)]
     public sealed class ExtensionApplicationAttribute : Attribute
     {
@@ -41,7 +47,7 @@ namespace Autodesk.AutoCAD.Runtime
         }
     }
 
-    /// <summary>Syntax-only lifecycle interface for a future adapter.</summary>
+    /// <summary>Syntax-only lifecycle contract.</summary>
     public interface IExtensionApplication
     {
         void Initialize();
@@ -71,19 +77,71 @@ namespace Autodesk.AutoCAD.ApplicationServices
         {
             get { throw Stub.NotSupported(); }
         }
+
+        public static object GetSystemVariable(string name)
+        {
+            throw Stub.NotSupported();
+        }
+    }
+
+    /// <summary>Syntax-only document event arguments.</summary>
+    public sealed class DocumentCollectionEventArgs : EventArgs
+    {
+        public DocumentCollectionEventArgs()
+        {
+            throw Stub.NotSupported();
+        }
+
+        public Document Document
+        {
+            get { throw Stub.NotSupported(); }
+        }
     }
 
     /// <summary>Syntax-only document collection.</summary>
     public sealed class DocumentCollection : IEnumerable<Document>
     {
+        /// <summary>Syntax-only nested async command-context result.</summary>
+        public sealed class ExecutionResult
+        {
+            public ExecutionResult()
+            {
+                throw Stub.NotSupported();
+            }
+
+            public ExecutionResult GetAwaiter()
+            {
+                throw Stub.NotSupported();
+            }
+        }
+
         public DocumentCollection()
         {
             throw Stub.NotSupported();
         }
 
+        public event EventHandler<DocumentCollectionEventArgs> DocumentBecameCurrent
+        {
+            add { throw Stub.NotSupported(); }
+            remove { throw Stub.NotSupported(); }
+        }
+
+        public event EventHandler<DocumentCollectionEventArgs> DocumentToBeDestroyed
+        {
+            add { throw Stub.NotSupported(); }
+            remove { throw Stub.NotSupported(); }
+        }
+
         public Document MdiActiveDocument
         {
             get { throw Stub.NotSupported(); }
+        }
+
+        public ExecutionResult ExecuteInCommandContextAsync(
+            Func<object, Task> callback,
+            object data)
+        {
+            throw Stub.NotSupported();
         }
 
         public IEnumerator<Document> GetEnumerator()
@@ -106,6 +164,16 @@ namespace Autodesk.AutoCAD.ApplicationServices
         }
 
         public Database Database
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public string Name
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public string CommandInProgress
         {
             get { throw Stub.NotSupported(); }
         }
@@ -143,10 +211,27 @@ namespace Autodesk.AutoCAD.DatabaseServices
         ForWrite,
     }
 
+    /// <summary>Syntax-only DWG input sharing mode.</summary>
+    public enum FileOpenMode
+    {
+        OpenForReadAndAllShare,
+    }
+
+    /// <summary>Syntax-only DWG save version.</summary>
+    public enum DwgVersion
+    {
+        Current,
+    }
+
     /// <summary>Syntax-only database declaration.</summary>
     public sealed class Database : IDisposable
     {
         public Database()
+        {
+            throw Stub.NotSupported();
+        }
+
+        public Database(bool buildDefaultDrawing, bool noDocument)
         {
             throw Stub.NotSupported();
         }
@@ -171,6 +256,52 @@ namespace Autodesk.AutoCAD.DatabaseServices
             get { throw Stub.NotSupported(); }
         }
 
+        public DwgVersion OriginalFileVersion
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public string Filename
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        /// <summary>Saved database identity indicator exposed by AutoCAD.</summary>
+        public Guid FingerprintGuid
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        /// <summary>Saved database revision indicator exposed by AutoCAD.</summary>
+        public Guid VersionGuid
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public ObjectId GetObjectId(bool createIfNotFound, Handle handle, int xrefId)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public void ReadDwgFile(
+            string fileName,
+            FileOpenMode mode,
+            bool allowCpConversion,
+            string password)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public void CloseInput(bool closeFile)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public void SaveAs(string fileName, DwgVersion version)
+        {
+            throw Stub.NotSupported();
+        }
+
         public void Dispose()
         {
             throw Stub.NotSupported();
@@ -189,6 +320,7 @@ namespace Autodesk.AutoCAD.DatabaseServices
         {
             throw Stub.NotSupported();
         }
+
     }
 
     /// <summary>Syntax-only transaction declaration.</summary>
@@ -200,6 +332,16 @@ namespace Autodesk.AutoCAD.DatabaseServices
         }
 
         public DBObject GetObject(ObjectId id, OpenMode mode)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public DBObject GetObject(ObjectId id, OpenMode mode, bool openErased)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public void AddNewlyCreatedDBObject(DBObject objectValue, bool add)
         {
             throw Stub.NotSupported();
         }
@@ -242,9 +384,19 @@ namespace Autodesk.AutoCAD.DatabaseServices
             get { throw Stub.NotSupported(); }
         }
 
-        public Handle Handle
+        public bool IsErased
         {
             get { throw Stub.NotSupported(); }
+        }
+
+        public bool IsValid
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public bool Equals(ObjectId other)
+        {
+            throw Stub.NotSupported();
         }
     }
 
@@ -266,7 +418,42 @@ namespace Autodesk.AutoCAD.DatabaseServices
             get { throw Stub.NotSupported(); }
         }
 
+        public ObjectId OwnerId
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public bool IsErased
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        /// <summary>
+        /// Autodesk DBObject field-presence API.  The adapter uses this
+        /// documented signal to reject field-backed DBTEXT rather than
+        /// treating its evaluated TextString as lossless source state.
+        /// </summary>
+        public bool HasFields
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        /// <summary>Syntax-only documented field accessor.</summary>
+        public ObjectId GetField()
+        {
+            throw Stub.NotSupported();
+        }
+
         public void Erase()
+        {
+            throw Stub.NotSupported();
+        }
+    }
+
+    /// <summary>Syntax-only Autodesk field database object.</summary>
+    public sealed class Field : DBObject
+    {
+        public Field()
         {
             throw Stub.NotSupported();
         }
@@ -284,11 +471,6 @@ namespace Autodesk.AutoCAD.DatabaseServices
         {
             get { throw Stub.NotSupported(); }
             set { throw Stub.NotSupported(); }
-        }
-
-        public void TransformBy(Matrix3d transform)
-        {
-            throw Stub.NotSupported();
         }
     }
 
@@ -330,10 +512,68 @@ namespace Autodesk.AutoCAD.DatabaseServices
             set { throw Stub.NotSupported(); }
         }
 
-        public Extents3d GeometricExtents
+        public Point3d AlignmentPoint
+        {
+            // BaseLeft adapter tests deliberately never access this member:
+            // Position is the only supported BaseLeft anchor.
+            get { throw Stub.NotSupported(); }
+            set { throw Stub.NotSupported(); }
+        }
+
+        public AttachmentPoint Justify
         {
             get { throw Stub.NotSupported(); }
+            set { throw Stub.NotSupported(); }
         }
+
+        public TextHorizontalMode HorizontalMode
+        {
+            get { throw Stub.NotSupported(); }
+            set { throw Stub.NotSupported(); }
+        }
+
+        public TextVerticalMode VerticalMode
+        {
+            get { throw Stub.NotSupported(); }
+            set { throw Stub.NotSupported(); }
+        }
+    }
+
+    /// <summary>Syntax-only DBTEXT attachment values.</summary>
+    public enum AttachmentPoint
+    {
+        BaseLeft,
+        BaseCenter,
+        BaseRight,
+        BottomLeft,
+        BottomCenter,
+        BottomRight,
+        MiddleLeft,
+        MiddleCenter,
+        MiddleRight,
+        TopLeft,
+        TopCenter,
+        TopRight,
+    }
+
+    /// <summary>Syntax-only DBTEXT horizontal alignment values.</summary>
+    public enum TextHorizontalMode
+    {
+        TextLeft,
+        TextCenter,
+        TextRight,
+        TextAlign,
+        TextMid,
+        TextFit,
+    }
+
+    /// <summary>Syntax-only DBTEXT vertical alignment values.</summary>
+    public enum TextVerticalMode
+    {
+        TextBase,
+        TextBottom,
+        TextVerticalMid,
+        TextTop,
     }
 
     /// <summary>Syntax-only line entity.</summary>
@@ -357,7 +597,7 @@ namespace Autodesk.AutoCAD.DatabaseServices
         }
     }
 
-    /// <summary>Syntax-only lightweight polyline declaration.</summary>
+    /// <summary>Syntax-only lightweight polyline.</summary>
     public sealed class Polyline : Entity
     {
         public Polyline()
@@ -370,14 +610,34 @@ namespace Autodesk.AutoCAD.DatabaseServices
             get { throw Stub.NotSupported(); }
         }
 
-        public Point3d GetPoint3dAt(int index)
+        public bool Closed
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public double Elevation
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public Vector3d Normal
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public Point2d GetPoint2dAt(int index)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public double GetBulgeAt(int index)
         {
             throw Stub.NotSupported();
         }
     }
 
     /// <summary>Syntax-only block table.</summary>
-    public sealed class BlockTable : DBObject
+    public sealed class BlockTable : DBObject, IEnumerable
     {
         public BlockTable()
         {
@@ -388,24 +648,91 @@ namespace Autodesk.AutoCAD.DatabaseServices
         {
             get { throw Stub.NotSupported(); }
         }
+
+        public bool Has(string name)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public IEnumerator GetEnumerator()
+        {
+            throw Stub.NotSupported();
+        }
     }
 
     /// <summary>Syntax-only block table record.</summary>
-    public sealed class BlockTableRecord : DBObject
+    public sealed class BlockTableRecord : DBObject, IEnumerable
     {
+        public const string ModelSpace = "*Model_Space";
+        public const string PaperSpace = "*Paper_Space";
+
         public BlockTableRecord()
         {
             throw Stub.NotSupported();
+        }
+
+        public string Name
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public bool IsLayout
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public bool IsFromExternalReference
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public ObjectId LayoutId
+        {
+            get { throw Stub.NotSupported(); }
         }
 
         public ObjectId AppendEntity(Entity entity)
         {
             throw Stub.NotSupported();
         }
+
+        /// <summary>
+        /// Gets the documented erased-inclusive <see cref="BlockTableRecord"/>
+        /// view. Enumerate the returned record to retain physical ObjectId
+        /// slots that the default record enumerator omits.
+        /// </summary>
+        public BlockTableRecord IncludingErased
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public IEnumerator GetEnumerator()
+        {
+            throw Stub.NotSupported();
+        }
+    }
+
+    /// <summary>Syntax-only layout record.</summary>
+    public sealed class Layout : DBObject
+    {
+        public Layout()
+        {
+            throw Stub.NotSupported();
+        }
+
+        public string LayoutName
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public bool ModelType
+        {
+            get { throw Stub.NotSupported(); }
+        }
     }
 
     /// <summary>Syntax-only layer table.</summary>
-    public sealed class LayerTable : DBObject
+    public sealed class LayerTable : DBObject, IEnumerable
     {
         public LayerTable()
         {
@@ -416,6 +743,16 @@ namespace Autodesk.AutoCAD.DatabaseServices
         {
             get { throw Stub.NotSupported(); }
         }
+
+        public bool Has(string name)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public IEnumerator GetEnumerator()
+        {
+            throw Stub.NotSupported();
+        }
     }
 
     /// <summary>Syntax-only layer table record.</summary>
@@ -425,10 +762,15 @@ namespace Autodesk.AutoCAD.DatabaseServices
         {
             throw Stub.NotSupported();
         }
+
+        public string Name
+        {
+            get { throw Stub.NotSupported(); }
+        }
     }
 
     /// <summary>Syntax-only text style table.</summary>
-    public sealed class TextStyleTable : DBObject
+    public sealed class TextStyleTable : DBObject, IEnumerable
     {
         public TextStyleTable()
         {
@@ -439,6 +781,16 @@ namespace Autodesk.AutoCAD.DatabaseServices
         {
             get { throw Stub.NotSupported(); }
         }
+
+        public bool Has(string name)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public IEnumerator GetEnumerator()
+        {
+            throw Stub.NotSupported();
+        }
     }
 
     /// <summary>Syntax-only text style table record.</summary>
@@ -447,6 +799,11 @@ namespace Autodesk.AutoCAD.DatabaseServices
         public TextStyleTableRecord()
         {
             throw Stub.NotSupported();
+        }
+
+        public string Name
+        {
+            get { throw Stub.NotSupported(); }
         }
     }
 
@@ -463,6 +820,25 @@ namespace Autodesk.AutoCAD.DatabaseServices
 namespace Autodesk.AutoCAD.Geometry
 {
     using Autodesk.AutoCAD.Runtime;
+
+    /// <summary>Syntax-only two-dimensional point.</summary>
+    public struct Point2d
+    {
+        public Point2d(double x, double y)
+        {
+            throw Stub.NotSupported();
+        }
+
+        public double X
+        {
+            get { throw Stub.NotSupported(); }
+        }
+
+        public double Y
+        {
+            get { throw Stub.NotSupported(); }
+        }
+    }
 
     /// <summary>Syntax-only three-dimensional point.</summary>
     public struct Point3d
@@ -507,34 +883,6 @@ namespace Autodesk.AutoCAD.Geometry
         }
 
         public double Z
-        {
-            get { throw Stub.NotSupported(); }
-        }
-    }
-
-    /// <summary>Syntax-only transformation matrix.</summary>
-    public struct Matrix3d
-    {
-        public static Matrix3d Displacement(Vector3d vector)
-        {
-            throw Stub.NotSupported();
-        }
-    }
-
-    /// <summary>Syntax-only geometric extents.</summary>
-    public struct Extents3d
-    {
-        public Extents3d(Point3d minimumPoint, Point3d maximumPoint)
-        {
-            throw Stub.NotSupported();
-        }
-
-        public Point3d MinPoint
-        {
-            get { throw Stub.NotSupported(); }
-        }
-
-        public Point3d MaxPoint
         {
             get { throw Stub.NotSupported(); }
         }
