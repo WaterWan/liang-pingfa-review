@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>LiangPingfa.NativeCad.AutoCAD.Adapter.Tests</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.AutoCAD.Adapter.Tests</RootNamespace>
+    <NativeCadPolicyMode>checkpoint-2-adapter-tests</NativeCadPolicyMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Test-host-only copy: the adapter output itself still has no stub DLL. -->
+    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.AutoCAD.ApiStubs\LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj">
+      <Private>true</Private>
+      <CopyLocal>true</CopyLocal>
+    </ProjectReference>
+    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.AutoCAD.Adapter\LiangPingfa.NativeCad.AutoCAD.Adapter.csproj">
+      <AdditionalProperties>BuildAutoCadAdapter=true;UseAutodeskApiStubs=true;CadHostProfile=autocad2025</AdditionalProperties>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>
