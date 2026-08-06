@@ -26,6 +26,23 @@ size, and identity-transition mode. The final result must carry the
 **observed** retained post-save binding that satisfies those constraints; it
 must not reuse a stale input or accept an arbitrary save target.
 
+`NativePortablePrewriteProjectionV2` is the one bridge/Core Console
+cross-context preflight contract. It contains only ordered entity/container,
+geometry, protected owner/opaque, and policy-independent
+table/layout/block digests. Source path/file identity and database/revision
+identity are excluded because a private copy may receive new host values.
+`NativeBridgeDocumentIdentityV2` retains the bridge-only values solely to
+verify the embedded bridge export; marker policy remains separately bound by
+the stable-host digest.
+
+Active v2 geometry carriers also use `NativeGeometryContainerV2` for each
+physical entity container. `physical_slot_count` is a bounded
+erased-inclusive extent, never a count inferred from active records and never
+an erased handle/content disclosure. It participates in the v2 geometry,
+protected/order, document-binding, audit/plan/manifest precondition, and
+post-save readback bindings. It does not alter any frozen v1 DTO or wire
+surface.
+
 `NativeBridgeProtocolV2.MaxNativeOperations` is fixed at 1,024. Conforming
 writers must calculate the full canonical success or failure result envelope,
 including every operation ID/status/digest, below
