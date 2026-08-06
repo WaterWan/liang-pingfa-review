@@ -1,0 +1,132 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    This project is deliberately opt-in.  Its source is public, but a real
+    build needs an operator-supplied, licensed Autodesk managed SDK.  It does
+    not discover SDKs and it never copies their assemblies into output.
+  -->
+  <PropertyGroup>
+    <BuildAutoCadAdapter Condition="'$(BuildAutoCadAdapter)' == ''">false</BuildAutoCadAdapter>
+    <UseAutodeskApiStubs Condition="'$(UseAutodeskApiStubs)' == ''">false</UseAutodeskApiStubs>
+    <CadHostProfile Condition="'$(CadHostProfile)' == ''">disabled</CadHostProfile>
+    <CadSdkDir Condition="'$(CadSdkDir)' == ''"></CadSdkDir>
+
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2024' Or '$(CadHostProfile)' == 'tssd2024'">net48</TargetFramework>
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2025' Or '$(CadHostProfile)' == 'tssd2025'">net8.0-windows</TargetFramework>
+    <!-- Autodesk documents AutoCAD 2026 managed API compatibility with .NET 8. -->
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2026' Or '$(CadHostProfile)' == 'tssd2026'">net8.0-windows</TargetFramework>
+    <!-- A disabled build is not a profile fallback; it exists only so MSBuild
+         can evaluate this project and report the explicit opt-in failure. -->
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net8.0-windows</TargetFramework>
+
+    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2024' Or '$(CadHostProfile)' == 'tssd2024'">net48</LiangPingfaAdapterExpectedTargetFramework>
+    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2025' Or '$(CadHostProfile)' == 'tssd2025' Or '$(CadHostProfile)' == 'autocad2026' Or '$(CadHostProfile)' == 'tssd2026'">net8.0-windows</LiangPingfaAdapterExpectedTargetFramework>
+    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(LiangPingfaAdapterExpectedTargetFramework)' == ''">net8.0-windows</LiangPingfaAdapterExpectedTargetFramework>
+
+    <AssemblyName>LiangPingfa.NativeCad.AutoCAD.Adapter</AssemblyName>
+    <RootNamespace>LiangPingfa.NativeCad.AutoCAD.Adapter</RootNamespace>
+    <Description>Opt-in AutoCAD managed adapter source; licensed host evidence is required.</Description>
+    <NativeCadPolicyMode>reviewed-autocad-adapter</NativeCadPolicyMode>
+    <LiangPingfaReviewedAutoCadAdapterReferences>true</LiangPingfaReviewedAutoCadAdapterReferences>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <GeneratePublishDependencyFile>false</GeneratePublishDependencyFile>
+    <!-- Do not let an SDK silently inject a reference-assembly package. A
+         net48 profile requires the operator/CI Windows targeting pack. -->
+    <AutomaticallyUseReferenceAssemblyPackages>false</AutomaticallyUseReferenceAssemblyPackages>
+    <DefineConstants>$(DefineConstants);LPF_AUTOCAD_ADAPTER</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2024' Or '$(CadHostProfile)' == 'tssd2024'">$(DefineConstants);LPF_AUTOCAD_2024</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2025' Or '$(CadHostProfile)' == 'tssd2025'">$(DefineConstants);LPF_AUTOCAD_2025</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2026' Or '$(CadHostProfile)' == 'tssd2026'">$(DefineConstants);LPF_AUTOCAD_2026</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'tssd2024' Or '$(CadHostProfile)' == 'tssd2025' Or '$(CadHostProfile)' == 'tssd2026'">$(DefineConstants);LPF_TSSD_PROFILE</DefineConstants>
+    <DefineConstants Condition="'$(UseAutodeskApiStubs)' == 'true'">$(DefineConstants);LPF_AUTODESK_API_STUBS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LiangPingfa.NativeCad.Protocol\LiangPingfa.NativeCad.Protocol.csproj" />
+    <ProjectReference Include="..\LiangPingfa.NativeCad.Core\LiangPingfa.NativeCad.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The project-owned declaration assembly is compilation-only. -->
+  <ItemGroup Condition="'$(UseAutodeskApiStubs)' == 'true'">
+    <ProjectReference Include="..\LiangPingfa.NativeCad.AutoCAD.ApiStubs\LiangPingfa.NativeCad.AutoCAD.ApiStubs.csproj">
+      <Private>false</Private>
+      <CopyLocal>false</CopyLocal>
+      <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+
+  <!-- These are the only licensed SDK references allowed by policy. -->
+  <ItemGroup Condition="'$(BuildAutoCadAdapter)' == 'true' And '$(UseAutodeskApiStubs)' != 'true'">
+    <Reference Include="AcMgd">
+      <HintPath>$(CadSdkDir)\AcMgd.dll</HintPath>
+      <Private>false</Private>
+      <CopyLocal>false</CopyLocal>
+    </Reference>
+    <Reference Include="AcDbMgd">
+      <HintPath>$(CadSdkDir)\AcDbMgd.dll</HintPath>
+      <Private>false</Private>
+      <CopyLocal>false</CopyLocal>
+    </Reference>
+    <Reference Include="AcCoreMgd">
+      <HintPath>$(CadSdkDir)\AcCoreMgd.dll</HintPath>
+      <Private>false</Private>
+      <CopyLocal>false</CopyLocal>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="ValidateAutoCadAdapterBuild"
+          BeforeTargets="Restore;PrepareForBuild;ResolveReferences;CoreCompile;Pack;Publish">
+    <Error Condition="'$(BuildAutoCadAdapter)' != 'true'"
+           Text="LiangPingfa.AutoCadAdapter: BuildAutoCadAdapter=true is required; this project is not a default deployment artifact." />
+    <Error Condition="'$(CadHostProfile)' != 'autocad2024' And '$(CadHostProfile)' != 'tssd2024' And '$(CadHostProfile)' != 'autocad2025' And '$(CadHostProfile)' != 'tssd2025' And '$(CadHostProfile)' != 'autocad2026' And '$(CadHostProfile)' != 'tssd2026'"
+           Text="LiangPingfa.AutoCadAdapter: CadHostProfile must be one explicit supported profile." />
+    <Error Condition="'$(TargetFramework)' != '$(LiangPingfaAdapterExpectedTargetFramework)'"
+           Text="LiangPingfa.AutoCadAdapter: target framework does not match CadHostProfile." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And '$(UseAutodeskApiStubs)' != 'false'"
+           Text="LiangPingfa.AutoCadAdapter: UseAutodeskApiStubs must be exactly true or false." />
+    <Error Condition="'$(UseAutodeskApiStubs)' == 'true' And '$(CadSdkDir)' != ''"
+           Text="LiangPingfa.AutoCadAdapter: syntax-only stub builds must not receive CadSdkDir." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And '$(CadSdkDir)' == ''"
+           Text="LiangPingfa.AutoCadAdapter: real builds require an explicit absolute CadSdkDir." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And !$([System.IO.Path]::IsPathRooted('$(CadSdkDir)'))"
+           Text="LiangPingfa.AutoCadAdapter: CadSdkDir must be an explicit absolute path." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And !$([System.Text.RegularExpressions.Regex]::IsMatch('$(CadSdkDir)', '^[A-Za-z]:[\\/]'))"
+           Text="LiangPingfa.AutoCadAdapter: CadSdkDir must be a normal local drive path, not UNC/device syntax." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And !Exists('$(CadSdkDir)')"
+           Text="LiangPingfa.AutoCadAdapter: CadSdkDir does not exist." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And Exists('$(CadSdkDir)') And $([System.IO.File]::GetAttributes('$(CadSdkDir)').ToString().Contains('ReparsePoint'))"
+           Text="LiangPingfa.AutoCadAdapter: CadSdkDir must not be a reparse point." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And !Exists('$(CadSdkDir)\AcMgd.dll')"
+           Text="LiangPingfa.AutoCadAdapter: required AcMgd.dll is missing from CadSdkDir." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And !Exists('$(CadSdkDir)\AcDbMgd.dll')"
+           Text="LiangPingfa.AutoCadAdapter: required AcDbMgd.dll is missing from CadSdkDir." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And !Exists('$(CadSdkDir)\AcCoreMgd.dll')"
+           Text="LiangPingfa.AutoCadAdapter: required AcCoreMgd.dll is missing from CadSdkDir." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And Exists('$(CadSdkDir)\AcMgd.dll') And $([System.IO.File]::GetAttributes('$(CadSdkDir)\AcMgd.dll').ToString().Contains('ReparsePoint'))"
+           Text="LiangPingfa.AutoCadAdapter: AcMgd.dll must not be a reparse point." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And Exists('$(CadSdkDir)\AcDbMgd.dll') And $([System.IO.File]::GetAttributes('$(CadSdkDir)\AcDbMgd.dll').ToString().Contains('ReparsePoint'))"
+           Text="LiangPingfa.AutoCadAdapter: AcDbMgd.dll must not be a reparse point." />
+    <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And Exists('$(CadSdkDir)\AcCoreMgd.dll') And $([System.IO.File]::GetAttributes('$(CadSdkDir)\AcCoreMgd.dll').ToString().Contains('ReparsePoint'))"
+           Text="LiangPingfa.AutoCadAdapter: AcCoreMgd.dll must not be a reparse point." />
+  </Target>
+
+  <Target Name="RejectAutoCadAdapterPack" BeforeTargets="Pack">
+    <Error Text="LiangPingfa.AutoCadAdapter is host-loaded source and cannot be packed or deployed by this repository." />
+  </Target>
+
+  <Target Name="RejectAutoCadAdapterPublish" BeforeTargets="Publish">
+    <Error Text="LiangPingfa.AutoCadAdapter is host-loaded source and cannot be published by this repository." />
+  </Target>
+
+  <Target Name="RejectCopiedAutodeskAssemblies"
+          AfterTargets="CopyFilesMarkedCopyLocal;CopyFilesToOutputDirectory">
+    <Error Condition="Exists('$(TargetDir)AcMgd.dll') Or Exists('$(TargetDir)AcDbMgd.dll') Or Exists('$(TargetDir)AcCoreMgd.dll') Or Exists('$(TargetDir)LiangPingfa.NativeCad.AutoCAD.ApiStubs.dll')"
+           Text="LiangPingfa.AutoCadAdapter: Autodesk SDK or syntax-only stub assembly was copied to adapter output." />
+  </Target>
+
+  <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />
+</Project>
