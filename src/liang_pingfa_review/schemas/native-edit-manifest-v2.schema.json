@@ -630,12 +630,9 @@
         "document_file_identity_fingerprint",
         "document_content_sha256",
         "document_byte_size",
-        "database_instance_fingerprint",
-        "revision_fingerprint",
-        "geometry_digest",
-        "protected_state_digest",
-        "protected_order_digest",
-        "document_state_digest",
+        "bridge_document_identity",
+        "portable_prewrite_projection",
+        "portable_prewrite_projection_digest",
         "adapter_binding",
         "native_host_binding",
         "stable_host_binding_digest",
@@ -658,22 +655,13 @@
           "type": "integer",
           "minimum": 0
         },
-        "database_instance_fingerprint": {
-          "$ref": "#/$defs/sha256"
+        "bridge_document_identity": {
+          "$ref": "#/$defs/bridgeDocumentIdentity"
         },
-        "revision_fingerprint": {
-          "$ref": "#/$defs/sha256"
+        "portable_prewrite_projection": {
+          "$ref": "#/$defs/portablePrewriteProjection"
         },
-        "geometry_digest": {
-          "$ref": "#/$defs/sha256"
-        },
-        "protected_state_digest": {
-          "$ref": "#/$defs/sha256"
-        },
-        "protected_order_digest": {
-          "$ref": "#/$defs/sha256"
-        },
-        "document_state_digest": {
+        "portable_prewrite_projection_digest": {
           "$ref": "#/$defs/sha256"
         },
         "adapter_binding": {
@@ -686,6 +674,62 @@
           "$ref": "#/$defs/sha256"
         },
         "audited_semantic_state_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "bridgeDocumentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "database_instance_fingerprint",
+        "revision_fingerprint"
+      ],
+      "properties": {
+        "database_instance_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "revision_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "portablePrewriteProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "ordered_entity_digest",
+        "container_order_digest",
+        "geometry_digest",
+        "protected_semantic_digest",
+        "table_state_digest",
+        "layout_state_digest",
+        "block_state_digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "liang-pingfa/portable-prewrite-projection/v2"
+        },
+        "ordered_entity_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "container_order_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "geometry_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "protected_semantic_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "table_state_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "layout_state_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "block_state_digest": {
           "$ref": "#/$defs/sha256"
         }
       }
