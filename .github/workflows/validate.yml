@@ -43,6 +43,10 @@ jobs:
         run: dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo
       - name: Run generated native CAD core tests
         run: dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build
+      - name: Build syntax-only AutoCAD adapter profiles and fail-closed probes
+        run: |
+          native-cad\scripts\verify-autocad-adapter.ps1 -Configuration Release
+          dotnet run --project native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj -c Release --nologo
       - name: Check CLI help
         run: |
           python -m liang_pingfa_review --help
@@ -64,3 +68,9 @@ jobs:
         run: |
           python -m liang_pingfa_review doctor
           python -m liang_pingfa_review native-doctor
+      - name: Clean generated native artifacts and revalidate
+        run: |
+          Get-ChildItem native-cad -Directory -Recurse -Force |
+            Where-Object { $_.Name -in @("bin", "obj") } |
+            Remove-Item -Recurse -Force
+          python scripts/validate_skill.py
