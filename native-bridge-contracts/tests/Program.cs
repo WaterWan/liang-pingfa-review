@@ -37,9 +37,16 @@ static class Program
                 PublicSurfaceHash(version: 1));
             AssertEqual(
                 string.Concat(
-                    "1ff224ac1fb08f2927c24c646d25642c",
-                    "60af98eff35d260aa2f383ecf0e443ea"),
+                    "e4670ece601752e214831d5bd398f3ff",
+                    "2596f9357546db2e184d3550f42ca226"),
                 PublicSurfaceHash(version: 2));
+            PropertyInfo physicalSlotCount = typeof(NativeGeometryContainerV2)
+                .GetProperty(nameof(NativeGeometryContainerV2.PhysicalSlotCount)) ??
+                throw new InvalidOperationException(
+                    "v2 physical container slot-count DTO is absent.");
+            AssertEqual(
+                typeof(int).FullName ?? nameof(Int32),
+                physicalSlotCount.PropertyType.FullName ?? physicalSlotCount.PropertyType.Name);
 
             Console.WriteLine("PASS: v1/v2 public API reflection snapshots match.");
             return 0;
