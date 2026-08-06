@@ -233,6 +233,41 @@ class NativeApplyVerifyTests(unittest.TestCase):
         counter = [0]
         write_artifact: list[dict | None] = [None]
 
+        def marker_handle(operation: dict) -> str | None:
+            if operation["kind"] != "create_review_marker":
+                return None
+            candidates = [
+                item
+                for item in after["entities"]
+                if item["native_type"] == "DBTEXT"
+                and item["owner_handle"] == operation["owner_handle"]
+                and item["sequence_index"] == operation["sequence_index"]
+                and item["text"] == operation["marker_text"]
+                and item["layer"] == operation["layer"]
+                and item["style"] == operation["style"]
+            ]
+            if len(candidates) != 1:
+                raise AssertionError("generated marker lacks one actual handle")
+            return candidates[0]["handle"]
+
+        def operation_result(operation: dict) -> dict:
+            handle = marker_handle(operation)
+            return {
+                "operation_id": operation["operation_id"],
+                "status": "applied",
+                "postcondition_digest": (
+                    canonical_sha256(
+                        {
+                            "operation": operation,
+                            "marker_handle": handle,
+                        }
+                    )
+                    if handle is not None
+                    else canonical_sha256(operation)
+                ),
+                "marker_handle": handle,
+            }
+
         def run(**kwargs: object) -> CoreConsoleOutcome:
             counter[0] += 1
             manifest = validate_native_contract(
@@ -271,11 +306,7 @@ class NativeApplyVerifyTests(unittest.TestCase):
                         "rollback": "not_required",
                     },
                     "operation_results": [
-                        {
-                            "operation_id": operation["operation_id"],
-                            "status": "applied",
-                            "postcondition_digest": canonical_sha256(operation),
-                        }
+                        operation_result(operation)
                         for operation in manifest["operations"]
                     ],
                 }
@@ -403,7 +434,12 @@ class NativeApplyVerifyTests(unittest.TestCase):
             verify_native_published_output(output, published_verification),
         )
         self.assertEqual(
-            [{"operation_id": self.intent["operations"][0]["operation_id"], "kind": "translate_dbtext", "verified": True}],
+            [{
+                "operation_id": self.intent["operations"][0]["operation_id"],
+                "kind": "translate_dbtext",
+                "verified": True,
+                "marker_handle": None,
+            }],
             published_verification["operation_results"],
         )
         self.assertTrue(component_leases.closed)

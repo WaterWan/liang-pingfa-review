@@ -410,6 +410,10 @@ class ProductionBoundaryTests(unittest.TestCase):
             any("delete" in name.casefold() and "dxf" in name.casefold() for name in apply_names)
         )
 
+        portable_projection_modules = {
+            "liang_pingfa_review.native_contracts",
+            "liang_pingfa_review.native_manifest",
+        }
         for module_info in pkgutil.walk_packages(
             liang_pingfa_review.__path__,
             prefix="liang_pingfa_review.",
@@ -420,15 +424,23 @@ class ProductionBoundaryTests(unittest.TestCase):
                 any("for_testing" in name.casefold() for name in exported_names),
                 module_info.name,
             )
-            self.assertFalse(
-                any("portable" in name.casefold() for name in exported_names),
-                module_info.name,
-            )
+            if module_info.name not in portable_projection_modules:
+                self.assertFalse(
+                    any("portable" in name.casefold() for name in exported_names),
+                    module_info.name,
+                )
             module_path = getattr(module, "__file__", None)
             if module_path is not None and module_path.endswith(".py"):
                 text = Path(module_path).read_text(encoding="utf-8")
                 self.assertNotIn("for_testing", text.casefold(), module_info.name)
-                self.assertNotIn("portable", text.casefold(), module_info.name)
+                if module_info.name in portable_projection_modules:
+                    # The persisted v2 manifest names its production
+                    # PortablePrewriteProjection contract. That is a
+                    # cross-context integrity projection, not a local test
+                    # backend or fallback implementation.
+                    self.assertNotIn("portable backend", text.casefold())
+                else:
+                    self.assertNotIn("portable", text.casefold(), module_info.name)
 
 
 class PureAuditPlanStateTests(unittest.TestCase):
