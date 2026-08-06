@@ -31,6 +31,8 @@ public static class NativeBridgeProtocolV2
         "liang-pingfa/native-console-export/v2";
     public const string VerificationSchemaVersion =
         "liang-pingfa/native-verification/v2";
+    public const string PortablePrewriteProjectionSchemaVersion =
+        "liang-pingfa/portable-prewrite-projection/v2";
 
     public const int MaxSessionLifetimeSeconds = 5 * 60;
     public const int MaxSessionLifetimeMilliseconds =
@@ -44,8 +46,13 @@ public static class NativeBridgeProtocolV2
     public const int MaxNativeOperations = 1_024;
     public const int MaxNativeGeometryEntities = 2_000;
     public const int MaxNativeGeometrySegments = 10_000;
+    public const int MaxGeometrySequenceIndex = 1_000_000;
+    public const int MaxPhysicalSlotCount = MaxGeometrySequenceIndex + 1;
+    public const int MaxNativeGeometryContainers =
+        MaxNativeGeometryEntities + 1;
     public const int MaxGeometryJsonBytes = 16 * 1024 * 1024;
     public const int MaxInventoryJsonBytes = 64 * 1024;
+    public const int MaxConsoleExportBytes = 32 * 1024 * 1024;
 }
 
 /// <summary>Private same-boot lifetime required by every active session.</summary>
@@ -85,6 +92,26 @@ public sealed record NativeDocumentBindingV2(
     string DatabaseInstanceFingerprint,
     string RevisionFingerprint);
 
+/// <summary>
+/// Exact space tuple for one private v2 geometry container. This DTO belongs
+/// only to active geometry carriers; the frozen v1 wire surface has no
+/// erased-slot representation.
+/// </summary>
+public sealed record NativeGeometryContainerSpaceV2(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("layout_handle")] string? LayoutHandle,
+    [property: JsonPropertyName("block_handle")] string? BlockHandle);
+
+/// <summary>
+/// Bounded erased-inclusive physical extent for one private v2 entity
+/// container. The count exposes no erased object identity or payload.
+/// </summary>
+public sealed record NativeGeometryContainerV2(
+    [property: JsonPropertyName("owner_handle")] string OwnerHandle,
+    [property: JsonPropertyName("space")] NativeGeometryContainerSpaceV2 Space,
+    [property: JsonPropertyName("block_path")] IReadOnlyList<string> BlockPath,
+    [property: JsonPropertyName("physical_slot_count")] int PhysicalSlotCount);
+
 /// <summary>Exact adapter/plugin/capability identity carried by v2 prewrite state.</summary>
 public sealed record NativeAdapterBindingV2(
     string AdapterId,
@@ -97,6 +124,28 @@ public sealed record NativeAdapterBindingV2(
     int ProtocolMinor,
     string CapabilitiesDigest);
 
+/// <summary>
+/// Bridge-only identity retained as evidence for the embedded source export.
+/// It is never required to equal the Core Console private-copy identity.
+/// </summary>
+public sealed record NativeBridgeDocumentIdentityV2(
+    string DatabaseInstanceFingerprint,
+    string RevisionFingerprint);
+
+/// <summary>
+/// Semantic/protected state that must survive source-to-private-copy
+/// retargeting. It deliberately excludes host/session/source identity.
+/// </summary>
+public sealed record NativePortablePrewriteProjectionV2(
+    string SchemaVersion,
+    string OrderedEntityDigest,
+    string ContainerOrderDigest,
+    string GeometryDigest,
+    string ProtectedSemanticDigest,
+    string TableStateDigest,
+    string LayoutStateDigest,
+    string BlockStateDigest);
+
 /// <summary>Active source state selected immediately before writing.</summary>
 public sealed record NativePrewriteRevisionV2(
     NativeSourceBindingV2 SourceBinding,
@@ -104,12 +153,9 @@ public sealed record NativePrewriteRevisionV2(
     string DocumentFileIdentityFingerprint,
     string DocumentContentSha256,
     long DocumentByteSize,
-    string DatabaseInstanceFingerprint,
-    string RevisionFingerprint,
-    string GeometryDigest,
-    string ProtectedStateDigest,
-    string ProtectedOrderDigest,
-    string DocumentStateDigest,
+    NativeBridgeDocumentIdentityV2 BridgeDocumentIdentity,
+    NativePortablePrewriteProjectionV2 PortablePrewriteProjection,
+    string PortablePrewriteProjectionDigest,
     NativeAdapterBindingV2 AdapterBinding,
     NativeStableHostBindingV2 HostBinding,
     string StableHostBindingDigest,
@@ -167,7 +213,8 @@ public sealed record NativeManifestExecutionRequestV2(
 public sealed record NativeOperationResultV2(
     string OperationId,
     string Status,
-    string PostconditionDigest);
+    string PostconditionDigest,
+    [property: JsonPropertyName("marker_handle")] string? MarkerHandle);
 
 /// <summary>Bounded external executor assertion with actual output binding.</summary>
 public sealed record NativeManifestExecutionResultV2(

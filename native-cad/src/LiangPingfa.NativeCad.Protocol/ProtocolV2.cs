@@ -54,8 +54,31 @@ namespace LiangPingfa.NativeCad.Protocol
         public const string VerificationSchemaVersion =
             "liang-pingfa/native-verification/v2";
 
+        /// <summary>
+        /// Exact portable prewrite projection namespace. This projection
+        /// deliberately excludes host/database/session instance identity.
+        /// </summary>
+        public const string PortablePrewriteProjectionSchemaVersion =
+            "liang-pingfa/portable-prewrite-projection/v2";
+
         /// <summary>Maximum entities allowed by the frozen geometry semantics.</summary>
         public const int MaxGeometryEntities = 2000;
+
+        /// <summary>Largest physical record sequence index representable by v2.</summary>
+        public const int MaxGeometrySequenceIndex = 1000000;
+
+        /// <summary>
+        /// Largest physical slot extent representable by v2. It is one more
+        /// than the largest index because the last legal active slot has
+        /// index <see cref="MaxGeometrySequenceIndex"/>.
+        /// </summary>
+        public const int MaxPhysicalSlotCount = MaxGeometrySequenceIndex + 1;
+
+        /// <summary>
+        /// Maximum entity-container records carried by one v2 geometry
+        /// export. Owners are one-to-one with physical containers.
+        /// </summary>
+        public const int MaxGeometryContainers = MaxGeometryEntities + 1;
 
         /// <summary>Maximum aggregate simple segments allowed by frozen geometry semantics.</summary>
         public const int MaxGeometrySegments = 10000;
@@ -65,6 +88,13 @@ namespace LiangPingfa.NativeCad.Protocol
 
         /// <summary>Maximum raw UTF-8 bytes in an embedded inventory carrier.</summary>
         public const int MaxInventoryJsonBytes = 64 * 1024;
+
+        /// <summary>
+        /// Maximum canonical native-console-export/v2 document size. The
+        /// outer envelope receives a separate cap in addition to its one
+        /// 16 MiB opaque geometry carrier cap.
+        /// </summary>
+        public const int MaxConsoleExportBytes = 32 * 1024 * 1024;
 
         /// <summary>
         /// Fixed hard reader ceiling for one native-console-result/v2
