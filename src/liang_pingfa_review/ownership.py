@@ -1742,10 +1742,25 @@ def _is_ntfs_volume(path: Path) -> bool:
 
     if os.name != "nt":
         return False
+    raw_path = os.fspath(path)
     root = path.anchor
-    if not root or root.startswith(chr(92) * 2):
+    separator = chr(92)
+    if (
+        not root
+        or root.startswith(separator * 2)
+        or raw_path.startswith(separator * 2 + "?" + separator)
+        or raw_path.startswith(separator * 2 + "." + separator)
+        or re.fullmatch(r"[A-Za-z]:[\\/]", root) is None
+    ):
         return False
     kernel32 = _windows_api("kernel32")
+    # A mapped remote share may report NTFS through GetVolumeInformationW,
+    # but DriveType=REMOTE proves it is not a fixed local private volume.
+    get_drive_type = kernel32.GetDriveTypeW  # type: ignore[attr-defined]
+    get_drive_type.argtypes = [ctypes.c_wchar_p]
+    get_drive_type.restype = ctypes.c_uint32
+    if int(get_drive_type(root)) != 3:  # DRIVE_FIXED
+        return False
     get_volume_information = kernel32.GetVolumeInformationW  # type: ignore[attr-defined]
     get_volume_information.argtypes = [
         ctypes.c_wchar_p,

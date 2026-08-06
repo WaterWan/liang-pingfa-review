@@ -25,6 +25,7 @@ from .canonical import (
 from .errors import ErrorCode, PipelineError
 from .native_bridge import NativeBridgeClient
 from .native_contracts import (
+    AUTOCAD_ADAPTER_ID,
     canonical_geometry_json_bytes,
     derive_native_target_id,
     geometry_adapter_binding,
@@ -74,7 +75,10 @@ def native_source_from_lease(lease: Any) -> dict[str, Any]:
     }
 
 
-def _eligible_profiles(entity: Mapping[str, Any]) -> list[str]:
+def _eligible_profiles(
+    entity: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> list[str]:
     """Return the fixed no-command mutation profiles proven by raw evidence."""
 
     direct_modelspace = (
@@ -82,11 +86,27 @@ def _eligible_profiles(entity: Mapping[str, Any]) -> list[str]:
         and entity["space"]["kind"] == "modelspace"
         and not entity["block_path"]
     )
-    profiles: list[str] = []
-    if direct_modelspace:
-        profiles.append("translate_dbtext/v1")
+    eligible: list[str] = []
+    configured_profiles = config["operation_profiles"]
+    capabilities = set(config["required_capabilities"])
+    adapter_requires_capability = config["adapter"]["id"] == AUTOCAD_ADAPTER_ID
+    if (
+        direct_modelspace
+        and configured_profiles["translate_dbtext/v1"] is True
+        and (
+            not adapter_requires_capability
+            or "translate_dbtext/v1" in capabilities
+        )
+    ):
+        eligible.append("translate_dbtext/v1")
         evidence = entity["overlay_evidence"]
         if (
+            configured_profiles["delete_auxiliary_overlay_text/v1"] is True
+            and (
+                not adapter_requires_capability
+                or "delete_auxiliary_overlay_text/v1" in capabilities
+            )
+            and
             isinstance(entity["layer"], str)
             and entity["layer"].casefold() in {"temp", "textarea"}
             and evidence["unique_content"] is True
@@ -95,8 +115,8 @@ def _eligible_profiles(entity: Mapping[str, Any]) -> list[str]:
             and evidence["visible_interference"] is True
             and evidence["unsupported_data"] is False
         ):
-            profiles.append("delete_auxiliary_overlay_text/v1")
-    return profiles
+            eligible.append("delete_auxiliary_overlay_text/v1")
+    return eligible
 
 
 def build_native_audit(
@@ -129,7 +149,7 @@ def build_native_audit(
     findings: list[dict[str, Any]] = []
     for entity in checked_export["entities"]:
         target_id = derive_native_target_id(entity)
-        profiles = _eligible_profiles(entity)
+        profiles = _eligible_profiles(entity, checked_config)
         record = {
             "target_id": target_id,
             "native_type": entity["native_type"],
@@ -186,8 +206,12 @@ def build_native_audit(
         "document_binding": geometry_document_binding(checked_export),
         "protected_state_digest": checked_export["document"]["protected_state_digest"],
         "marker_prerequisites": {
-            "layer_fingerprint": checked_export["document"]["marker_layer_fingerprint"],
-            "style_fingerprint": checked_export["document"]["marker_style_fingerprint"],
+            # Full-host bridge and Core Console snapshots are deliberately
+            # policy-independent. The exact configured policy is bound here;
+            # Core preflight validates its layer/style resources against the
+            # private copy's complete table map before any marker mutation.
+            "layer_fingerprint": marker_policy_binding["layer_fingerprint"],
+            "style_fingerprint": marker_policy_binding["style_fingerprint"],
         },
         "marker_policy_binding": marker_policy_binding,
         "records": sorted(records, key=lambda item: item["target_id"]),
