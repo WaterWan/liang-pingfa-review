@@ -181,7 +181,8 @@
       "required": [
         "operation_id",
         "kind",
-        "verified"
+        "verified",
+        "marker_handle"
       ],
       "properties": {
         "operation_id": {
@@ -196,6 +197,16 @@
         },
         "verified": {
           "const": true
+        },
+        "marker_handle": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/handle"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -298,6 +309,12 @@
     "manifestId": {
       "type": "string",
       "pattern": "^native-manifest-[a-f0-9]{32}$"
+    },
+    "handle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16,
+      "pattern": "^[0-9A-F]+$"
     },
     "runId": {
       "type": "string",

@@ -80,6 +80,12 @@
       "type": "string",
       "pattern": "^native-operation-[a-f0-9]{24}$"
     },
+    "handle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16,
+      "pattern": "^[0-9A-F]+$"
+    },
     "nonce": {
       "type": "string",
       "minLength": 43,
@@ -177,7 +183,8 @@
       "required": [
         "operation_id",
         "status",
-        "postcondition_digest"
+        "postcondition_digest",
+        "marker_handle"
       ],
       "properties": {
         "operation_id": {
@@ -192,6 +199,16 @@
         },
         "postcondition_digest": {
           "$ref": "#/$defs/sha256"
+        },
+        "marker_handle": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/handle"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
