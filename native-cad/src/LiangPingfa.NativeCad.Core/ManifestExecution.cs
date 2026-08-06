@@ -225,54 +225,194 @@ namespace LiangPingfa.NativeCad.Core
         }
     }
 
-    /// <summary>Exact prewrite revision projection compared before every mutation.</summary>
-    public sealed class ExpectedPrewriteRevisionV2
+    /// <summary>
+    /// Exact document-semantic state that survives a source-to-private-copy
+    /// retarget. Host database GUIDs, saved-version GUIDs, source paths, file
+    /// identities, and session/process bindings are intentionally excluded.
+    /// </summary>
+    public sealed class PortablePrewriteProjectionV2
     {
-        /// <summary>Creates an immutable prewrite tuple.</summary>
-        public ExpectedPrewriteRevisionV2(
-            string databaseInstanceFingerprint,
-            string revisionFingerprint,
+        /// <summary>Creates an immutable portable prewrite projection.</summary>
+        public PortablePrewriteProjectionV2(
+            string orderedEntityDigest,
+            string containerOrderDigest,
             string geometryDigest,
-            string protectedStateDigest,
-            string protectedOrderDigest,
-            string documentStateDigest,
-            NativeSourceBindingV2 source)
+            string protectedSemanticDigest,
+            string tableStateDigest,
+            string layoutStateDigest,
+            string blockStateDigest)
         {
-            CanonicalJson.RequireSha256(databaseInstanceFingerprint, nameof(databaseInstanceFingerprint));
-            CanonicalJson.RequireSha256(revisionFingerprint, nameof(revisionFingerprint));
+            CanonicalJson.RequireSha256(orderedEntityDigest, nameof(orderedEntityDigest));
+            CanonicalJson.RequireSha256(containerOrderDigest, nameof(containerOrderDigest));
             CanonicalJson.RequireSha256(geometryDigest, nameof(geometryDigest));
-            CanonicalJson.RequireSha256(protectedStateDigest, nameof(protectedStateDigest));
-            CanonicalJson.RequireSha256(protectedOrderDigest, nameof(protectedOrderDigest));
-            CanonicalJson.RequireSha256(documentStateDigest, nameof(documentStateDigest));
-            Source = source ?? throw new ArgumentNullException(nameof(source));
-            DatabaseInstanceFingerprint = databaseInstanceFingerprint;
-            RevisionFingerprint = revisionFingerprint;
+            CanonicalJson.RequireSha256(protectedSemanticDigest, nameof(protectedSemanticDigest));
+            CanonicalJson.RequireSha256(tableStateDigest, nameof(tableStateDigest));
+            CanonicalJson.RequireSha256(layoutStateDigest, nameof(layoutStateDigest));
+            CanonicalJson.RequireSha256(blockStateDigest, nameof(blockStateDigest));
+            OrderedEntityDigest = orderedEntityDigest;
+            ContainerOrderDigest = containerOrderDigest;
             GeometryDigest = geometryDigest;
-            ProtectedStateDigest = protectedStateDigest;
-            ProtectedOrderDigest = protectedOrderDigest;
-            DocumentStateDigest = documentStateDigest;
+            ProtectedSemanticDigest = protectedSemanticDigest;
+            TableStateDigest = tableStateDigest;
+            LayoutStateDigest = layoutStateDigest;
+            BlockStateDigest = blockStateDigest;
         }
 
-        /// <summary>Expected generated database instance.</summary>
-        public string DatabaseInstanceFingerprint { get; private set; }
+        /// <summary>Digest of exact globally ordered entity records.</summary>
+        public string OrderedEntityDigest { get; private set; }
 
-        /// <summary>Expected generated revision.</summary>
-        public string RevisionFingerprint { get; private set; }
+        /// <summary>Digest of physical sequence ordering in every container.</summary>
+        public string ContainerOrderDigest { get; private set; }
 
-        /// <summary>Expected complete geometry digest.</summary>
+        /// <summary>Digest of all modeled entity geometry.</summary>
         public string GeometryDigest { get; private set; }
 
-        /// <summary>Expected protected-state digest.</summary>
-        public string ProtectedStateDigest { get; private set; }
+        /// <summary>
+        /// Digest of protected owners and opaque record state. It intentionally
+        /// excludes marker-policy-selected document fields.
+        /// </summary>
+        public string ProtectedSemanticDigest { get; private set; }
 
-        /// <summary>Expected protected-order digest.</summary>
-        public string ProtectedOrderDigest { get; private set; }
+        /// <summary>Policy-independent full layer/style/provider state digest.</summary>
+        public string TableStateDigest { get; private set; }
 
-        /// <summary>Expected document-state digest.</summary>
-        public string DocumentStateDigest { get; private set; }
+        /// <summary>Policy-independent layout/container state digest.</summary>
+        public string LayoutStateDigest { get; private set; }
 
-        /// <summary>Expected source binding.</summary>
+        /// <summary>Policy-independent block-table state digest.</summary>
+        public string BlockStateDigest { get; private set; }
+
+        /// <summary>Canonical SHA-256 of this complete portable contract.</summary>
+        public string Digest
+        {
+            get { return CanonicalJson.Sha256Hex(ToWireValue()); }
+        }
+
+        /// <summary>Projects one exact geometry export into portable state.</summary>
+        public static PortablePrewriteProjectionV2 From(GeometryExportV2 export)
+        {
+            if (export == null)
+            {
+                throw new ArgumentNullException(nameof(export));
+            }
+
+            List<object?> owners = new List<object?>();
+            for (int index = 0; index < export.Snapshot.Owners.Count; index++)
+            {
+                owners.Add(export.Snapshot.Owners[index]);
+            }
+
+            List<object?> opaqueStateDigests = new List<object?>();
+            for (int index = 0; index < export.Snapshot.Entities.Count; index++)
+            {
+                opaqueStateDigests.Add(
+                    export.Snapshot.Entities[index].OpaqueStateDigest);
+            }
+
+            string protectedSemanticDigest = CanonicalJson.Sha256Hex(
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    { "owners", owners },
+                    { "opaque_state_digests", opaqueStateDigests },
+                });
+            return new PortablePrewriteProjectionV2(
+                export.Document.OrderedEntityDigest,
+                export.Document.ContainerOrderDigest,
+                export.Document.CompleteGeometryDigest,
+                protectedSemanticDigest,
+                export.Document.TableStateDigest,
+                export.Document.LayoutStateDigest,
+                export.Document.BlockStateDigest);
+        }
+
+        /// <summary>
+        /// Requires equality only across document-semantic/protected fields
+        /// that are contractually preserved by a byte-for-byte private copy.
+        /// </summary>
+        public bool Matches(GeometryExportV2 export)
+        {
+            if (export == null)
+            {
+                return false;
+            }
+
+            PortablePrewriteProjectionV2 observed = From(export);
+            return string.Equals(
+                    OrderedEntityDigest,
+                    observed.OrderedEntityDigest,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    ContainerOrderDigest,
+                    observed.ContainerOrderDigest,
+                    StringComparison.Ordinal) &&
+                string.Equals(GeometryDigest, observed.GeometryDigest, StringComparison.Ordinal) &&
+                string.Equals(
+                    ProtectedSemanticDigest,
+                    observed.ProtectedSemanticDigest,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    TableStateDigest,
+                    observed.TableStateDigest,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    LayoutStateDigest,
+                    observed.LayoutStateDigest,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    BlockStateDigest,
+                    observed.BlockStateDigest,
+                    StringComparison.Ordinal);
+        }
+
+        /// <summary>Returns the exact cross-context portable wire contract.</summary>
+        public Dictionary<string, object?> ToWireValue()
+        {
+            return new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                {
+                    "schema_version",
+                    NativeCadProtocolV2.PortablePrewriteProjectionSchemaVersion
+                },
+                { "ordered_entity_digest", OrderedEntityDigest },
+                { "container_order_digest", ContainerOrderDigest },
+                { "geometry_digest", GeometryDigest },
+                { "protected_semantic_digest", ProtectedSemanticDigest },
+                { "table_state_digest", TableStateDigest },
+                { "layout_state_digest", LayoutStateDigest },
+                { "block_state_digest", BlockStateDigest },
+            };
+        }
+    }
+
+    /// <summary>
+    /// Exact private-copy binding plus the portable projection compared before
+    /// every mutation. The historical name remains aligned with the manifest
+    /// field; database/revision identities are intentionally not compared
+    /// across bridge and Core Console contexts.
+    /// </summary>
+    public sealed class ExpectedPrewriteRevisionV2
+    {
+        /// <summary>Creates an immutable private-copy prewrite tuple.</summary>
+        public ExpectedPrewriteRevisionV2(
+            PortablePrewriteProjectionV2 portableProjection,
+            NativeSourceBindingV2 source)
+        {
+            PortableProjection = portableProjection ??
+                throw new ArgumentNullException(nameof(portableProjection));
+            Source = source ?? throw new ArgumentNullException(nameof(source));
+        }
+
+        /// <summary>Portable semantic/protected projection shared across contexts.</summary>
+        public PortablePrewriteProjectionV2 PortableProjection { get; private set; }
+
+        /// <summary>Exact private-copy source binding.</summary>
         public NativeSourceBindingV2 Source { get; private set; }
+
+        /// <summary>Canonical digest of <see cref="PortableProjection"/>.</summary>
+        public string PortableProjectionDigest
+        {
+            get { return PortableProjection.Digest; }
+        }
 
         /// <summary>Builds the tuple from a full exact export.</summary>
         public static ExpectedPrewriteRevisionV2 From(GeometryExportV2 export)
@@ -283,29 +423,23 @@ namespace LiangPingfa.NativeCad.Core
             }
 
             return new ExpectedPrewriteRevisionV2(
-                export.Document.DatabaseInstanceFingerprint,
-                export.Document.RevisionFingerprint,
-                export.Document.CompleteGeometryDigest,
-                export.Document.ProtectedStateDigest,
-                export.Document.ProtectedOrderDigest,
-                export.Document.DocumentStateDigest,
+                export.PortablePrewriteProjection,
                 export.Snapshot.Source);
         }
 
-        /// <summary>Returns true only when every prewrite state field is exact.</summary>
+        /// <summary>
+        /// Returns true only when private source bytes and portable document
+        /// semantics both match. Database/version GUID-derived fields are
+        /// deliberately outside this cross-context equality rule.
+        /// </summary>
         public bool Matches(GeometryExportV2 export)
         {
             return export != null &&
-                string.Equals(DatabaseInstanceFingerprint, export.Document.DatabaseInstanceFingerprint, StringComparison.Ordinal) &&
-                string.Equals(RevisionFingerprint, export.Document.RevisionFingerprint, StringComparison.Ordinal) &&
-                string.Equals(GeometryDigest, export.Document.CompleteGeometryDigest, StringComparison.Ordinal) &&
-                string.Equals(ProtectedStateDigest, export.Document.ProtectedStateDigest, StringComparison.Ordinal) &&
-                string.Equals(ProtectedOrderDigest, export.Document.ProtectedOrderDigest, StringComparison.Ordinal) &&
-                string.Equals(DocumentStateDigest, export.Document.DocumentStateDigest, StringComparison.Ordinal) &&
-                Source.ExactlyMatches(export.Snapshot.Source);
+                Source.ExactlyMatches(export.Snapshot.Source) &&
+                PortableProjection.Matches(export);
         }
 
-        /// <summary>Returns frozen v1 prewrite fields used by the subset.</summary>
+        /// <summary>Returns the typed core's portable prewrite fields.</summary>
         public Dictionary<string, object?> ToWireValue()
         {
             return new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -315,12 +449,11 @@ namespace LiangPingfa.NativeCad.Core
                 { "document_file_identity_fingerprint", Source.FileIdentityFingerprint },
                 { "document_content_sha256", Source.Sha256 },
                 { "document_byte_size", Source.ByteSize },
-                { "database_instance_fingerprint", DatabaseInstanceFingerprint },
-                { "revision_fingerprint", RevisionFingerprint },
-                { "geometry_digest", GeometryDigest },
-                { "protected_state_digest", ProtectedStateDigest },
-                { "protected_order_digest", ProtectedOrderDigest },
-                { "document_state_digest", DocumentStateDigest },
+                { "portable_prewrite_projection", PortableProjection.ToWireValue() },
+                {
+                    "portable_prewrite_projection_digest",
+                    PortableProjectionDigest
+                },
             };
         }
     }
@@ -459,7 +592,8 @@ namespace LiangPingfa.NativeCad.Core
                 throw new ArgumentNullException(nameof(container));
             }
 
-            if (sequenceIndex < 0 || sequenceIndex > 1000000)
+            if (sequenceIndex < 0 ||
+                sequenceIndex > NativeCadProtocolV2.MaxGeometrySequenceIndex)
             {
                 throw new CanonicalJsonException("Marker sequence index is invalid.");
             }
@@ -625,6 +759,94 @@ namespace LiangPingfa.NativeCad.Core
                     { "rotation", rotationBits },
                     { "overlay_evidence", overlayEvidence.ToWireValue() },
                 });
+        }
+    }
+
+    /// <summary>
+    /// Handle-free marker append request derived from one immutable manifest
+    /// operation.  The request reserves only deterministic marker content,
+    /// container, and sequence; a host append allocator supplies the actual
+    /// entity handle after <c>AppendEntity</c> succeeds.
+    /// </summary>
+    public sealed class MarkerAppendRequestV2
+    {
+        /// <summary>Builds an append request without predicting a handle.</summary>
+        public MarkerAppendRequestV2(CreateReviewMarkerOperationV2 operation)
+        {
+            Operation = operation ?? throw new ArgumentNullException(nameof(operation));
+        }
+
+        /// <summary>Source operation bound to this append request.</summary>
+        public CreateReviewMarkerOperationV2 Operation { get; private set; }
+
+        /// <summary>
+        /// Creates the immutable record corresponding to a host-assigned
+        /// actual handle.  This is intentionally the first point at which a
+        /// marker entity has a handle.
+        /// </summary>
+        public CadEntitySnapshot WithActualHandle(string actualHandle)
+        {
+            CadHandle.Require(actualHandle, nameof(actualHandle));
+            return new CadEntitySnapshot(
+                actualHandle,
+                NativeEntityKind.DbText,
+                Operation.OwnerHandle,
+                Operation.Container,
+                Operation.SequenceIndex,
+                Operation.Layer,
+                Operation.MarkerText,
+                Operation.Style,
+                Operation.HeightBits,
+                Operation.RotationBits,
+                Operation.Position,
+                new CadBounds(Operation.Position, Operation.Position),
+                new CadSegment[0],
+                Operation.OverlayEvidence);
+        }
+
+        /// <summary>
+        /// Requires a host-returned entity to retain every deterministic
+        /// marker field while treating only its actual handle as allocated.
+        /// </summary>
+        public bool Matches(CadEntitySnapshot entity)
+        {
+            return entity != null &&
+                entity.Kind == NativeEntityKind.DbText &&
+                string.Equals(
+                    entity.OwnerHandle,
+                    Operation.OwnerHandle,
+                    StringComparison.Ordinal) &&
+                entity.Container.Equals(Operation.Container) &&
+                entity.SequenceIndex == Operation.SequenceIndex &&
+                string.Equals(
+                    entity.Layer,
+                    Operation.Layer,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    entity.Text,
+                    Operation.MarkerText,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    entity.Style,
+                    Operation.Style,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    entity.HeightBits,
+                    Operation.HeightBits,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    entity.RotationBits,
+                    Operation.RotationBits,
+                    StringComparison.Ordinal) &&
+                entity.Position.Equals(Operation.Position) &&
+                entity.Bounds.Minimum.Equals(Operation.Position) &&
+                entity.Bounds.Maximum.Equals(Operation.Position) &&
+                entity.Segments.Count == 0 &&
+                entity.OverlayEvidence.Equals(Operation.OverlayEvidence) &&
+                string.Equals(
+                    Operation.MarkerFingerprint,
+                    CreateReviewMarkerOperationV2.ComputeMarkerFingerprint(Operation),
+                    StringComparison.Ordinal);
         }
     }
 
@@ -1218,15 +1440,35 @@ namespace LiangPingfa.NativeCad.Core
     public sealed class OperationExecutionResultV2
     {
         /// <summary>Creates a successful fixed operation result.</summary>
-        public OperationExecutionResultV2(ManifestOperationV2 operation)
+        public OperationExecutionResultV2(
+            ManifestOperationV2 operation,
+            string? markerHandle = null)
         {
             if (operation == null)
             {
                 throw new ArgumentNullException(nameof(operation));
             }
 
+            bool marker = operation is CreateReviewMarkerOperationV2;
+            if (marker)
+            {
+                if (markerHandle == null)
+                {
+                    throw new CanonicalJsonException(
+                        "A marker operation result requires its actual handle.");
+                }
+
+                CadHandle.Require(markerHandle, nameof(markerHandle));
+            }
+            else if (markerHandle != null)
+            {
+                throw new CanonicalJsonException(
+                    "Only a marker operation may carry an actual handle.");
+            }
+
             OperationId = operation.OperationId;
-            PostconditionDigest = CanonicalJson.Sha256Hex(operation.ToWireValue());
+            MarkerHandle = markerHandle;
+            PostconditionDigest = ComputePostconditionDigest(operation, markerHandle);
         }
 
         /// <summary>Operation ID.</summary>
@@ -1235,7 +1477,42 @@ namespace LiangPingfa.NativeCad.Core
         /// <summary>Exact deterministic postcondition digest.</summary>
         public string PostconditionDigest { get; private set; }
 
-        /// <summary>Returns v1 console-result operation fields.</summary>
+        /// <summary>
+        /// Actual host-assigned marker handle, or null for non-append
+        /// operations.  This v2 result binds an operation to its new entity
+        /// without putting an allocator prediction in the manifest.
+        /// </summary>
+        public string? MarkerHandle { get; private set; }
+
+        /// <summary>
+        /// Computes a result digest. Non-marker operations retain the prior
+        /// operation-only digest; marker results domain-bind the actual
+        /// assigned handle to the immutable operation fields.
+        /// </summary>
+        public static string ComputePostconditionDigest(
+            ManifestOperationV2 operation,
+            string? markerHandle)
+        {
+            if (operation == null)
+            {
+                throw new ArgumentNullException(nameof(operation));
+            }
+
+            if (markerHandle == null)
+            {
+                return CanonicalJson.Sha256Hex(operation.ToWireValue());
+            }
+
+            CadHandle.Require(markerHandle, nameof(markerHandle));
+            return CanonicalJson.Sha256Hex(
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    { "operation", operation.ToWireValue() },
+                    { "marker_handle", markerHandle },
+                });
+        }
+
+        /// <summary>Returns v2 console-result operation fields.</summary>
         public Dictionary<string, object?> ToWireValue()
         {
             return new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -1243,6 +1520,7 @@ namespace LiangPingfa.NativeCad.Core
                 { "operation_id", OperationId },
                 { "status", "applied" },
                 { "postcondition_digest", PostconditionDigest },
+                { "marker_handle", MarkerHandle },
             };
         }
     }
@@ -1380,8 +1658,18 @@ namespace LiangPingfa.NativeCad.Core
                 new List<OperationExecutionResultV2>();
             for (int index = 0; index < manifest.Operations.Count; index++)
             {
+                ManifestOperationV2 operation = manifest.Operations[index];
+                // The actual allocator value is unavailable before the
+                // transaction. Reserve its maximum permitted wire width so
+                // the transport budget remains conservative without
+                // predicting a real handle.
+                string? maximumMarkerHandle =
+                    operation is CreateReviewMarkerOperationV2
+                        ? new string('F', 16)
+                        : null;
                 results.Add(new OperationExecutionResultV2(
-                    manifest.Operations[index]));
+                    operation,
+                    maximumMarkerHandle));
             }
 
             Dictionary<string, object?> payload = BuildSuccessWireValue(
@@ -1662,7 +1950,8 @@ namespace LiangPingfa.NativeCad.Core
                 // validation evidence; mutation obtains fresh targets after
                 // BeginTransaction below.
                 Preflight(before, manifest);
-                ExecuteAndDisposeTransaction(database, before, manifest);
+                IReadOnlyDictionary<string, string> actualMarkerHandles =
+                    ExecuteAndDisposeTransaction(database, before, manifest);
 
                 // ExecuteAndDisposeTransaction does not return until the
                 // committed transaction has been disposed. A save/reopen call
@@ -1704,36 +1993,70 @@ namespace LiangPingfa.NativeCad.Core
                         "Save/reopen did not return a fresh database.");
                 }
 
-                GeometryExportV2 finalExport;
+                IDisposable? reopenedDisposable = reopenedDatabase as IDisposable;
                 try
                 {
-                    finalExport = ExactCadExporter.Export(reopenedDatabase.ReadSnapshot());
+                    GeometryExportV2 finalExport;
+                    try
+                    {
+                        finalExport = ExactCadExporter.Export(reopenedDatabase.ReadSnapshot());
+                    }
+                    catch (CanonicalJsonException exception)
+                    {
+                        throw new CadCoreException(
+                            CadCoreErrorCode.ReadbackMismatch,
+                            exception.Message);
+                    }
+
+                    // This verifies the newly reopened state, including protected
+                    // state and order, and requires its final revision to differ
+                    // from the manifest's exact pre-write revision.
+                    ExactReadbackVerifier.Verify(
+                        before,
+                        manifest,
+                        finalExport,
+                        true,
+                        actualMarkerHandles);
+                    RequireVerifiedFinalGeometryExport(finalExport);
+
+                    List<OperationExecutionResultV2> results = new List<OperationExecutionResultV2>();
+                    for (int index = 0; index < manifest.Operations.Count; index++)
+                    {
+                        ManifestOperationV2 operation = manifest.Operations[index];
+                        string? markerHandle = null;
+                        if (operation is CreateReviewMarkerOperationV2)
+                        {
+                            if (!actualMarkerHandles.TryGetValue(
+                                    operation.OperationId,
+                                    out markerHandle) ||
+                                markerHandle == null)
+                            {
+                                throw new CadCoreException(
+                                    CadCoreErrorCode.ReadbackMismatch,
+                                    "A committed marker lacks its actual handle.");
+                            }
+                        }
+
+                        results.Add(
+                            new OperationExecutionResultV2(
+                                operation,
+                                markerHandle));
+                    }
+
+                    // This private token is deliberately minted last: only a
+                    // committed, disposed, saved/reopened, exact-readback state
+                    // can cross the public result construction boundary.
+                    VerifiedReadbackToken verifiedReadback =
+                        new VerifiedReadbackToken(manifest, finalExport, results);
+                    return new ManifestExecutionResultV2(verifiedReadback);
                 }
-                catch (CanonicalJsonException exception)
+                finally
                 {
-                    throw new CadCoreException(
-                        CadCoreErrorCode.ReadbackMismatch,
-                        exception.Message);
+                    if (reopenedDisposable != null)
+                    {
+                        reopenedDisposable.Dispose();
+                    }
                 }
-
-                // This verifies the newly reopened state, including protected
-                // state and order, and requires its final revision to differ
-                // from the manifest's exact pre-write revision.
-                ExactReadbackVerifier.Verify(before, manifest, finalExport, true);
-                RequireVerifiedFinalGeometryExport(finalExport);
-
-                List<OperationExecutionResultV2> results = new List<OperationExecutionResultV2>();
-                for (int index = 0; index < manifest.Operations.Count; index++)
-                {
-                    results.Add(new OperationExecutionResultV2(manifest.Operations[index]));
-                }
-
-                // This private token is deliberately minted last: only a
-                // committed, disposed, saved/reopened, exact-readback state
-                // can cross the public result construction boundary.
-                VerifiedReadbackToken verifiedReadback =
-                    new VerifiedReadbackToken(manifest, finalExport, results);
-                return new ManifestExecutionResultV2(verifiedReadback);
             }
             catch (CadCoreException)
             {
@@ -1778,13 +2101,15 @@ namespace LiangPingfa.NativeCad.Core
             }
         }
 
-        private static void ExecuteAndDisposeTransaction(
+        private static IReadOnlyDictionary<string, string> ExecuteAndDisposeTransaction(
             ICadDatabase database,
             GeometryExportV2 before,
             CoreManifestV2 manifest)
         {
             ICadTransaction? transaction = null;
             bool committed = false;
+            Dictionary<string, string> actualMarkerHandles =
+                new Dictionary<string, string>(StringComparer.Ordinal);
             try
             {
                 transaction = database.BeginTransaction();
@@ -1805,7 +2130,11 @@ namespace LiangPingfa.NativeCad.Core
                 PreflightPlan plan = Preflight(transactionBefore, manifest);
                 CadDocumentSnapshot expectedStagedState = transactionBefore.Snapshot;
 
-                ApplyAll(transaction, plan, ref expectedStagedState);
+                ApplyAll(
+                    transaction,
+                    plan,
+                    ref expectedStagedState,
+                    actualMarkerHandles);
                 transaction.PrepareCommit();
 
                 // All mutable postconditions are checked before the one
@@ -1815,9 +2144,18 @@ namespace LiangPingfa.NativeCad.Core
                 GeometryExportV2 staged = CaptureTransactionExport(transaction);
                 RequireExactStagedState(expectedStagedState, staged);
 
-                ExactReadbackVerifier.Verify(before, manifest, staged, false);
+                ExactReadbackVerifier.Verify(
+                    before,
+                    manifest,
+                    staged,
+                    false,
+                    actualMarkerHandles);
                 transaction.CommitExact(expectedStagedState);
                 committed = true;
+                return new ReadOnlyDictionary<string, string>(
+                    new Dictionary<string, string>(
+                        actualMarkerHandles,
+                        StringComparer.Ordinal));
             }
             catch
             {
@@ -1967,15 +2305,15 @@ namespace LiangPingfa.NativeCad.Core
 
         private static PreflightPlan Preflight(GeometryExportV2 before, CoreManifestV2 manifest)
         {
-            if (!string.Equals(
-                before.ExportDigest,
-                manifest.Preconditions.ExportDigest,
-                StringComparison.Ordinal) ||
-                !manifest.ExpectedPrewriteRevision.Matches(before))
+            // The bridge source and Core Console private copy may have
+            // different path/file identities and host database/version GUIDs.
+            // Compare their one shared portable contract instead of the full
+            // context-specific export envelope.
+            if (!manifest.ExpectedPrewriteRevision.Matches(before))
             {
                 throw new CadCoreException(
                     CadCoreErrorCode.StalePrecondition,
-                    "Current generated database does not match manifest preconditions.");
+                    "Current generated database does not match portable manifest preconditions.");
             }
 
             Dictionary<string, MarkerReservation> markerReservations =
@@ -2107,9 +2445,10 @@ namespace LiangPingfa.NativeCad.Core
         }
 
         /// <summary>
-        /// Allocates each marker's fixed reservation from the immutable
-        /// prewrite export. In particular, deletes are deliberately not
-        /// allowed to lower the reservation maximum for a later marker.
+        /// Reserves each marker's deterministic sequence/container/content
+        /// fields from immutable prewrite state.  Entity handles are not
+        /// reserved here: AutoCAD (or the core's explicit allocator) assigns
+        /// each actual handle only when the marker is appended.
         /// </summary>
         private static void ReserveMarkers(
             GeometryExportV2 before,
@@ -2134,28 +2473,30 @@ namespace LiangPingfa.NativeCad.Core
                     "Marker policy/capability or pre-existing layer/style gate is closed.");
             }
 
-            CadContainer? directContainer = null;
-            int maximumSequence = -1;
-            for (int index = 0; index < before.Snapshot.Entities.Count; index++)
+            CadContainerPhysicalSlots? directContainer = null;
+            for (int index = 0; index < before.Snapshot.Containers.Count; index++)
             {
-                CadEntitySnapshot entity = before.Snapshot.Entities[index];
-                if (!entity.Container.IsDirectModelspace)
+                CadContainerPhysicalSlots container =
+                    before.Snapshot.Containers[index];
+                if (!container.Container.IsDirectModelspace)
                 {
                     continue;
                 }
 
                 if (directContainer == null)
                 {
-                    directContainer = entity.Container;
+                    directContainer = container;
                 }
-                else if (!directContainer.Equals(entity.Container))
+                else if (!directContainer.Container.Equals(container.Container) ||
+                    !string.Equals(
+                        directContainer.OwnerHandle,
+                        container.OwnerHandle,
+                        StringComparison.Ordinal))
                 {
                     throw new CadCoreException(
                         CadCoreErrorCode.ManifestInvalid,
                         "Direct Modelspace marker destination is ambiguous.");
                 }
-
-                maximumSequence = Math.Max(maximumSequence, entity.SequenceIndex);
             }
 
             if (directContainer == null)
@@ -2165,16 +2506,18 @@ namespace LiangPingfa.NativeCad.Core
                     "No direct Modelspace container exists for marker append.");
             }
 
-            ulong nextHandle = NextGeneratedHandle(before.Snapshot.Entities);
             HashSet<int> reservedSequences = new HashSet<int>();
             for (int index = 0; index < operations.Count; index++)
             {
                 CreateReviewMarkerOperationV2 operation = operations[index];
                 if (!operation.Container.IsDirectModelspace ||
-                    !operation.Container.Equals(directContainer) ||
-                    operation.SequenceIndex != maximumSequence + index + 1 ||
+                    !operation.Container.Equals(directContainer.Container) ||
+                    operation.SequenceIndex != directContainer.PhysicalSlotCount + index ||
                     !IsDeclaredOwner(before.Snapshot.Owners, operation.OwnerHandle) ||
-                    !string.Equals(operation.OwnerHandle, OwnerFor(directContainer, before), StringComparison.Ordinal) ||
+                    !string.Equals(
+                        operation.OwnerHandle,
+                        directContainer.OwnerHandle,
+                        StringComparison.Ordinal) ||
                     !string.Equals(operation.MarkerText, policy.DeriveMarkerText(operation.OperationId), StringComparison.Ordinal) ||
                     !string.Equals(operation.Layer, policy.Layer, StringComparison.Ordinal) ||
                     !string.Equals(operation.Style, policy.Style, StringComparison.Ordinal) ||
@@ -2192,59 +2535,22 @@ namespace LiangPingfa.NativeCad.Core
                         "Marker fields differ from fixed policy-derived append requirements.");
                 }
 
-                if (operation.SequenceIndex > 1000000 || nextHandle == ulong.MaxValue)
+                if (operation.SequenceIndex >
+                    NativeCadProtocolV2.MaxGeometrySequenceIndex)
                 {
                     throw new CadCoreException(
                         CadCoreErrorCode.ManifestInvalid,
-                        "Marker append cannot allocate a canonical sequence/handle.");
+                        "Marker append cannot reserve a canonical sequence.");
                 }
 
                 reservations.Add(
                     operation.OperationId,
                     new MarkerReservation(
                         operation.OperationId,
-                        nextHandle.ToString("X", CultureInfo.InvariantCulture),
                         operation.OwnerHandle,
                         operation.Container,
                         operation.SequenceIndex));
-                nextHandle++;
             }
-        }
-
-        private static string OwnerFor(CadContainer container, GeometryExportV2 before)
-        {
-            string? owner = null;
-            for (int index = 0; index < before.Snapshot.Entities.Count; index++)
-            {
-                CadEntitySnapshot entity = before.Snapshot.Entities[index];
-                if (entity.Container.Equals(container))
-                {
-                    if (owner == null)
-                    {
-                        owner = entity.OwnerHandle;
-                    }
-                    else if (!string.Equals(owner, entity.OwnerHandle, StringComparison.Ordinal))
-                    {
-                        throw new CadCoreException(
-                            CadCoreErrorCode.ManifestInvalid,
-                            "Marker container owner is ambiguous.");
-                    }
-                }
-            }
-
-            if (owner == null)
-            {
-                throw new CadCoreException(CadCoreErrorCode.ManifestInvalid, "Marker container owner is absent.");
-            }
-
-            if (!IsDeclaredOwner(before.Snapshot.Owners, owner))
-            {
-                throw new CadCoreException(
-                    CadCoreErrorCode.ManifestInvalid,
-                    "Marker container owner is not a pre-existing declared owner.");
-            }
-
-            return owner;
         }
 
         private static bool IsDeclaredOwner(IReadOnlyList<string> owners, string owner)
@@ -2258,32 +2564,6 @@ namespace LiangPingfa.NativeCad.Core
             }
 
             return false;
-        }
-
-        private static ulong NextGeneratedHandle(IReadOnlyList<CadEntitySnapshot> entities)
-        {
-            ulong maximum = 0;
-            for (int index = 0; index < entities.Count; index++)
-            {
-                ulong parsed;
-                if (!ulong.TryParse(
-                    entities[index].Handle,
-                    NumberStyles.AllowHexSpecifier,
-                    CultureInfo.InvariantCulture,
-                    out parsed))
-                {
-                    throw new CadCoreException(CadCoreErrorCode.ManifestInvalid, "Existing handle is not canonical.");
-                }
-
-                maximum = Math.Max(maximum, parsed);
-            }
-
-            if (maximum == ulong.MaxValue)
-            {
-                throw new CadCoreException(CadCoreErrorCode.ManifestInvalid, "No canonical generated handle remains.");
-            }
-
-            return maximum + 1;
         }
 
         private static void RequireDirectDbText(CadEntitySnapshot target)
@@ -2303,7 +2583,8 @@ namespace LiangPingfa.NativeCad.Core
         private static void ApplyAll(
             ICadTransaction transaction,
             PreflightPlan plan,
-            ref CadDocumentSnapshot expectedStagedState)
+            ref CadDocumentSnapshot expectedStagedState,
+            IDictionary<string, string> actualMarkerHandles)
         {
             for (int index = 0; index < plan.Manifest.Operations.Count; index++)
             {
@@ -2354,10 +2635,22 @@ namespace LiangPingfa.NativeCad.Core
                     CreateReviewMarkerOperationV2 marker =
                         (CreateReviewMarkerOperationV2)operation;
                     RequireCurrentMarkerPrecondition(current, plan, marker);
-                    CadEntitySnapshot markerEntity = CreateMarkerEntity(
-                        plan.MarkerReservations[marker.OperationId].Handle,
-                        marker);
-                    transaction.AppendExact(current.Snapshot, markerEntity);
+                    MarkerAppendRequestV2 request =
+                        new MarkerAppendRequestV2(marker);
+                    CadEntitySnapshot markerEntity = transaction.AppendExact(
+                        current.Snapshot,
+                        request);
+                    if (!request.Matches(markerEntity) ||
+                        actualMarkerHandles.ContainsKey(marker.OperationId))
+                    {
+                        throw new CadCoreException(
+                            CadCoreErrorCode.ReadbackMismatch,
+                            "The append allocator returned an invalid marker record.");
+                    }
+
+                    actualMarkerHandles.Add(
+                        marker.OperationId,
+                        markerEntity.Handle);
                     expectedStagedState = AppendExpected(
                         expectedStagedState,
                         markerEntity);
@@ -2408,16 +2701,29 @@ namespace LiangPingfa.NativeCad.Core
                     "Marker policy resources changed after reservation.");
             }
 
+            CadContainerPhysicalSlots? physical =
+                current.Snapshot.FindContainer(reservation.Container);
+            if (physical == null ||
+                !string.Equals(
+                    physical.OwnerHandle,
+                    reservation.OwnerHandle,
+                    StringComparison.Ordinal) ||
+                physical.PhysicalSlotCount != reservation.SequenceIndex)
+            {
+                throw new CadCoreException(
+                    CadCoreErrorCode.StalePrecondition,
+                    "Marker physical container reservation changed.");
+            }
+
             for (int index = 0; index < current.Snapshot.Entities.Count; index++)
             {
                 CadEntitySnapshot entity = current.Snapshot.Entities[index];
-                if (string.Equals(entity.Handle, reservation.Handle, StringComparison.Ordinal) ||
-                    (entity.Container.Equals(reservation.Container) &&
-                     entity.SequenceIndex == reservation.SequenceIndex))
+                if (entity.Container.Equals(reservation.Container) &&
+                     entity.SequenceIndex == reservation.SequenceIndex)
                 {
                     throw new CadCoreException(
                         CadCoreErrorCode.StalePrecondition,
-                        "Marker reserved handle or sequence slot is occupied.");
+                        "Marker reserved sequence slot is occupied.");
                 }
 
                 if (entity.Container.IsDirectModelspace &&
@@ -2429,27 +2735,6 @@ namespace LiangPingfa.NativeCad.Core
                         "Current direct Modelspace no longer matches marker reservation.");
                 }
             }
-        }
-
-        private static CadEntitySnapshot CreateMarkerEntity(
-            string handle,
-            CreateReviewMarkerOperationV2 marker)
-        {
-            return new CadEntitySnapshot(
-                handle,
-                NativeEntityKind.DbText,
-                marker.OwnerHandle,
-                marker.Container,
-                marker.SequenceIndex,
-                marker.Layer,
-                marker.MarkerText,
-                marker.Style,
-                marker.HeightBits,
-                marker.RotationBits,
-                marker.Position,
-                new CadBounds(marker.Position, marker.Position),
-                new CadSegment[0],
-                marker.OverlayEvidence);
         }
 
         // These pure expected-prefix helpers intentionally operate on a
@@ -2506,28 +2791,25 @@ namespace LiangPingfa.NativeCad.Core
         }
 
         /// <summary>
-        /// Immutable original-plan marker allocation. The explicit sequence
-        /// slot is an insertion index, not a recalculated append position.
+        /// Immutable original-plan marker reservation. The explicit sequence
+        /// slot is an insertion index, not a recalculated append position;
+        /// its actual entity handle is intentionally absent until append.
         /// </summary>
         private sealed class MarkerReservation
         {
             internal MarkerReservation(
                 string operationId,
-                string handle,
                 string ownerHandle,
                 CadContainer container,
                 int sequenceIndex)
             {
                 OperationId = operationId;
-                Handle = handle;
                 OwnerHandle = ownerHandle;
                 Container = container;
                 SequenceIndex = sequenceIndex;
             }
 
             internal string OperationId { get; private set; }
-
-            internal string Handle { get; private set; }
 
             internal string OwnerHandle { get; private set; }
 

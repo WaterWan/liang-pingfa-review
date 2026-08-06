@@ -162,13 +162,15 @@ namespace LiangPingfa.NativeCad.Core
             CadEntitySnapshot expectedTarget);
 
         /// <summary>
-        /// Appends one record only if the entire staged state still exactly
-        /// matches the supplied transaction-local snapshot at the instant
-        /// immediately before mutation.
+        /// Appends one policy-derived marker only if the entire staged state
+        /// still exactly matches the supplied transaction-local snapshot at
+        /// the instant immediately before mutation.  The host/allocator
+        /// returns the authoritative assigned entity record; callers never
+        /// predict its handle from exported entities.
         /// </summary>
-        void AppendExact(
+        CadEntitySnapshot AppendExact(
             CadDocumentSnapshot expectedState,
-            CadEntitySnapshot entity);
+            MarkerAppendRequestV2 request);
 
         /// <summary>Runs the final pre-commit hook before exact staged readback validation.</summary>
         void PrepareCommit();
@@ -184,6 +186,83 @@ namespace LiangPingfa.NativeCad.Core
         void Abort();
     }
 
+    /// <summary>
+    /// Supplies actual append handles for the generated database.  It models
+    /// a host handseed/allocator and deliberately accepts independent
+    /// reserved non-entity handles, so no caller infers the next handle from
+    /// the maximum exported entity.
+    /// </summary>
+    public interface IActualCadHandleAllocator
+    {
+        /// <summary>Allocates one canonical unoccupied actual handle.</summary>
+        string Allocate(IReadOnlyCollection<string> occupiedHandles);
+    }
+
+    /// <summary>
+    /// Testable sequential allocator whose starting handseed and retired or
+    /// non-entity reservations are explicit allocator state, never inferred
+    /// from geometry exports.
+    /// </summary>
+    public sealed class SequentialActualCadHandleAllocator :
+        IActualCadHandleAllocator
+    {
+        private readonly HashSet<string> reserved =
+            new HashSet<string>(StringComparer.Ordinal);
+        private ulong next;
+
+        /// <summary>Creates an allocator at an explicit host-provided seed.</summary>
+        public SequentialActualCadHandleAllocator(
+            ulong initialHandle = 0x100UL,
+            IEnumerable<string>? reservedHandles = null)
+        {
+            next = initialHandle;
+            if (reservedHandles == null)
+            {
+                return;
+            }
+
+            foreach (string handle in reservedHandles)
+            {
+                CadHandle.Require(handle, nameof(reservedHandles));
+                reserved.Add(handle);
+            }
+        }
+
+        /// <inheritdoc />
+        public string Allocate(IReadOnlyCollection<string> occupiedHandles)
+        {
+            if (occupiedHandles == null)
+            {
+                throw new ArgumentNullException(nameof(occupiedHandles));
+            }
+
+            HashSet<string> occupied = new HashSet<string>(
+                occupiedHandles,
+                StringComparer.Ordinal);
+            while (true)
+            {
+                if (next == ulong.MaxValue)
+                {
+                    throw new CadCoreException(
+                        CadCoreErrorCode.InvalidTarget,
+                        "The actual marker handle allocator is exhausted.");
+                }
+
+                string candidate = next.ToString(
+                    "X",
+                    System.Globalization.CultureInfo.InvariantCulture);
+                next++;
+                if (occupied.Contains(candidate) || reserved.Contains(candidate))
+                {
+                    continue;
+                }
+
+                reserved.Add(candidate);
+                return candidate;
+            }
+        }
+    }
+
     /// <summary>Mutable private copy behind one transaction; never a drawing-file model.</summary>
     public sealed class MutableCadDocument
     {
@@ -192,6 +271,7 @@ namespace LiangPingfa.NativeCad.Core
         private readonly List<string> owners;
         private readonly NativeSourceBindingV2 source;
         private readonly NativeGeometryBindingContextV2 bindingContext;
+        private readonly List<CadContainerPhysicalSlots> containers;
         private readonly List<CadEntitySnapshot> entities;
         private CadDocumentTables tables;
 
@@ -207,6 +287,8 @@ namespace LiangPingfa.NativeCad.Core
             owners = new List<string>(sourceSnapshot.Owners);
             source = sourceSnapshot.Source;
             bindingContext = sourceSnapshot.BindingContext;
+            containers = new List<CadContainerPhysicalSlots>(
+                sourceSnapshot.Containers);
             entities = new List<CadEntitySnapshot>(sourceSnapshot.Entities);
             tables = sourceSnapshot.Tables;
         }
@@ -223,6 +305,25 @@ namespace LiangPingfa.NativeCad.Core
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Returns every handle that is occupied by the staged model,
+        /// including declared owners that are not exported entities.  Actual
+        /// marker allocation uses this collision guard rather than deriving a
+        /// value from entity ordering or the maximum entity handle.
+        /// </summary>
+        internal IReadOnlyCollection<string> OccupiedHandles()
+        {
+            HashSet<string> handles = new HashSet<string>(
+                owners,
+                StringComparer.Ordinal);
+            for (int index = 0; index < entities.Count; index++)
+            {
+                handles.Add(entities[index].Handle);
+            }
+
+            return handles;
         }
 
         /// <summary>Replaces an existing exact handle without creating a record.</summary>
@@ -273,8 +374,43 @@ namespace LiangPingfa.NativeCad.Core
                 throw new CadCoreException(CadCoreErrorCode.InvalidTarget, "Generated handle already exists.");
             }
 
+            int containerIndex = FindContainerIndex(entity.Container);
+            if (containerIndex < 0)
+            {
+                throw new CadCoreException(
+                    CadCoreErrorCode.InvalidTarget,
+                    "Generated marker container is absent.");
+            }
+
+            CadContainerPhysicalSlots physical = containers[containerIndex];
+            if (!string.Equals(
+                    physical.OwnerHandle,
+                    entity.OwnerHandle,
+                    StringComparison.Ordinal) ||
+                entity.SequenceIndex != physical.PhysicalSlotCount)
+            {
+                throw new CadCoreException(
+                    CadCoreErrorCode.InvalidTarget,
+                    "Generated marker does not append at the exact physical slot.");
+            }
+
             entities.Add(entity);
             entities.Sort(CadDocumentSnapshot.CompareEntityOrder);
+            containers[containerIndex] = physical.WithPhysicalSlotCount(
+                physical.PhysicalSlotCount + 1);
+        }
+
+        private int FindContainerIndex(CadContainer container)
+        {
+            for (int index = 0; index < containers.Count; index++)
+            {
+                if (containers[index].Container.Equals(container))
+                {
+                    return index;
+                }
+            }
+
+            return -1;
         }
 
         /// <summary>
@@ -302,6 +438,26 @@ namespace LiangPingfa.NativeCad.Core
             foreach (string owner in replacement)
             {
                 owners.Add(owner);
+            }
+        }
+
+        /// <summary>
+        /// Changes only physical slot state for generated readback fault
+        /// tests. Normal mutation paths retain counts on replace/erase and
+        /// advance exactly one count on append.
+        /// </summary>
+        public void ReplaceContainersForFaultInjection(
+            IEnumerable<CadContainerPhysicalSlots> replacement)
+        {
+            if (replacement == null)
+            {
+                throw new ArgumentNullException(nameof(replacement));
+            }
+
+            containers.Clear();
+            foreach (CadContainerPhysicalSlots container in replacement)
+            {
+                containers.Add(container);
             }
         }
 
@@ -341,6 +497,7 @@ namespace LiangPingfa.NativeCad.Core
                 databaseInstanceFingerprint,
                 revisionFingerprint,
                 owners,
+                containers,
                 entities,
                 tables,
                 source,
@@ -353,6 +510,7 @@ namespace LiangPingfa.NativeCad.Core
     {
         private readonly object gate = new object();
         private readonly CadFaultInjector faults;
+        private readonly IActualCadHandleAllocator markerHandleAllocator;
         private CadDocumentSnapshot snapshot;
         private bool transactionActive;
         private InMemoryCadTransaction? activeTransaction;
@@ -362,10 +520,15 @@ namespace LiangPingfa.NativeCad.Core
         private int saveReopenCount;
 
         /// <summary>Creates a database from generated immutable state.</summary>
-        public InMemoryCadDatabase(CadDocumentSnapshot initialSnapshot, CadFaultInjector? faultInjector = null)
+        public InMemoryCadDatabase(
+            CadDocumentSnapshot initialSnapshot,
+            CadFaultInjector? faultInjector = null,
+            IActualCadHandleAllocator? actualHandleAllocator = null)
         {
             snapshot = initialSnapshot ?? throw new ArgumentNullException(nameof(initialSnapshot));
             faults = faultInjector ?? new CadFaultInjector();
+            markerHandleAllocator = actualHandleAllocator ??
+                new SequentialActualCadHandleAllocator();
         }
 
         /// <summary>Number of successfully published commits.</summary>
@@ -515,6 +678,7 @@ namespace LiangPingfa.NativeCad.Core
                     snapshot.DatabaseInstanceFingerprint,
                     snapshot.RevisionFingerprint,
                     snapshot.Owners,
+                    snapshot.Containers,
                     snapshot.Entities,
                     snapshot.Tables,
                     actualFinalBinding,
@@ -619,6 +783,19 @@ namespace LiangPingfa.NativeCad.Core
         internal void AfterMutation(MutableCadDocument document)
         {
             faults.Reach(CadFaultPoint.AfterMutation, document);
+        }
+
+        internal string AllocateActualMarkerHandle(MutableCadDocument document)
+        {
+            if (document == null)
+            {
+                throw new ArgumentNullException(nameof(document));
+            }
+
+            lock (gate)
+            {
+                return markerHandleAllocator.Allocate(document.OccupiedHandles());
+            }
         }
 
         internal void PrepareCommit(InMemoryCadTransaction transaction)
@@ -816,20 +993,23 @@ namespace LiangPingfa.NativeCad.Core
         }
 
         /// <summary>Stages one exact conditional append.</summary>
-        public void AppendExact(
+        public CadEntitySnapshot AppendExact(
             CadDocumentSnapshot expectedState,
-            CadEntitySnapshot entity)
+            MarkerAppendRequestV2 request)
         {
-            if (entity == null)
+            if (request == null)
             {
-                throw new ArgumentNullException(nameof(entity));
+                throw new ArgumentNullException(nameof(request));
             }
 
             EnsureOpen();
             database.BeforeMutation(Document);
             RequireExactCurrentState(expectedState);
+            string actualHandle = database.AllocateActualMarkerHandle(Document);
+            CadEntitySnapshot entity = request.WithActualHandle(actualHandle);
             Document.Append(entity);
             database.AfterMutation(Document);
+            return entity;
         }
 
         /// <summary>Runs pre-commit fault hooks before exact verification.</summary>
