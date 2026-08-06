@@ -103,7 +103,7 @@ nonce、challenge、bridge nonce；每个 ASCII 字段均以前置的无符号 3
 长度编码。不得用普通字符串拼接，且客户端以常数时间比较结果。因此任何重新签名
 后但响应与上述完整 transcript 不一致的持久会话描述符都会被拒绝。
 
-`native-session prepare` 只接受正常本地 NTFS 私有父目录：每个已保留词法
+`native-session prepare` 只接受正常固定本地 NTFS 私有父目录：每个已保留词法
 祖先都不得是 reparse point，且其 DACL 不得给予 Everyone、Users 或其他不受信
 主体删除子项、改 ACL/所有者、改属性/EA 或替换既有组件的权限。目录仅有
 `FILE_ADD_FILE` 或 `FILE_ADD_SUBDIRECTORY` 时不等同于替换已保留子项；保留的
@@ -179,7 +179,10 @@ digest 带入 audit；plan 由 audit integrity 及该 document digest 继承，m
 fresh export 也必须与其 fresh session digest 完全相等。相同源字节、相同 stable host
 但不同 session、或 capability superset/subset 都不能混入 audit、plan 或 manifest。
 
-`native-audit` 的有效期为 15 分钟。私有 intent 只能请求以下固定 profile：
+`native-audit` 的有效期为 15 分钟。vendor-neutral core/ODA-compatible profile 可请求
+以下固定 profile；selected adapter/config 必须同时广告对应 capability。实际 AutoCAD
+adapter 是更窄的 profile：只广告 `translate_dbtext/v1` 及 default-disabled、
+capability-gated `create_review_marker/v1`，绝不广告或接受 delete。
 
 - `translate_dbtext/v1`：直接 Modelspace DBTEXT 的有限、非零 XY 平移；每个非零轴必须使位置、序列化边界和序列化线段的每个受影响 binary64 标量产生有限且位模式不同的结果。若舍入为原值、溢出或非有限，manifest 会在启动 Core Console 前失败关闭；零轴保留原始位模式。
   文本、旋转、图层、样式、所有者和类型必须保持。
@@ -189,6 +192,12 @@ fresh export 也必须与其 fresh session digest 完全相等。相同源字节
 - `create_review_marker/v1`：默认关闭；只有配置和外部插件能力都明确开启，
   且已审计既有 marker 图层/样式时才允许一个由 operation ID 派生的固定
   DBTEXT marker。
+
+AutoCAD 的 `SaveAs` 后重新打开会压缩已擦除 slot，当前 v2 的 gap-preserving delete
+合同无法表达该序列变化。因此任何 AutoCAD delete manifest 都必须在
+`BeginTransaction()` 前以 `LPF_UNSUPPORTED_OPERATION` 拒绝，adapter 源码不得调用
+`DBText.Erase()`。只有新的版本化 sequence-compaction policy 和真实宿主证据才可改变
+这一点；ODA 窄 profile 的精确 overlay TEXT delete 行为不受影响。
 
 不存在任意命令、坐标编辑、自由 marker 文本、图层/样式创建、块编辑、尺寸
 编辑或配筋数据编辑。计划必须绑定新鲜 audit、私有 intent 散列、源/适配器/
@@ -205,6 +214,65 @@ overlay-evidence 几何默认值。任何一项在 audit 或 plan 后变化都�
 `native-apply` 先保留源文件的无跟随只读租约，要求尚不存在且不同于源的
 公共输出，然后从保留句柄复制到私有 NTFS/DACL 工作区。外部 Core Console
 只接触该副本，绝不接触源路径或最终公共路径。这是严格的 copy-only 边界。
+
+## checkpoint 2：许可 AutoCAD adapter 源码边界
+
+仓库现含 `native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter` 的受控
+AutoCAD managed adapter **源码**。它不是二进制发行包，也不是任何真实宿主的
+兼容性声明。公开 CI 只能使用项目原创、带 `syntax-only` assembly marker 的
+`ApiStubs` 编译相同源码；stub DLL 不会复制到 adapter 输出或部署内容。此编译只证明
+语法、命令 metadata、禁止 API 扫描和 SDK-free core 合约，绝不证明 AutoCAD、
+Core Console、TSSD、object enabler 或图纸运行时。
+
+adapter 必须显式传入 `BuildAutoCadAdapter=true`、`CadHostProfile` 与
+`UseAutodeskApiStubs`。真实模式还必须由持证操作人员显式传入绝对、存在、非
+reparse 的 `CadSdkDir`，其中仅可有 `AcMgd.dll`、`AcDbMgd.dll` 与
+`AcCoreMgd.dll` 三项 managed reference，且全部 `Private=false`/`CopyLocal=false`。
+不得搜索 PATH、registry 或安装目录；不得下载、复制、pack 或 publish 厂商 DLL。
+缺少 SDK、错误 profile、reparse、copied DLL 或 stub deployment 都必须失败关闭。
+
+profile 是明确的：`autocad2024`/`tssd2024` 为 `net48`；
+`autocad2025`/`tssd2025` 及 `autocad2026`/`tssd2026` 为
+`net8.0-windows`。Autodesk 2026 managed API 文档指定 .NET 8 兼容性，因此
+不得猜测 .NET 10。`tssd*` 仅表示可编译源码 profile，在私有许可宿主证据出现前
+仍为未资格认证状态。
+
+真实 adapter 只注册三个固定命令：
+
+- `LPF_NATIVE_BRIDGE_BOOTSTRAP`：full-host/session 命令；只从私有 env
+  nonce/output/root/expiry 创建随机、one-instance、本地 named pipe
+  advertisement。pipe 拒绝远程 client，DACL 只给当前 user 与 SYSTEM，并核验
+  client PID/SID/Windows session。pipe worker 不直接访问 Autodesk database；
+  它只做 bounded canonical UTF-8 framing/auth，随后经
+  `ExecuteInCommandContextAsync` 和 document lock 调度只读导出。
+  advertisement 和每一次 `get_session`/document/inventory/geometry 导出都必须先
+  拒绝未命名、路径不存在、`DWGTITLED != 1`、  `DBMOD != 0` 的 drawing；绝不保存或提示用户。adapter 不使用不存在的
+  `Document.Saved` 或 profile 不一致的 active-transaction 计数。导出 transaction
+  前后均以读句柄捕获 disk binding，并严格比较 document/database path、
+  `FingerprintGuid`、`VersionGuid` 和 binding；dirty、SaveAs、切换、关闭、数据库
+  替换或字节漂移均返回 `DOCUMENT_CHANGED` 并失效 session。
+- `LPF_NATIVE_EXECUTE_MANIFEST`：Core Console modal 命令；只读取固定 private
+  manifest/result/run/root env，校验 canonical v2、integrity、expiry、one-use、
+  plugin/Core Console fingerprint、source/private-copy binding 和 DACL/reparse
+  边界后，才调用 core executor。
+- `LPF_NATIVE_EXPORT_MANIFEST`：独立 Core Console modal 命令；只读取同一固定 env
+  和 private write receipt，重新打开当前私有 copy 并 fresh export/readback。
+
+不允许 command 参数、Editor.Command、SendStringToExecute、AutoLISP、COM、
+dialog、selection、mouse、keyboard、focus 或任意 CAD command。adapter 用
+Handle→ObjectId 显式解析、完整 owner/container/物理顺序保护；可编辑范围只包括
+direct Modelspace DBTEXT。DBTEXT 的 logical bounds 是 insertion point，绝不使用
+glyph-dependent extents。LINE、零 bulge LWPOLYLINE 可以只读导出；proxy/custom/
+unknown 或缺少 enabler 的对象没有 stable opaque provider 时必须失败关闭。
+
+写操作先在一个 Autodesk Transaction 中完整 preflight，再逐项重新解析 target、
+apply、staged verify，所有 postcondition 通过后仅 Commit 一次；失败则 Abort。
+Dispose transaction 后才对当前私有路径同版本 `SaveAs`，再用新的 `Database`
+`ReadDwgFile` readback。final result 只能在 fresh readback binding/geometry
+verification 之后写入 private result 文件；Python retained-handle output binding
+仍是最终公共发布的权威。真实 host qualification 只能通过
+`LiangPingfa.NativeCad.AutoCAD.RealHost.Tests` 的显式许可 SDK/Core Console/
+generated-private-fixture gate 获得私有证据，不能由 stub 或 CI 推断。
 
 配置的 Core Console、写插件和读回插件在散列前都必须逐级保留其词法祖先和
 文件句柄；每个祖先及文件 DACL 的显式/继承 allow/deny ACE 都会用 Windows
@@ -226,11 +294,20 @@ manifest 路径仅经一个私有环境变量传递。没有 UI、Editor prompt�
 `BeginTransaction` 前以所有 operation ID/status/digest 和完整 canonical envelope
 精确计算结果字节数，保留 16 KiB headroom。超出预算的 plan/result 必须在 mutation
 之前失败，失败结果也不得超过 reader cap。
+`native-console-export/v2` 的外层则固定使用 ConsoleExport canonical profile：
+只有根 `geometry_json` 是 16 MiB UTF-8 opaque carrier，integrity 计算和写文件都必须
+使用同一 profile；完整外层 export 在写入前还受独立 32 MiB cap。没有 carrier 的 result
+始终使用严格 64 KiB string profile。
 
 manifest 只保存新鲜导出的 `expected_prewrite_revision`，其中包含源文件身份/
-散列、保存文档路径和文件身份、内容/geometry/protected 摘要、适配器/插件、
-稳定宿主绑定及审计语义状态；它绝不预测 final revision。写入后必须启动**新的**
-Core Console 进程，以固定读回命令导出私有输出。
+散列和 `PortablePrewriteProjectionV2`：有序实体/容器、geometry、owner/opaque
+protected state 与 policy-independent table/layout/block digest。它明确排除 source
+path/file identity、session/process 和 database/revision GUID-derived identity，因为
+private copy 打开后可获得不同宿主值。bridge-only database/revision identity 只显式保留
+为 embedded bridge geometry 的一致性证据，不与 Core Console private copy 比较。
+marker policy 也不混入 portable geometry，而是通过 stable-host digest 单独、精确地绑定；
+portable table digest 仍会拒绝 marker resource drift。它绝不预测 final revision。
+写入后必须启动**新的** Core Console 进程，以固定读回命令导出私有输出。
 `native-edit-manifest/v2` 在写入前只绑定精确的
 `expected_prewrite_output_copy_binding`：它完整包含将要打开的私有副本 SHA-256、
 字节数、路径指纹、文件身份和 DWG 头。**最终** SHA-256、大小、身份和 revision 在
@@ -249,15 +326,26 @@ pipe/database/revision 可以变化，其余任一漂移均不得产生 success 
 （session、audit/plan、manifest、Core Console、readback、verification）都明确拒绝
 v1 并返回 `NATIVE_LEGACY_ARTIFACT_READ_ONLY`，绝不把旧字段静默解释为 v2 constraint。
 项目比较 `before → manifest 允许差异 → after`：平移必须精确移动位置/边界/
-线段；删除仅能去除目标且不重编号其余实体；一个或多个 marker 必须在唯一的
+线段；vendor-neutral core/ODA delete 仅能去除目标且不重编号其余实体；实际 AutoCAD
+adapter 不接受 delete；一个或多个 marker 必须在唯一的
 直接 Modelspace 容器中按 operation ID 派生的追加顺序逐一双射匹配。每个
 既有实体的 sequence index、容器、相对顺序和指纹序列均受绑定；paperspace、
 block 和所有非目标容器也必须保持。写结果产生新的 `final_revision_fingerprint` 和 final database/document/output-copy
 binding；读回 envelope、嵌入 geometry 和保存的私有输出副本必须与该结果完全相等，
-任何可自洽但陈旧的导出都拒绝。默认 save/reopen 语义要求 final revision 不同于
-pre-write revision；只有经配置的插件 capability 和匹配 transition enum 才能明确
-允许保留。验证通过后才以无替换语义发布公共 DWG，并生成仅作证据、绝不授权未来编辑、且保持
+任何可自洽但陈旧的导出都拒绝。默认 save/reopen 语义要求 Core Console 在其**本地**
+prewrite/readback 边界确认 revision transition；bridge revision 不可被当作 private-copy
+revision。只有经配置的插件 capability 和匹配 transition enum 才能明确允许保留。
+验证通过后才以无替换语义发布公共 DWG，并生成仅作证据、绝不授权未来编辑、且保持
 私有 DACL 的 `native-verification`。
+
+活动 `native-geometry-export/v2` 还必须为每个实体容器携带有界
+`physical_slot_count`。这是包含已擦除 slot 的物理 extent，不可由活跃实体最大
+sequence 推断，也不泄露已擦除对象的 handle 或内容。vendor-neutral core/ODA delete
+保留 count 和 gap，平移保留 count，marker 从原始 direct Modelspace count 加确定 ordinal 预约并每次追加
+恰好加一；audit/plan/manifest precondition、geometry/protected/order/document
+digest 与最终 readback 都必须精确绑定这些 container-specific counts。AutoCAD adapter
+必须枚举 Autodesk 文档所述的只读 `BlockTableRecord.IncludingErased`
+`BlockTableRecord` 返回值，而不能把它伪造成泛型 `IEnumerable` 属性。
 
 发布前的 DWG 和 verification 都是公共父目录中的隐藏临时文件，但不会继承并暴露
 该父目录的可读 ACL：它们以零 share 的保留句柄创建，先通过同一句柄应用并读回

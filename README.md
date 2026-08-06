@@ -384,9 +384,16 @@ export `geometry_json`）中，序列化 JSON 字符串才是**外层 opaque car
 carrier 做 NFC。随后独立解析内部 JSON；内部键和值仍执行深度、重复键、有限数、
 单标量 NFC 上限、schema、语义和同一绝对 deadline 校验。历史 v1 工件只按其冻结 schema 验证；不会被静默迁移、版本重命名或重新解释为 v2。
 
-原生计划只允许经审计的 DBTEXT XY 平移、精确辅助覆盖文字删除，以及默认关闭且
-需配置/能力/既有图层样式共同准入的 review marker。没有自由命令、LISP、脚本
-正文、层批量删除、图层/样式创建、块/尺寸/配筋编辑或 GUI 自动化。
+vendor-neutral core 和 ODA 窄 profile 仍可使用精确辅助覆盖文字删除；这不等于
+AutoCAD adapter 支持删除。实际 AutoCAD adapter 的初始 profile 只允许 direct
+Modelspace、field-free、BaseLeft `DBText` 的 `translate_dbtext/v1` XY 平移；它还
+公布 `create_review_marker/v1`，但该 marker 默认关闭，只有 profile、插件能力和既有
+图层/样式均精确启用时才可用。`delete_auxiliary_overlay_text/v1` 不在 AutoCAD
+adapter 的能力集内，任何包含它的 native manifest 会在 transaction 前以稳定的
+unsupported-operation 错误拒绝。AutoCAD `SaveAs` 后重新打开会压缩已擦除 slot，
+而当前 v2 物理 slot/gap 合同不能猜测这种序列变化；在有新版、版本化的 compaction
+policy 和真实宿主证据前不得声明未来 delete 支持。没有自由命令、LISP、脚本文本、
+层批量删除、图层/样式创建、块/尺寸/配筋编辑或 GUI 自动化。
 
 原生会话描述符、机器可读 `native-audit`/intent/`native-plan`、manifest、Core
 Console result/export、`native-verification` 和任何恢复日志均为私有文件：最终文件
@@ -398,7 +405,7 @@ Console result/export、`native-verification` 和任何恢复日志均为私有�
 profile/enable/capability、layer/style token 与 fingerprint、height/rotation、文本派生
 版本和几何默认值从 audit 到 plan/manifest 必须完全相等，任何后续漂移均失败关闭。
 
-写入始终从保留的源文件句柄复制到私有 NTFS/DACL 工作区，这是严格的 copy-only
+写入始终从保留的源文件句柄复制到私有**固定本地** NTFS/DACL 工作区，这是严格的 copy-only
 边界。外部 Core Console
 只能处理该副本，并只接收固定 `NETLOAD` 与固定项目命令；manifest 经私有环境
 变量传递，绝不出现在脚本中。保存后必须启动新的读回进程，逐项比较
@@ -428,6 +435,10 @@ Core Console 必须在启动前进入 kill-on-close Job Object，超时或异常
 
 PRIVATE-ARTIFACT-PRIVACY: sensitive local raw artifacts; retained no-follow
 handle owner/DACL validation is required; never commit or upload.
+Private roots, staging/plugin paths, DWGs, manifests, results, and exports
+must recheck `DriveType.Fixed` plus NTFS at each operation boundary; UNC,
+device, substituted, mapped-network, removable, optical, RAM, unknown, and
+no-root volumes are rejected even when a remote share reports NTFS.
 Administrators is accepted only when it is the current process token's default
 file owner, which is the supported elevated-token private-file creation case.
 Session descriptors contain pipe, nonce/challenge, and process/document bindings.
