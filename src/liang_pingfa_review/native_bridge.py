@@ -1,9 +1,10 @@
 """Windows-only client and capability checks for the optional native bridge.
 
 The project never starts, injects into, enumerates, or selects a CAD host.
-An operator must explicitly supply the PID and the random local pipe exposed
-by a separately installed read-only bridge.  Same-user/admin hostile-process
-attacks are outside the documented trusted-local-session threat model.
+An operator either explicitly supplies the PID/random local pipe, or supplies
+the separately installed bridge's one-use private bootstrap advertisement.
+Same-user/admin hostile-process attacks are outside the documented
+trusted-local-session threat model.
 """
 
 from __future__ import annotations
@@ -72,6 +73,12 @@ from .native_protocol import (
     response_limit_for_method,
     validate_response_envelope,
     write_all,
+)
+from .runtime_package import (
+    ADAPTER_ASSEMBLY,
+    allowed_package_file_names,
+    normalize_runtime_package_descriptor,
+    runtime_package_fingerprint,
 )
 from .ownership import (
     FileOwnershipBackend,
@@ -196,6 +203,16 @@ _TRUSTED_INSTALLER_SID = (
 _CLAIMED_SESSION_NAME = re.compile(
     r"^\.liang-pingfa-native-session-claimed-[a-f0-9]{64}\.json$"
 )
+_CLAIMED_BOOTSTRAP_NAME = re.compile(
+    r"^\.liang-pingfa-native-bootstrap-claimed-[a-f0-9]{64}\.json$"
+)
+_BOOTSTRAP_MAX_BYTES = 16 * 1024
+_AUTOCAD_BOOTSTRAP_CAPABILITIES = (
+    "create_review_marker/v1",
+    "read.exact_geometry/v1",
+    "read.inventory/v1",
+    "translate_dbtext/v1",
+)
 _BOOT_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 # Native bridge operations are unsupported off Windows.  This per-process
 # value exists solely so source-free cross-platform unit tests can exercise the
@@ -218,6 +235,16 @@ def _is_claimed_session_basename(name: str) -> bool:
         isinstance(name, str)
         and name.isascii()
         and _CLAIMED_SESSION_NAME.fullmatch(name.casefold()) is not None
+    )
+
+
+def _is_claimed_bootstrap_basename(name: str) -> bool:
+    """Recognize only an ASCII spelling of a previously claimed bootstrap."""
+
+    return (
+        isinstance(name, str)
+        and name.isascii()
+        and _CLAIMED_BOOTSTRAP_NAME.fullmatch(name.casefold()) is not None
     )
 
 
@@ -824,17 +851,35 @@ def _read_component_dacl(opened: OwnedPath) -> ComponentDacl:
 
 @dataclass
 class NativeInstallationLeases:
-    """Retained canonical Core Console/plugin identities through native apply."""
+    """Retained Core Console and complete adapter-package identities.
+
+    The adapter path is only a load entry point.  Every repository-authored
+    package component remains leased, DACL-checked, sized, and hashed until
+    the bridge/Core Console work and its readback have completed.
+    """
 
     leases: dict[str, SourcePathLease]
     expected_hashes: dict[str, str]
     acl_reader: Callable[[OwnedPath], ComponentDacl]
     trusted_sids: frozenset[str] | None
+    expected_sizes: dict[str, int] | None = None
+    runtime_package: Mapping[str, Any] | None = None
+    runtime_component_leases: dict[str, str] | None = None
     _closed: bool = False
 
     @property
     def paths(self) -> dict[str, Path]:
-        return {name: lease.path for name, lease in self.leases.items()}
+        result = {name: lease.path for name, lease in self.leases.items()}
+        if self.runtime_component_leases is not None:
+            adapter_key = self.runtime_component_leases.get(ADAPTER_ASSEMBLY)
+            if adapter_key is None or adapter_key not in self.leases:
+                raise PipelineError(
+                    ErrorCode.NATIVE_CONFIG_INVALID,
+                    "runtime adapter lease is unavailable",
+                )
+            result["write_plugin"] = self.leases[adapter_key].path
+            result["readback_plugin"] = self.leases[adapter_key].path
+        return result
 
     def require_bindings(self) -> None:
         """Recheck identity, content hash, and every held component DACL."""
@@ -845,6 +890,8 @@ class NativeInstallationLeases:
                 "component leases were released",
             )
         try:
+            if self.runtime_package is not None:
+                _require_runtime_package_inventory(self.runtime_package)
             for name, lease in self.leases.items():
                 lease.require_binding()
                 current = lease.owned.capture_binding()
@@ -852,6 +899,10 @@ class NativeInstallationLeases:
                     current.is_directory
                     or current.sha256 != self.expected_hashes[name]
                     or current.sha256 != lease.binding.sha256
+                    or (
+                        self.expected_sizes is not None
+                        and current.byte_size != self.expected_sizes[name]
+                    )
                 ):
                     raise OwnershipLostError("component file identity or hash drifted")
                 for component in lease.chain.components:
@@ -867,6 +918,39 @@ class NativeInstallationLeases:
                     trusted_sids=self.trusted_sids,
                     allow_trustedinstaller_owner=True,
                 )
+            if self.runtime_package is not None:
+                runtime = normalize_runtime_package_descriptor(
+                    self.runtime_package,
+                    require_directory=True,
+                )
+                if self.runtime_component_leases is None:
+                    raise OwnershipLostError("runtime component lease map is unavailable")
+                observed: list[dict[str, Any]] = []
+                for component in runtime["components"]:
+                    key = self.runtime_component_leases.get(component["name"])
+                    if key is None or key not in self.leases:
+                        raise OwnershipLostError("runtime component lease is unavailable")
+                    binding = self.leases[key].owned.capture_binding()
+                    if (
+                        binding.is_directory
+                        or binding.sha256 != component["sha256"]
+                        or binding.byte_size != component["byte_size"]
+                    ):
+                        raise OwnershipLostError("runtime component binding drifted")
+                    observed.append(
+                        {
+                            "name": component["name"],
+                            "byte_size": binding.byte_size,
+                            "sha256": binding.sha256,
+                        }
+                    )
+                if runtime_package_fingerprint(
+                    format_version=runtime["format_version"],
+                    profile=runtime["profile"],
+                    target_framework=runtime["target_framework"],
+                    components=observed,
+                ) != runtime["fingerprint"]:
+                    raise OwnershipLostError("runtime package fingerprint drifted")
         except PipelineError:
             raise
         except (OSError, OwnershipError, OwnershipCleanupError) as error:
@@ -950,6 +1034,28 @@ def _normal_local_file(path_text: str, suffix: str) -> Path:
     return raw
 
 
+def _require_runtime_package_inventory(runtime_package: Mapping[str, Any]) -> None:
+    """Reject every package entry not in the fixed repository allowlist."""
+
+    try:
+        directory = Path(cast(str, runtime_package["directory"]))
+        expected = set(allowed_package_file_names(cast(str, runtime_package["profile"])))
+        entries = list(directory.iterdir())
+        names = [entry.name for entry in entries]
+        if (
+            any(entry.is_dir() or entry.is_symlink() for entry in entries)
+            or len({name.casefold() for name in names}) != len(names)
+            or set(names) != expected
+            or len(names) != len(expected)
+        ):
+            raise ValueError("runtime package inventory differs")
+    except (OSError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_CONFIG_INVALID,
+            "runtime package inventory is unavailable",
+        ) from error
+
+
 def _is_local_ntfs(path: Path) -> bool:
     """Require a normal drive-rooted NTFS volume for configured host files."""
 
@@ -992,6 +1098,18 @@ def _is_local_ntfs(path: Path) -> bool:
         return False
 
 
+def _required_file_size(lease: SourcePathLease) -> int:
+    """Return a concrete retained file size, never a directory/null binding."""
+
+    size = lease.binding.byte_size
+    if lease.binding.is_directory or not isinstance(size, int) or size <= 0:
+        raise PipelineError(
+            ErrorCode.NATIVE_CONFIG_INVALID,
+            "configured component has no stable file size",
+        )
+    return size
+
+
 def acquire_native_installation_leases(
     config: Mapping[str, Any],
     *,
@@ -1010,14 +1128,32 @@ def acquire_native_installation_leases(
     _require_windows()
     checked = require_active_native_contract("config", config)
     selected_backend = backend or platform_backend(require_windows=True)
-    candidates = {
-        "core_console": (checked["core_console"], ".exe"),
-        "write_plugin": (checked["plugins"]["write"], ".dll"),
-        "readback_plugin": (checked["plugins"]["readback"], ".dll"),
+    runtime_package = normalize_runtime_package_descriptor(
+        cast(Mapping[str, Any], checked["runtime_package"]),
+        require_directory=True,
+    )
+    runtime_directory = cast(str, runtime_package["directory"])
+    candidates: dict[str, tuple[Mapping[str, Any], str, str | None]] = {
+        "core_console": (checked["core_console"], "path", ".exe"),
     }
+    runtime_component_leases: dict[str, str] = {}
+    for component in runtime_package["components"]:
+        name = cast(str, component["name"])
+        key = "runtime:" + name
+        runtime_component_leases[name] = key
+        candidates[key] = (
+            {
+                "path": os.fspath(Path(runtime_directory) / name),
+                "sha256": component["sha256"],
+                "byte_size": component["byte_size"],
+            },
+            "runtime",
+            ".deps.json" if name.endswith(".deps.json") else ".dll",
+        )
     leases: dict[str, SourcePathLease] = {}
     try:
-        for name, (entry, suffix) in candidates.items():
+        for name, (entry, _kind, suffix) in candidates.items():
+            assert suffix is not None
             lexical = _normal_local_file(cast(str, entry["path"]), suffix)
             lease = acquire_source_path_lease(lexical, selected_backend)
             if not _is_local_ntfs(lease.path):
@@ -1026,15 +1162,33 @@ def acquire_native_installation_leases(
                     ErrorCode.NATIVE_CONFIG_INVALID,
                     "configured component is not on local NTFS",
                 )
+            if name.startswith("runtime:") and lease.path.name != name.removeprefix(
+                "runtime:"
+            ):
+                lease.close()
+                raise PipelineError(
+                    ErrorCode.NATIVE_CONFIG_INVALID,
+                    "runtime component path spelling differs",
+                )
             leases[name] = lease
         result = NativeInstallationLeases(
             leases=leases,
             expected_hashes={
                 name: cast(str, entry["sha256"])
-                for name, (entry, _suffix) in candidates.items()
+                for name, (entry, _kind, _suffix) in candidates.items()
+            },
+            expected_sizes={
+                name: (
+                    cast(int, entry["byte_size"])
+                    if "byte_size" in entry
+                    else _required_file_size(leases[name])
+                )
+                for name, (entry, _kind, _suffix) in candidates.items()
             },
             acl_reader=acl_reader or _read_component_dacl,
             trusted_sids=trusted_sids,
+            runtime_package=runtime_package,
+            runtime_component_leases=runtime_component_leases,
         )
         result.require_bindings()
         return result
@@ -1727,6 +1881,7 @@ class NativeBridgeClient:
         config: Mapping[str, Any],
         transport: PipeTransport | None = None,
         session_clock: NativeSessionClock | None = None,
+        component_leases: NativeInstallationLeases | None = None,
     ) -> None:
         wall_now = utc_now()
         self._session = require_active_native_contract(
@@ -1765,6 +1920,18 @@ class NativeBridgeClient:
         # incompatible with the exact configured native host before a pipe can
         # be opened.  Geometry responses then use the same shared binding gate.
         native_host_binding(self._session, self._config)
+        # Test transports model only the protocol and have no operator
+        # installation. Every real named-pipe client either receives the
+        # caller's retained package leases or owns them until ``close``.
+        self._component_leases = component_leases
+        self._owns_component_leases = False
+        if self._component_leases is not None:
+            self._component_leases.require_bindings()
+        elif transport is None:
+            self._component_leases = acquire_native_installation_leases(
+                self._config
+            )
+            self._owns_component_leases = True
         self._transport = transport
         # Deliberately non-reentrant: a transport callback cannot recursively
         # issue a second frame on the same thread.
@@ -1858,6 +2025,7 @@ class NativeBridgeClient:
 
         with self._lifecycle_lock:
             try:
+                self._require_component_bindings()
                 self._require_live_session()
                 self._connect_locked()
                 self._require_live_session()
@@ -2133,6 +2301,7 @@ class NativeBridgeClient:
         """Return the still-live exact instance bound after pipe connection."""
 
         with self._lifecycle_lock:
+            self._require_component_bindings()
             self._require_live_session()
             if self._connected_process is None or not self._transport_bound:
                 self._invalidate_locked()
@@ -2164,6 +2333,19 @@ class NativeBridgeClient:
 
     def close(self) -> None:
         self.invalidate()
+        if (
+            getattr(self, "_owns_component_leases", False)
+            and getattr(self, "_component_leases", None) is not None
+        ):
+            leases = self._component_leases
+            self._component_leases = None
+            self._owns_component_leases = False
+            leases.close()
+
+    def _require_component_bindings(self) -> None:
+        leases = getattr(self, "_component_leases", None)
+        if leases is not None:
+            leases.require_bindings()
 
     def _reject_concurrent_rpc(self) -> None:
         """Reject a contender without closing the active owner's transport."""
@@ -2203,6 +2385,7 @@ class NativeBridgeClient:
             if self._is_invalid():
                 self._invalidate_locked()
                 raise PipelineError(ErrorCode.NATIVE_SESSION_INVALID, "native session was invalidated")
+            self._require_component_bindings()
             self._require_live_session()
             self._connect_locked()
             # The post-connect identity has to be rechecked before the first
@@ -2293,6 +2476,7 @@ class NativeBridgeClient:
             # validated result after all protocol work has completed.
             self._require_request_deadline(timing, "response final validation")
             self._require_live_session(session_deadline=timing.session_deadline)
+            self._require_component_bindings()
             self._require_request_deadline(timing, "response final return")
             if self._is_invalid():
                 raise PipelineError(ErrorCode.NATIVE_PROTOCOL_INVALID, "concurrent native RPC")
@@ -2614,7 +2798,8 @@ def _require_configured_bridge_identity(
         result.get("adapter") != adapter
         or result.get("plugin", {}).get("id") != plugin["id"]
         or result.get("plugin", {}).get("version") != plugin["version"]
-        or result.get("plugin", {}).get("fingerprint") != plugin["sha256"]
+        or result.get("plugin", {}).get("fingerprint")
+        != plugin["runtime_package_fingerprint"]
         or result.get("host") != host
         or not required.issubset(set(result.get("capabilities", [])))
     ):
@@ -2693,6 +2878,9 @@ class NativeBridgeHandshakeContext:
     monotonic_boot_id: str
     monotonic_issued: str
     monotonic_expires: str
+    # A bootstrap advertisement can impose a shorter host-server deadline.
+    # ``None`` preserves the original five-minute explicit-PID behavior.
+    expires_at: datetime | None = None
 
 
 class NativeBridgeHandshakeClient(NativeBridgeClient):
@@ -2714,11 +2902,18 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
         config: Mapping[str, Any],
         transport: PipeTransport | None = None,
         session_clock: NativeSessionClock | None = None,
+        component_leases: NativeInstallationLeases | None = None,
     ) -> None:
         self._context = context
         self._session_clock = session_clock
         self._config = require_active_native_contract("config", config)
         self._validate_context()
+        # ``prepare_native_session`` owns this short-lived lease set; direct
+        # protocol doubles intentionally supply no installation at all.
+        self._component_leases = component_leases
+        self._owns_component_leases = False
+        if self._component_leases is not None:
+            self._component_leases.require_bindings()
         self._transport = transport
         # These fields are the existing protocol client's transport state.
         # There is intentionally no ``_session`` attribute in this class.
@@ -2770,9 +2965,10 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
             )
         validate_pipe_name(context.pipe_name)
         try:
+            expires_at = self._context_expires_at()
             validate_native_session_temporal_bounds(
                 context.created_at,
-                context.created_at + MAX_NATIVE_SESSION_LIFETIME,
+                expires_at,
                 now=utc_now(),
             )
             validate_native_session_monotonic_bounds(
@@ -2801,6 +2997,20 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                 "native handshake preparation is invalid",
             ) from None
 
+    def _context_expires_at(self) -> datetime:
+        """Return the fixed pre-handshake deadline without extending it."""
+
+        expires_at = self._context.expires_at
+        if expires_at is None:
+            expires_at = self._context.created_at + MAX_NATIVE_SESSION_LIFETIME
+        if (
+            not isinstance(expires_at, datetime)
+            or expires_at.tzinfo is None
+            or expires_at.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("native handshake expiry is invalid")
+        return expires_at
+
     def _process_matches(self, current: ProcessIdentity) -> bool:
         return self._same_process_instance(self._context.prepared_process, current)
 
@@ -2809,7 +3019,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
 
         self._require_temporally_live_context()
         wall_remaining = (
-            self._context.created_at + MAX_NATIVE_SESSION_LIFETIME - utc_now()
+            self._context_expires_at() - utc_now()
         ).total_seconds()
         monotonic_remaining = (
             self._context_monotonic_remaining_milliseconds() / 1000
@@ -2836,7 +3046,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
             if error.code == ErrorCode.NATIVE_SESSION_EXPIRED:
                 return True
             raise
-        return utc_now() >= self._context.created_at + MAX_NATIVE_SESSION_LIFETIME
+        return utc_now() >= self._context_expires_at()
 
     def _context_monotonic_remaining_milliseconds(self) -> int:
         """Read the preparation-time deadline without issuing a replacement."""
@@ -2856,12 +3066,12 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
         try:
             validate_native_session_temporal_bounds(
                 self._context.created_at,
-                self._context.created_at + MAX_NATIVE_SESSION_LIFETIME,
+                self._context_expires_at(),
                 now=wall_now,
             )
         except (CanonicalJsonError, TypeError, ValueError) as error:
             self._invalidate_locked()
-            if wall_now >= self._context.created_at + MAX_NATIVE_SESSION_LIFETIME:
+            if wall_now >= self._context_expires_at():
                 raise PipelineError(
                     ErrorCode.NATIVE_SESSION_EXPIRED,
                     "native handshake expired",
@@ -2885,7 +3095,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
         self._require_temporally_live_context()
         monotonic_now = time.monotonic()
         wall_remaining = (
-            self._context.created_at + MAX_NATIVE_SESSION_LIFETIME - utc_now()
+            self._context_expires_at() - utc_now()
         ).total_seconds()
         monotonic_remaining = (
             self._context_monotonic_remaining_milliseconds() / 1000
@@ -3146,7 +3356,7 @@ class NativeBridgeHandshakeClient(NativeBridgeClient):
                     "native pipe process was not bound",
                 )
             connected = self._connected_process
-            expires_at = self._context.created_at + MAX_NATIVE_SESSION_LIFETIME
+            expires_at = self._context_expires_at()
             publication_now = utc_now()
             try:
                 validate_native_session_temporal_bounds(
@@ -3218,6 +3428,8 @@ def prepare_native_session(
     pipe_name: str,
     config: Mapping[str, Any],
     session_clock: NativeSessionClock | None = None,
+    expires_at: datetime | None = None,
+    component_leases: NativeInstallationLeases | None = None,
 ) -> dict[str, Any]:
     """Attach once to an explicit read-only bridge and return a sealed session.
 
@@ -3235,10 +3447,45 @@ def prepare_native_session(
     # a new five-minute window at descriptor publication.
     created_at = utc_now()
     clock_reading = _read_native_session_clock(session_clock)
+    session_expires_at = created_at + MAX_NATIVE_SESSION_LIFETIME
+    if expires_at is not None:
+        if (
+            not isinstance(expires_at, datetime)
+            or expires_at.tzinfo is None
+            or expires_at.utcoffset() != timedelta(0)
+            or expires_at <= created_at
+        ):
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "native bootstrap expiry is invalid",
+            )
+        session_expires_at = min(session_expires_at, expires_at)
+    try:
+        validate_native_session_temporal_bounds(
+            created_at,
+            session_expires_at,
+            now=created_at,
+        )
+    except (CanonicalJsonError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "native handshake expiry is invalid",
+        ) from error
+    # Project the advertised wall deadline into the one cross-process clock
+    # without rounding up.  The whole-second descriptor spelling can differ
+    # by less than one second, but this millisecond deadline is never later
+    # than the bootstrap/server wall expiry.
+    remaining_milliseconds = int(
+        (session_expires_at - created_at) // timedelta(milliseconds=1)
+    )
+    if remaining_milliseconds <= 0:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_EXPIRED,
+            "native handshake expired",
+        )
     if (
         clock_reading.uptime_milliseconds
-        > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
-        - MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS - remaining_milliseconds
     ):
         raise PipelineError(
             ErrorCode.NATIVE_SESSION_INVALID,
@@ -3247,34 +3494,160 @@ def prepare_native_session(
     monotonic_issued = str(clock_reading.uptime_milliseconds)
     monotonic_expires = str(
         clock_reading.uptime_milliseconds
-        + MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        + remaining_milliseconds
     )
     validate_pipe_name(pipe_name)
-    validate_native_installation(checked_config)
-    identity = inspect_process(pid)
-    context = NativeBridgeHandshakeContext(
-        prepared_process=identity,
-        pipe_name=pipe_name,
-        protocol_version=PROTOCOL_VERSION,
-        session_id="native-session-" + secrets.token_hex(16),
-        client_nonce=new_nonce(),
-        challenge=new_nonce(),
-        mode="read_only",
-        created_at=created_at,
-        monotonic_clock=clock_reading.clock,
-        monotonic_boot_id=clock_reading.boot_id,
-        monotonic_issued=monotonic_issued,
-        monotonic_expires=monotonic_expires,
-    )
-    client = NativeBridgeHandshakeClient(
-        context,
-        config=checked_config,
-        session_clock=session_clock,
-    )
+    owned_component_leases = component_leases is None
+    leases = component_leases or acquire_native_installation_leases(checked_config)
+    client: NativeBridgeHandshakeClient | None = None
     try:
-        return client.complete_session_descriptor()
+        # Keep every package handle live for the entire bootstrap health /
+        # session exchange; the descriptor is never published if a component
+        # drifts before the final handshake response.
+        leases.require_bindings()
+        identity = inspect_process(pid)
+        context = NativeBridgeHandshakeContext(
+            prepared_process=identity,
+            pipe_name=pipe_name,
+            protocol_version=PROTOCOL_VERSION,
+            session_id="native-session-" + secrets.token_hex(16),
+            client_nonce=new_nonce(),
+            challenge=new_nonce(),
+            mode="read_only",
+            created_at=created_at,
+            monotonic_clock=clock_reading.clock,
+            monotonic_boot_id=clock_reading.boot_id,
+            monotonic_issued=monotonic_issued,
+            monotonic_expires=monotonic_expires,
+            expires_at=session_expires_at,
+        )
+        client = NativeBridgeHandshakeClient(
+            context,
+            config=checked_config,
+            session_clock=session_clock,
+            component_leases=leases,
+        )
+        descriptor = client.complete_session_descriptor()
+        leases.require_bindings()
+        return descriptor
     finally:
-        client.close()
+        if client is not None:
+            client.close()
+        if owned_component_leases:
+            leases.close()
+
+
+def _require_bootstrap_matches_config(
+    bootstrap: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> datetime:
+    """Bind an advertised private bridge to one exact private config."""
+
+    try:
+        bootstrap_context = bootstrap["bootstrap"]
+        config_context = config["bootstrap"]
+        expected_plugin = {
+            "id": config["plugins"]["readback"]["id"],
+            "version": config["plugins"]["readback"]["version"],
+            "fingerprint": config["plugins"]["readback"][
+                "runtime_package_fingerprint"
+            ],
+        }
+        host_compatibility = config["host_compatibility"]
+        expected_host = {
+            "product": host_compatibility["host_product"],
+            "release": host_compatibility["host_release"],
+            "runtime": host_compatibility["host_runtime"],
+            "mode": host_compatibility["audit_host_mode"],
+        }
+        advertised_capabilities = tuple(bootstrap["capabilities"])
+        required_capabilities = set(config["required_capabilities"])
+        expected_config_sha256 = canonical_sha256(config)
+        if (
+            not isinstance(config_context, Mapping)
+            or not isinstance(bootstrap_context, Mapping)
+            or not compare_digest(
+                bootstrap_context["config_sha256"],
+                expected_config_sha256,
+            )
+            or not compare_digest(
+                bootstrap_context["nonce"],
+                config_context["nonce"],
+            )
+            or bootstrap_context["expires_at"] != config_context["expires_at"]
+            or bootstrap["adapter"] != config["adapter"]
+            or bootstrap["plugin"] != expected_plugin
+            or bootstrap["host"] != expected_host
+            or advertised_capabilities != _AUTOCAD_BOOTSTRAP_CAPABILITIES
+            or not required_capabilities.issubset(advertised_capabilities)
+        ):
+            raise ValueError("bootstrap/config binding differs")
+        return parse_utc(bootstrap_context["expires_at"])
+    except (
+        CanonicalJsonError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "bootstrap advertisement does not match the private config",
+        ) from error
+
+
+def _require_bootstrap_process_identity(bootstrap: Mapping[str, Any]) -> None:
+    """Reject PID reuse or host-image drift before opening the named pipe."""
+
+    try:
+        pid = bootstrap["pid"]
+        advertised = bootstrap["process"]
+        current = inspect_process(pid)
+        if (
+            current.windows_session_id != advertised["windows_session_id"]
+            or str(current.creation_time_100ns)
+            != advertised["creation_time_100ns"]
+            or not compare_digest(
+                current.instance_fingerprint,
+                advertised["instance_fingerprint"],
+            )
+            or current.executable_fingerprint == "unavailable"
+            or not compare_digest(
+                current.executable_fingerprint,
+                advertised["executable_fingerprint"],
+            )
+        ):
+            raise ValueError("bootstrap process differs")
+    except (KeyError, TypeError, ValueError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "bootstrap process identity differs",
+        ) from error
+
+
+def prepare_native_session_from_bootstrap(
+    *,
+    bootstrap_path: Path,
+    config: Mapping[str, Any],
+    session_clock: NativeSessionClock | None = None,
+) -> dict[str, Any]:
+    """Claim a C# bootstrap once, validate it, then create a client-owned session.
+
+    All descriptor/config/process checks complete before
+    :func:`prepare_native_session` can create or connect a pipe transport.
+    The bootstrap's bounded expiry also caps the generated session lifetime.
+    """
+
+    checked_config = require_active_native_contract("config", config)
+    with consume_native_bridge_bootstrap(bootstrap_path) as bootstrap:
+        expires_at = _require_bootstrap_matches_config(bootstrap, checked_config)
+        _require_bootstrap_process_identity(bootstrap)
+        return prepare_native_session(
+            pid=bootstrap["pid"],
+            pipe_name=bootstrap["pipe"],
+            config=checked_config,
+            session_clock=session_clock,
+            expires_at=expires_at,
+        )
 
 
 def write_private_native_session_descriptor(
@@ -3721,4 +4094,242 @@ def consume_native_session(
             raise PipelineError(
                 ErrorCode.NATIVE_SESSION_INVALID,
                 "claimed session descriptor cleanup failed",
+            ) from cleanup_error
+
+
+def _bounded_bootstrap_payload(opened: OwnedPath) -> bytes:
+    """Read a bootstrap only through its retained handle and fixed byte cap."""
+
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in opened.read_chunks(_BOOTSTRAP_MAX_BYTES):
+        if not isinstance(chunk, bytes) or total + len(chunk) > _BOOTSTRAP_MAX_BYTES:
+            raise OwnershipLostError("bootstrap advertisement exceeds its byte limit")
+        chunks.append(chunk)
+        total += len(chunk)
+    if total == 0:
+        raise OwnershipLostError("bootstrap advertisement is empty")
+    return b"".join(chunks)
+
+
+def _decode_private_bootstrap(payload: bytes) -> dict[str, Any]:
+    """Verify the exact C# advertisement shape before any pipe is usable."""
+
+    try:
+        checked = require_active_native_contract(
+            "bootstrap",
+            strict_native_json(payload.decode("utf-8", errors="strict")),
+        )
+        if payload != canonical_json_bytes(checked):
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "bootstrap advertisement is not canonical",
+            )
+        context = checked["bootstrap"]
+        validate_native_session_temporal_bounds(
+            context["issued_at"],
+            context["expires_at"],
+            now=utc_now(),
+        )
+        return checked
+    except PipelineError:
+        raise
+    except (
+        CanonicalJsonError,
+        KeyError,
+        RecursionError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "bootstrap advertisement is invalid",
+        ) from error
+
+
+@contextmanager
+def consume_native_bridge_bootstrap(path: Path) -> Any:
+    """Atomically claim and destroy one private C# bootstrap advertisement.
+
+    The descriptor is renamed no-replace before bytes are read. It remains
+    open and DACL-verified through schema/integrity/expiry validation, then
+    is deleted through the retained handle even when validation fails.
+    """
+
+    _require_windows()
+    try:
+        lexical = lexical_absolute_path(path)
+    except (OSError, OwnershipError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "bootstrap advertisement path is invalid",
+        ) from error
+    if (
+        not lexical.name
+        or lexical.suffix.casefold() != ".json"
+        or _is_claimed_bootstrap_basename(lexical.name)
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "bootstrap advertisement name is invalid or stale",
+        )
+
+    backend = platform_backend(require_windows=True)
+    chain = None
+    opened: OwnedPath | None = None
+    original_binding: OwnedPathBinding | None = None
+    claimed_binding: OwnedPathBinding | None = None
+    claimed_path: Path | None = None
+    rename_completed = False
+    try:
+        chain = acquire_lexical_directory_chain(lexical.parent, backend)
+        chain.require_binding()
+        if isinstance(backend, WindowsFileOwnershipBackend):
+            trusted = frozenset(
+                {
+                    current_user_sid(),
+                    _TRUSTED_SYSTEM_SID,
+                    _TRUSTED_ADMINISTRATORS_SID,
+                }
+            )
+            for component in chain.components:
+                validate_component_dacl(
+                    _read_component_dacl(component.owned),
+                    is_directory=True,
+                    trusted_sids=trusted,
+                    allow_trustedinstaller_owner=True,
+                )
+            chain.require_binding()
+        else:
+            probe = getattr(backend, "validate_private_artifact_ancestry", None)
+            if callable(probe):
+                probe(chain.path)
+
+        opened = backend.open_existing_file(lexical, for_delete=True)
+        # Bound the untrusted artifact before ``capture_binding`` hashes the
+        # complete retained file. A hostile oversized JSON must not turn a
+        # one-use bootstrap claim into an unbounded hash/read operation.
+        if len(opened.read_prefix(_BOOTSTRAP_MAX_BYTES + 1)) > _BOOTSTRAP_MAX_BYTES:
+            raise OwnershipLostError("bootstrap advertisement exceeds its byte limit")
+        original = opened.capture_binding()
+        original_binding = original
+        if (
+            original.is_directory
+            or original.sha256 is None
+            or original.byte_size is None
+            or original.byte_size <= 0
+            or original.byte_size > _BOOTSTRAP_MAX_BYTES
+            or not backend.path_matches_binding(lexical, original)
+        ):
+            raise OwnershipLostError("bootstrap advertisement is not a bound file")
+        owner_before_claim = verify_private_staging_file(opened, backend)
+        for _attempt in range(16):
+            candidate = chain.path / (
+                ".liang-pingfa-native-bootstrap-claimed-"
+                + secrets.token_hex(32)
+                + ".json"
+            )
+            try:
+                opened.rename_no_replace(candidate)
+                claimed_path = candidate
+                rename_completed = True
+                break
+            except DestinationExistsError:
+                continue
+        if claimed_path is None:
+            raise OwnershipLostError("bootstrap advertisement cannot be claimed")
+        claimed_binding = opened.capture_binding()
+        final_path = opened.final_path()
+        if (
+            claimed_binding.is_directory
+            or not claimed_binding.same_identity_and_content(original)
+            or os.path.normcase(os.path.normpath(os.fspath(final_path)))
+            != os.path.normcase(os.path.normpath(os.fspath(claimed_path)))
+            or not backend.path_matches_binding(claimed_path, claimed_binding)
+        ):
+            raise OwnershipLostError("claimed bootstrap advertisement differs")
+        owner_after_claim = verify_private_staging_file(opened, backend)
+        if (
+            owner_before_claim is not None
+            and owner_after_claim is not None
+            and owner_before_claim != owner_after_claim
+        ):
+            raise OwnershipLostError("claimed bootstrap owner changed")
+        bootstrap = _decode_private_bootstrap(_bounded_bootstrap_payload(opened))
+        owner_after_validation = verify_private_staging_file(opened, backend)
+        if (
+            not opened.capture_binding().same_identity_and_content(claimed_binding)
+            or (
+                owner_after_claim is not None
+                and owner_after_validation is not None
+                and owner_after_claim != owner_after_validation
+            )
+        ):
+            raise OwnershipLostError("claimed bootstrap changed while read")
+        yield bootstrap
+    except PipelineError:
+        raise
+    except (OSError, OwnershipError) as error:
+        raise PipelineError(
+            ErrorCode.NATIVE_SESSION_INVALID,
+            "bootstrap advertisement cannot be claimed",
+        ) from error
+    finally:
+        cleanup_error: BaseException | None = None
+        if opened is not None:
+            if not rename_completed:
+                try:
+                    opened.close()
+                except (OSError, OwnershipError) as error:
+                    cleanup_error = error
+            else:
+                try:
+                    if claimed_path is None or original_binding is None:
+                        raise OwnershipLostError(
+                            "claimed bootstrap lacks a retained identity"
+                        )
+                    if claimed_binding is not None:
+                        try:
+                            current = opened.capture_binding()
+                        except (OSError, OwnershipError):
+                            # The retained rename handle still names the
+                            # previously proved secret; delete it rather than
+                            # stranding a bootstrap after diagnostic rebinding
+                            # becomes unavailable.
+                            opened.request_delete()
+                            opened.close()
+                        else:
+                            if not current.same_identity_and_content(claimed_binding):
+                                raise OwnershipLostError(
+                                    "claimed bootstrap ownership was lost"
+                                )
+                            dispose_retained_owned_path(opened, claimed_binding)
+                    else:
+                        opened.request_delete()
+                        opened.close()
+                    opened = None
+                    if backend.path_exists(claimed_path):
+                        raise OwnershipLostError(
+                            "claimed bootstrap replacement survived cleanup"
+                        )
+                except (OSError, OwnershipError) as error:
+                    cleanup_error = error
+                finally:
+                    if opened is not None:
+                        try:
+                            opened.close()
+                        except (OSError, OwnershipError) as close_error:
+                            if cleanup_error is None:
+                                cleanup_error = close_error
+        if chain is not None:
+            try:
+                chain.close()
+            except (OSError, OwnershipError) as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if cleanup_error is not None:
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "claimed bootstrap cleanup failed",
             ) from cleanup_error

@@ -33,6 +33,7 @@ from .native_bridge import (
     consume_native_session,
     native_doctor_status,
     prepare_native_session,
+    prepare_native_session_from_bootstrap,
     write_private_native_session_descriptor,
 )
 from .native_contracts import (
@@ -40,6 +41,7 @@ from .native_contracts import (
     load_native_config,
 )
 from .native_plan import (
+    generate_qualification_translation_intent,
     generate_native_plan,
     validate_native_plan_against_audit,
 )
@@ -291,11 +293,30 @@ def _native_config(arguments: argparse.Namespace) -> dict[str, Any]:
 def _native_session_prepare(arguments: argparse.Namespace) -> None:
     config_path = _native_config_path(arguments, required=True)
     assert config_path is not None
-    session = prepare_native_session(
-        pid=arguments.pid,
-        pipe_name=arguments.pipe,
-        config=load_native_config(config_path),
-    )
+    config = load_native_config(config_path)
+    bootstrap_path = getattr(arguments, "bootstrap", None)
+    pipe_name = getattr(arguments, "pipe", None)
+    if bootstrap_path is not None:
+        if pipe_name is not None:
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "bootstrap preparation does not accept an explicit pipe",
+            )
+        session = prepare_native_session_from_bootstrap(
+            bootstrap_path=bootstrap_path,
+            config=config,
+        )
+    else:
+        if arguments.pid is None or pipe_name is None:
+            raise PipelineError(
+                ErrorCode.NATIVE_SESSION_INVALID,
+                "explicit preparation requires both PID and pipe",
+            )
+        session = prepare_native_session(
+            pid=arguments.pid,
+            pipe_name=pipe_name,
+            config=config,
+        )
     # Session material includes pipe/nonces/challenges and is intentionally
     # never written through the generic public-artifact writer.
     write_private_native_session_descriptor(arguments.session_out, session)
@@ -377,6 +398,31 @@ def _native_plan(arguments: argparse.Namespace) -> None:
     finally:
         targets.close()
     _emit({"status": "ok", "command": "native-plan"})
+
+
+def _native_qualification_intent(arguments: argparse.Namespace) -> None:
+    """Create the only deterministic intent used by the private harness."""
+
+    targets = _bound_new_output_paths(
+        arguments.intent_out,
+        forbidden=(arguments.audit,),
+    )
+    try:
+        audit = load_native_artifact("audit", arguments.audit)
+        intent = generate_qualification_translation_intent(audit)
+        publish_artifacts(
+            (
+                ArtifactPublication(
+                    path=targets.targets[0].destination,
+                    payload=canonical_json_bytes(intent) + b"\n",
+                    private=True,
+                ),
+            ),
+            existing_parents=(targets.targets[0].parent,),
+        )
+    finally:
+        targets.close()
+    _emit({"status": "ok", "command": "native-qualification-intent"})
 
 
 def _native_review_plan(arguments: argparse.Namespace) -> None:
@@ -495,8 +541,9 @@ def build_parser() -> argparse.ArgumentParser:
         "native-session",
         help="prepare one explicit read-only native bridge session",
         description=(
-            "Bind only an explicitly selected PID and local bridge pipe. "
-            "The resulting private descriptor is one-use and read-only."
+            "Bind an explicitly selected PID/local bridge pipe, or atomically "
+            "claim one private bootstrap advertisement. The resulting private "
+            "descriptor is one-use and read-only."
         ),
     )
     native_session_commands = native_session.add_subparsers(
@@ -505,10 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     native_prepare = native_session_commands.add_parser(
         "prepare",
-        help="bind an explicitly advertised PID and local named pipe",
+        help="bind an explicit PID/pipe or atomically claim one private bootstrap",
     )
-    native_prepare.add_argument("--pid", type=int, required=True)
-    native_prepare.add_argument("--pipe", required=True)
+    native_prepare_mode = native_prepare.add_mutually_exclusive_group(required=True)
+    native_prepare_mode.add_argument("--pid", type=int)
+    native_prepare_mode.add_argument("--bootstrap", type=Path)
+    native_prepare.add_argument("--pipe")
     native_prepare.add_argument("--session-out", type=Path, required=True)
     native_prepare.add_argument("--native-config", type=Path)
     native_prepare.set_defaults(handler=_native_session_prepare)
@@ -541,6 +590,14 @@ def build_parser() -> argparse.ArgumentParser:
     native_plan.add_argument("--review-out", type=Path, required=True)
     native_plan.add_argument("--native-config", type=Path)
     native_plan.set_defaults(handler=_native_plan)
+
+    native_qualification_intent = subcommands.add_parser(
+        "native-qualification-intent",
+        help="create a private deterministic translation intent for an authorized fixture",
+    )
+    native_qualification_intent.add_argument("--audit", type=Path, required=True)
+    native_qualification_intent.add_argument("--intent-out", type=Path, required=True)
+    native_qualification_intent.set_defaults(handler=_native_qualification_intent)
 
     native_review = subcommands.add_parser(
         "native-review-plan",
