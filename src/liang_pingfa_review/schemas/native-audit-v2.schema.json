@@ -11,6 +11,7 @@
     "scope",
     "source",
     "adapter_binding",
+    "audited_host_identity",
     "host_executable_fingerprint",
     "native_host_binding",
     "stable_host_binding_digest",
@@ -25,6 +26,7 @@
     "record_cardinality",
     "integrity",
     "config_schema_version",
+    "config_fingerprint",
     "session_schema_version",
     "geometry_schema_version"
   ],
@@ -49,6 +51,9 @@
     },
     "adapter_binding": {
       "$ref": "#/$defs/adapterBinding"
+    },
+    "audited_host_identity": {
+      "$ref": "#/$defs/hostIdentity"
     },
     "host_executable_fingerprint": {
       "oneOf": [
@@ -107,6 +112,9 @@
     "config_schema_version": {
       "const": "liang-pingfa/native-adapter-config/v2"
     },
+    "config_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
     "session_schema_version": {
       "const": "liang-pingfa/native-bridge-session/v2"
     },
@@ -161,6 +169,7 @@
           "$ref": "#/$defs/sha256"
         },
         "file_identity_fingerprint": {
+          "$comment": "SHA-256 of the frozen creation-time, volume-serial, namespace, and file-index projection; source size and last-write are checked independently.",
           "$ref": "#/$defs/sha256"
         },
         "dwg_header_signature": {
@@ -179,6 +188,7 @@
         "plugin_id",
         "plugin_version",
         "plugin_fingerprint",
+        "runtime_package_fingerprint",
         "protocol_major",
         "protocol_minor",
         "capabilities_digest"
@@ -217,6 +227,9 @@
         "plugin_fingerprint": {
           "$ref": "#/$defs/sha256"
         },
+        "runtime_package_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
         "protocol_major": {
           "const": 1
         },
@@ -225,6 +238,39 @@
         },
         "capabilities_digest": {
           "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "hostIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "release",
+        "runtime",
+        "mode"
+      ],
+      "properties": {
+        "product": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "mode": {
+          "const": "full_host"
         }
       }
     },
