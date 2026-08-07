@@ -16,11 +16,15 @@ from liang_pingfa_review.native_contracts import (
     geometry_document_binding_digest,
     prewrite_semantic_projection,
     prewrite_semantic_projection_digest,
+    require_qualification_host_binding,
     strict_native_json,
     validate_native_contract,
 )
 from liang_pingfa_review.native_manifest import build_native_manifest
-from liang_pingfa_review.native_plan import generate_native_plan
+from liang_pingfa_review.native_plan import (
+    generate_native_plan,
+    generate_qualification_translation_intent,
+)
 from liang_pingfa_review.native_protocol import derive_challenge_response
 from liang_pingfa_review.native_verify import (
     build_native_verification,
@@ -200,6 +204,97 @@ def _final_export(
 class NativeAuditPlanTests(unittest.TestCase):
     """Test generated mocks only; no drawing, SDK, or plugin is used."""
 
+    def test_audit_binds_the_full_host_identity_and_validated_config(self) -> None:
+        """Qualification consumes these private bindings before it creates a plan."""
+
+        native_config = config()
+        audit = build_native_audit(geometry(), session(), native_config)
+        self.assertEqual(
+            native_config["full_host"]["sha256"],
+            audit["host_executable_fingerprint"],
+        )
+        self.assertEqual(
+            {
+                "product": native_config["host_compatibility"]["host_product"],
+                "release": native_config["host_compatibility"]["host_release"],
+                "runtime": native_config["host_compatibility"]["host_runtime"],
+                "mode": native_config["host_compatibility"]["audit_host_mode"],
+            },
+            audit["audited_host_identity"],
+        )
+        self.assertEqual(canonical_sha256(native_config), audit["config_fingerprint"])
+
+    def test_qualification_host_binding_rejects_drift_and_identity_mismatch(self) -> None:
+        """Generated evidence covers every fail-closed real-host handoff case."""
+
+        native_config = config()
+        audit = build_native_audit(geometry(), session(), native_config)
+        expected_hash = native_config["full_host"]["sha256"]
+        require_qualification_host_binding(
+            audit,
+            native_config,
+            host_executable_sha256=expected_hash,
+            profile=native_config["adapter"]["profile"],
+        )
+        for label, candidate_audit, candidate_config, candidate_hash, profile in (
+            (
+                "wrong-host-path-or-hash",
+                audit,
+                native_config,
+                digest("different-retained-host"),
+                native_config["adapter"]["profile"],
+            ),
+            (
+                "audit-fingerprint-unavailable",
+                attach_integrity({**audit, "host_executable_fingerprint": "unavailable"}),
+                native_config,
+                expected_hash,
+                native_config["adapter"]["profile"],
+            ),
+            (
+                "audit-missing-host-binding",
+                {key: value for key, value in audit.items() if key != "host_executable_fingerprint"},
+                native_config,
+                expected_hash,
+                native_config["adapter"]["profile"],
+            ),
+            (
+                "profile-mismatch",
+                audit,
+                native_config,
+                expected_hash,
+                "different-profile",
+            ),
+            (
+                "runtime-mismatch",
+                audit,
+                {
+                    **native_config,
+                    "host_compatibility": {
+                        **native_config["host_compatibility"],
+                        "host_runtime": "different-runtime",
+                    },
+                },
+                expected_hash,
+                native_config["adapter"]["profile"],
+            ),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(PipelineError) as raised:
+                    require_qualification_host_binding(
+                        candidate_audit,
+                        candidate_config,
+                        host_executable_sha256=candidate_hash,
+                        profile=profile,
+                    )
+                self.assertIn(
+                    raised.exception.code,
+                    {
+                        ErrorCode.NATIVE_AUDIT_SCHEMA_INVALID,
+                        ErrorCode.NATIVE_CAPABILITY_MISMATCH,
+                    },
+                )
+
     def _translation_workflow(self) -> tuple[dict, dict, dict, dict, dict]:
         before = geometry([entity("10", text="generated-private-text")])
         read_session = session()
@@ -238,6 +333,27 @@ class NativeAuditPlanTests(unittest.TestCase):
             output_path=__import__("pathlib").Path("generated-output.dwg"),
         )
         return before, audit, private_intent, plan, manifest
+
+    def test_generated_qualification_intent_is_one_safe_translation(self) -> None:
+        before = geometry([entity("10", text="generated-private-text")])
+        audit = build_native_audit(before, session(), config())
+        generated = generate_qualification_translation_intent(audit)
+        self.assertEqual(generated["created_at"], audit["created_at"])
+        self.assertEqual(len(generated["operations"]), 1)
+        operation = generated["operations"][0]
+        self.assertEqual(operation["kind"], "translate_dbtext")
+        self.assertIn(
+            operation["target_id"],
+            {record["target_id"] for record in audit["records"]},
+        )
+        self.assertEqual(
+            operation["delta"],
+            ["3ff0000000000000", "0000000000000000", "0000000000000000"],
+        )
+        self.assertEqual(
+            generated,
+            generate_qualification_translation_intent(audit),
+        )
 
     def test_plan_is_deterministic_and_manifest_has_private_exact_preconditions(self) -> None:
         before, audit, private_intent, plan, manifest = self._translation_workflow()
@@ -1157,6 +1273,9 @@ class NativeAuditPlanTests(unittest.TestCase):
                 "manifest_integrity_sha256": manifest["integrity"]["sha256"],
                 "manifest_schema_version": manifest["schema_version"],
                 "nonce": manifest["nonce"],
+                "runtime_package_fingerprint": manifest["environment"][
+                    "runtime_package_fingerprint"
+                ],
                 "final_revision_fingerprint": after["document"][
                     "revision_fingerprint"
                 ],
@@ -1317,6 +1436,9 @@ class NativeAuditPlanTests(unittest.TestCase):
             "manifest_integrity_sha256": manifest["integrity"]["sha256"],
             "manifest_schema_version": manifest["schema_version"],
             "nonce": manifest["nonce"],
+            "runtime_package_fingerprint": manifest["environment"][
+                "runtime_package_fingerprint"
+            ],
             "final_revision_fingerprint": after["document"]["revision_fingerprint"],
             "final_revision_transition": "save_reopen_changed",
             "final_document_binding": {
@@ -1374,6 +1496,9 @@ class NativeAuditPlanTests(unittest.TestCase):
             ],
             "console_result_schema_version": checked_result["schema_version"],
             "nonce": manifest["nonce"],
+            "runtime_package_fingerprint": manifest["environment"][
+                "runtime_package_fingerprint"
+            ],
             "final_revision_fingerprint": after["document"]["revision_fingerprint"],
             "final_document_binding": {
                 "database_instance_fingerprint": after["document"][
@@ -1395,6 +1520,28 @@ class NativeAuditPlanTests(unittest.TestCase):
             )["document"]["complete_geometry_digest"],
             after["document"]["complete_geometry_digest"],
         )
+        write_package_drift = deepcopy(result)
+        write_package_drift["runtime_package_fingerprint"] = "f" * 64
+        write_package_drift = attach_integrity(write_package_drift)
+        with self.assertRaises(PipelineError) as raised:
+            validate_console_result(
+                manifest,
+                write_package_drift,
+                run_id=write_run,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_CONSOLE_RESULT_INVALID)
+
+        readback_package_drift = deepcopy(exported)
+        readback_package_drift["runtime_package_fingerprint"] = "e" * 64
+        readback_package_drift = attach_integrity(readback_package_drift)
+        with self.assertRaises(PipelineError) as raised:
+            geometry_from_console_export(
+                manifest,
+                readback_package_drift,
+                run_id=read_run,
+                result=checked_result,
+            )
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_READBACK_INVALID)
         forged_result = deepcopy(result)
         forged_result["final_revision_fingerprint"] = "f" * 64
         forged_result = attach_integrity(forged_result)
@@ -1488,6 +1635,9 @@ class NativeAuditPlanTests(unittest.TestCase):
             "manifest_integrity_sha256": manifest["integrity"]["sha256"],
             "manifest_schema_version": manifest["schema_version"],
             "nonce": manifest["nonce"],
+            "runtime_package_fingerprint": manifest["environment"][
+                "runtime_package_fingerprint"
+            ],
             "final_revision_fingerprint": after["document"]["revision_fingerprint"],
             "final_revision_transition": "save_reopen_changed",
             "final_document_binding": {
@@ -1631,6 +1781,9 @@ class NativeAuditPlanTests(unittest.TestCase):
                 "manifest_integrity_sha256": manifest["integrity"]["sha256"],
                 "manifest_schema_version": manifest["schema_version"],
                 "nonce": manifest["nonce"],
+                "runtime_package_fingerprint": manifest["environment"][
+                    "runtime_package_fingerprint"
+                ],
                 "final_revision_fingerprint": prewrite["bridge_document_identity"][
                     "revision_fingerprint"
                 ],

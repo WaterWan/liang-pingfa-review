@@ -66,6 +66,7 @@ from liang_pingfa_review.reports import (
     render_native_plan_review,
 )
 from tests.support.synthetic_native import (
+    configure_autocad_runtime_package,
     config,
     entity,
     geometry,
@@ -109,6 +110,14 @@ class NativeContractTests(unittest.TestCase):
             "profile": "autocad2025",
             "version": "2.0.0",
         }
+        configure_autocad_runtime_package(native_config, "autocad2025")
+        native_config["host_compatibility"].update(
+            {
+                "host_product": "autocad",
+                "host_release": "2025",
+                "host_runtime": "net8",
+            }
+        )
         native_config["required_capabilities"].append("translate_dbtext/v1")
         with self.assertRaises(PipelineError) as rejected_delete:
             validate_native_contract("config", native_config)
@@ -130,6 +139,57 @@ class NativeContractTests(unittest.TestCase):
             ErrorCode.NATIVE_CONFIG_INVALID,
         )
 
+    def test_concrete_autocad_identity_rejects_tssd_labels_but_protocol_stays_extensible(
+        self,
+    ) -> None:
+        """The current adapter cannot inherit a different vendor's host identity."""
+
+        autocad = config()
+        autocad["adapter"] = {
+            "id": AUTOCAD_ADAPTER_ID,
+            "profile": "autocad2025",
+            "version": "2.0.0",
+        }
+        configure_autocad_runtime_package(autocad, "autocad2025")
+        autocad["host_compatibility"].update(
+            {
+                "host_product": "autocad",
+                "host_release": "2025",
+                "host_runtime": "net8",
+            }
+        )
+        autocad["operation_profiles"]["delete_auxiliary_overlay_text/v1"] = False
+        autocad["required_capabilities"].append("translate_dbtext/v1")
+        self.assertEqual(
+            "autocad2025",
+            validate_native_contract("config", autocad)["adapter"]["profile"],
+        )
+
+        forged_tssd = deepcopy(autocad)
+        forged_tssd["adapter"]["profile"] = "tssd2025"
+        with self.assertRaises(PipelineError) as rejected:
+            validate_native_contract("config", forged_tssd)
+        self.assertEqual(rejected.exception.code, ErrorCode.NATIVE_CONFIG_INVALID)
+
+        future_vendor = config()
+        future_vendor["adapter"] = {
+            "id": "external-tssd-adapter",
+            "profile": "tssd2025",
+            "version": "1.0.0",
+        }
+        future_vendor["host_compatibility"].update(
+            {
+                "host_family": "tssd",
+                "host_product": "tssd",
+                "host_release": "2025",
+                "host_runtime": "net8",
+            }
+        )
+        self.assertEqual(
+            "external-tssd-adapter",
+            validate_native_contract("config", future_vendor)["adapter"]["id"],
+        )
+
     def test_all_packaged_native_schemas_are_strict_recursively(self) -> None:
         def check(value: object) -> None:
             if not isinstance(value, dict):
@@ -146,6 +206,7 @@ class NativeContractTests(unittest.TestCase):
 
         for kind in (
             "config",
+            "bootstrap",
             "request",
             "response",
             "inventory",
@@ -161,6 +222,26 @@ class NativeContractTests(unittest.TestCase):
         ):
             with self.subTest(kind=kind):
                 check(schema_for_native(kind))
+
+    def test_bootstrap_schema_forbids_server_owned_session_ids(self) -> None:
+        schema = schema_for_native("bootstrap")
+        self.assertEqual(
+            "liang-pingfa/native-bridge-bootstrap/v1",
+            schema["$id"],
+        )
+        self.assertNotIn("session_id", schema["properties"])
+        self.assertEqual(
+            [
+                "create_review_marker/v1",
+                "read.exact_geometry/v1",
+                "read.inventory/v1",
+                "translate_dbtext/v1",
+            ],
+            [
+                item["const"]
+                for item in schema["properties"]["capabilities"]["prefixItems"]
+            ],
+        )
 
     def test_portable_prewrite_schema_excludes_copy_ephemeral_identity(self) -> None:
         geometry_schema = schema_for_native("geometry")
@@ -627,8 +708,8 @@ class NativeContractTests(unittest.TestCase):
                         validate_native_contract("session", candidate)
                     self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
 
-    def test_session_monotonic_binding_is_strict_fixed_and_private(self) -> None:
-        """A re-signed descriptor cannot alter its one boot-scoped deadline."""
+    def test_session_monotonic_binding_is_bounded_and_private(self) -> None:
+        """A re-signed descriptor cannot alter or extend its boot-scoped deadline."""
 
         now = datetime(2030, 1, 1, tzinfo=UTC)
         schema = schema_for_native("session")
@@ -660,7 +741,10 @@ class NativeContractTests(unittest.TestCase):
             candidate = session()
             candidate["created_at"] = canonical_module.format_utc(now)
             candidate["expires_at"] = canonical_module.format_utc(
-                now + MAX_NATIVE_SESSION_LIFETIME
+                now
+                + timedelta(
+                    milliseconds=int(expires) - int(issued)
+                )
             )
             candidate["monotonic_clock"] = clock
             candidate["monotonic_boot_id"] = boot_id
@@ -675,6 +759,9 @@ class NativeContractTests(unittest.TestCase):
         valid = (
             signed(),
             signed(
+                expires="1120000",
+            ),
+            signed(
                 issued=str(maximum_issued),
                 expires=str(
                     native_contracts_module.MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
@@ -686,17 +773,8 @@ class NativeContractTests(unittest.TestCase):
             ("boot-id", signed(boot_id="A" * 32)),
             ("leading-zero", signed(issued="01000000")),
             ("reversed", signed(issued="1300000", expires="1000000")),
-            ("short", signed(expires="1299999")),
+            ("zero", signed(expires="1000000")),
             ("maximum-plus-epsilon", signed(expires="1300001")),
-            (
-                "wrap",
-                signed(
-                    issued=str(maximum_issued + 1),
-                    expires=str(
-                        native_contracts_module.MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
-                    ),
-                ),
-            ),
         )
         with mock.patch.object(native_contracts_module, "utc_now", return_value=now):
             for candidate in valid:

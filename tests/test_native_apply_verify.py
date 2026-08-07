@@ -287,6 +287,9 @@ class NativeApplyVerifyTests(unittest.TestCase):
                     "manifest_integrity_sha256": manifest["integrity"]["sha256"],
                     "manifest_schema_version": manifest["schema_version"],
                     "nonce": manifest["nonce"],
+                    "runtime_package_fingerprint": manifest["environment"][
+                        "runtime_package_fingerprint"
+                    ],
                     "final_revision_fingerprint": after["document"][
                         "revision_fingerprint"
                     ],
@@ -339,6 +342,9 @@ class NativeApplyVerifyTests(unittest.TestCase):
                             "schema_version"
                         ],
                         "nonce": manifest["nonce"],
+                        "runtime_package_fingerprint": manifest["environment"][
+                            "runtime_package_fingerprint"
+                        ],
                         "final_revision_fingerprint": output_export["document"][
                             "revision_fingerprint"
                         ],
