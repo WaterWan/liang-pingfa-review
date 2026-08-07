@@ -1945,6 +1945,7 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
     workflow = _read_text(workflow_path, issues)
     if workflow is None:
         return
+    _validate_workflow_powershell_here_strings(workflow, issues)
     for required_text in (
         "validate-windows:",
         "runs-on: windows-latest",
@@ -2022,6 +2023,74 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
             issues.append(
                 "validate workflow must run tracked validation before C# build: "
                 + job_name
+            )
+
+
+def _validate_workflow_powershell_here_strings(
+    workflow: str, issues: list[str]
+) -> None:
+    """Keep embedded PowerShell here-strings inside YAML ``run: |`` blocks."""
+
+    lines = workflow.splitlines()
+    for run_index, run_line in enumerate(lines):
+        run_match = re.match(r"^(?P<indent> *)run:\s*\|\s*$", run_line)
+        if run_match is None:
+            continue
+        run_indent = len(run_match.group("indent"))
+        content_indent = run_indent + 2
+        block_end = run_index + 1
+        while block_end < len(lines):
+            candidate = lines[block_end]
+            if candidate.strip() and len(candidate) - len(candidate.lstrip(" ")) <= run_indent:
+                break
+            block_end += 1
+
+        opener_index = next(
+            (
+                index
+                for index in range(run_index + 1, block_end)
+                if re.search(r"@['\"]\s*$", lines[index])
+            ),
+            None,
+        )
+        if opener_index is None:
+            continue
+
+        body_indent: int | None = None
+        terminator_found = False
+        for index in range(opener_index + 1, len(lines)):
+            line = lines[index]
+            stripped = line.strip()
+            if stripped in {"'@", '"@'}:
+                terminator_indent = len(line) - len(line.lstrip(" "))
+                if terminator_indent < content_indent:
+                    issues.append(
+                        "validate workflow PowerShell here-string escaped "
+                        f"the run block at line {index + 1}"
+                    )
+                elif body_indent is not None and terminator_indent != body_indent:
+                    issues.append(
+                        "validate workflow PowerShell here-string terminator "
+                        f"must align with its body at line {index + 1}"
+                    )
+                terminator_found = True
+                break
+            if not stripped:
+                continue
+            line_indent = len(line) - len(line.lstrip(" "))
+            if line_indent < content_indent:
+                issues.append(
+                    "validate workflow PowerShell here-string escaped "
+                    f"the run block at line {index + 1}"
+                )
+                continue
+            if body_indent is None:
+                body_indent = line_indent
+
+        if not terminator_found:
+            issues.append(
+                "validate workflow PowerShell here-string is missing its "
+                f"terminator after line {opener_index + 1}"
             )
 
 

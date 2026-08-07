@@ -1049,6 +1049,45 @@ class ValidateSkillTests(unittest.TestCase):
             job = workflow[start : next_job if next_job >= 0 else len(workflow)]
             self.assertLess(job.index(tracked_command), job.index(build_command))
 
+    def test_escaped_powershell_here_string_body_fails(self) -> None:
+        workflow_path = self.repository / ".github/workflows/validate.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        fixed_body = (
+            "          $tokens = $null\n"
+            "          $errors = $null\n"
+            "          [System.Management.Automation.Language.Parser]::ParseFile(\n"
+            "            $env:LPF_OPERATOR_SCRIPT_TO_PARSE,\n"
+            "            [ref]$tokens,\n"
+            "            [ref]$errors\n"
+            "          ) | Out-Null\n"
+            "          if ($errors.Count -ne 0) {\n"
+            "            throw \"Operator script parsing failed.\"\n"
+            "          }\n"
+            "          '@"
+        )
+        broken_body = (
+            "$tokens = $null\n"
+            "$errors = $null\n"
+            "[System.Management.Automation.Language.Parser]::ParseFile(\n"
+            "  $env:LPF_OPERATOR_SCRIPT_TO_PARSE,\n"
+            "  [ref]$tokens,\n"
+            "  [ref]$errors\n"
+            ") | Out-Null\n"
+            "if ($errors.Count -ne 0) {\n"
+            "  throw \"Operator script parsing failed.\"\n"
+            "}\n"
+            "'@"
+        )
+        self.assertIn(fixed_body, workflow)
+        workflow_path.write_text(
+            workflow.replace(fixed_body, broken_body, 1),
+            encoding="utf-8",
+        )
+
+        self.assert_validation_fails_with(
+            "validate workflow PowerShell here-string escaped the run block at line 59"
+        )
+
     def test_invalid_name_fails(self) -> None:
         skill_path = self.repository / validate_skill.SKILL_PATH
         skill_path.write_text(
