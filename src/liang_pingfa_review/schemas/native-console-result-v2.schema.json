@@ -9,6 +9,7 @@
     "manifest_id",
     "manifest_integrity_sha256",
     "nonce",
+    "runtime_package_fingerprint",
     "final_revision_fingerprint",
     "final_revision_transition",
     "final_document_binding",
@@ -32,6 +33,9 @@
     },
     "nonce": {
       "$ref": "#/$defs/nonce"
+    },
+    "runtime_package_fingerprint": {
+      "$ref": "#/$defs/sha256"
     },
     "final_revision_fingerprint": {
       "$ref": "#/$defs/sha256"

@@ -8,6 +8,7 @@
     "run_id",
     "manifest_id",
     "nonce",
+    "runtime_package_fingerprint",
     "final_revision_fingerprint",
     "final_document_binding",
     "geometry_json",
@@ -30,6 +31,9 @@
     },
     "nonce": {
       "$ref": "#/$defs/nonce"
+    },
+    "runtime_package_fingerprint": {
+      "$ref": "#/$defs/sha256"
     },
     "final_revision_fingerprint": {
       "$ref": "#/$defs/sha256"
