@@ -1,0 +1,5 @@
+{
+  "nonce": "replace-with-a-43-to-128-character-base64url-nonce",
+  "expires_at": "replace-with-a-whole-second-UTC-expiry-within-five-minutes",
+  "runtime_package_fingerprint": "copy-the-private-build-receipt-runtime-package-fingerprint"
+}
