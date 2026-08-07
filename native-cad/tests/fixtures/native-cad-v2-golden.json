@@ -67,6 +67,17 @@
       "canonical_sha256": "8a1d9f13ffbe884809c5268adbca0d468603507e2782a391e14bded69c71e3bf"
     },
     {
+      "name": "windows-file-identity-projection",
+      "payload": {
+        "creation_time_100ns": 1234567890123456789,
+        "first": 305419896,
+        "namespace": "windows-file-id",
+        "second": 1311768467463790320
+      },
+      "canonical_json": "{\"creation_time_100ns\":1234567890123456789,\"first\":305419896,\"namespace\":\"windows-file-id\",\"second\":1311768467463790320}",
+      "canonical_sha256": "e78a17c6cd708d51c61d8a4742983ddb8ed549f1b30bb8553c90b6bc0de5f718"
+    },
+    {
       "name": "nested-objects-and-arrays",
       "payload": {
         "z": [
