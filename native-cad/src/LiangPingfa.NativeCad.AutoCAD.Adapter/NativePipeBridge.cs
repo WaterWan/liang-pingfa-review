@@ -124,7 +124,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             bridgeNonce = RandomBase64Url(32);
             pipeName = @"\\.\pipe\" + AdapterIdentity.BridgePipePrefix +
                 RandomPipeToken();
-            pluginFingerprint = AdapterIdentity.AssemblyFingerprint();
+            pluginFingerprint = AdapterIdentity.RequireRuntimePackageFingerprint(
+                bootstrap.RuntimePackageFingerprint);
             expiresUtc = bootstrap.ExpiresUtc;
             expiryLifetime = new BridgeExpiryLifetime(expiresUtc, OnExpiry);
             lifetimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -503,6 +504,10 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             CancellationToken requestDeadline)
         {
             requestDeadline.ThrowIfCancellationRequested();
+            // Dependencies may have been replaced after bootstrap without
+            // changing the already-loaded adapter image. Rehash the complete
+            // package before any bridge operation or advertisement.
+            AdapterIdentity.RequireRuntimePackageFingerprint(pluginFingerprint);
             BindRequestSession(request);
             ThrowIfExpired();
             if (string.Equals(request.Method, "health", StringComparison.Ordinal))
@@ -1899,52 +1904,113 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
     /// <summary>Private bootstrap advertisement; it is not a public artifact or a host claim.</summary>
     internal static class NativeBridgeAdvertisement
     {
+        private const int MaxBootstrapAdvertisementBytes = 16 * 1024;
+
         internal static void Write(
             string path,
             BootstrapCommandContext context,
             NativePipeBridgeServer server)
         {
+            if (context == null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+            if (server == null)
+            {
+                throw new ArgumentNullException(nameof(server));
+            }
+
+            string validatedPath = PrivatePathPolicy.RequirePrivateNewFile(
+                path,
+                context.PrivateRoot,
+                ".json");
+            byte[] bytes = Serialize(
+                BuildPayload(
+                    context.Nonce,
+                    context.ConfigSha256,
+                    context.IssuedUtc,
+                    server.ExpiresUtc,
+                    server.PipeName,
+                    server.ProcessId,
+                    server.PluginFingerprint));
+            WritePrivateNoReplace(validatedPath, context.PrivateRoot, bytes);
+        }
+
+        /// <summary>
+        /// Generates the exact production wire shape for the SDK-free
+        /// cross-language contract test. It does not open a pipe or a drawing.
+        /// </summary>
+        internal static byte[] SerializeForTest(
+            string nonce,
+            string configSha256,
+            string pluginFingerprint,
+            DateTime issuedUtc,
+            DateTime expiresUtc)
+        {
+            using (Process process = Process.GetCurrentProcess())
+            {
+                return Serialize(
+                    BuildPayload(
+                        nonce,
+                        configSha256,
+                        issuedUtc,
+                        expiresUtc,
+                        @"\\.\pipe\" + AdapterIdentity.BridgePipePrefix +
+                            NativePipeBridgeServer.RandomPipeToken(),
+                        process.Id,
+                        pluginFingerprint));
+            }
+        }
+
+        private static Dictionary<string, object?> BuildPayload(
+            string nonce,
+            string configSha256,
+            DateTime issuedUtc,
+            DateTime expiresUtc,
+            string pipe,
+            int pid,
+            string pluginFingerprint)
+        {
+            if (expiresUtc <= issuedUtc ||
+                expiresUtc > issuedUtc.AddMinutes(5) ||
+                string.IsNullOrEmpty(pipe) ||
+                pid <= 0)
+            {
+                throw new AdapterFailureException(
+                    "LPF_BOOTSTRAP_CONTEXT",
+                    "The bootstrap advertisement context is invalid.");
+            }
+
             Dictionary<string, object?> payload =
                 new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
                     { "schema_version", "liang-pingfa/native-bridge-bootstrap/v1" },
-                    { "nonce", context.Nonce },
-                    { "pipe", server.PipeName },
-                    { "pid", (long)server.ProcessId },
                     {
-                        "protocol_version",
-                        NativeCadProtocolV2.BridgeVersion
+                        "protocol",
+                        new Dictionary<string, object?>(StringComparer.Ordinal)
+                        {
+                            { "version", NativeCadProtocolV2.BridgeVersion },
+                            { "major", 1L },
+                            { "minor", 0L },
+                        }
                     },
-                    { "protocol_major", 1L },
-                    { "protocol_minor", 0L },
+                    { "pid", (long)pid },
+                    { "pipe", pipe },
                     { "mode", "read_only" },
+                    { "adapter", AdapterWireValue() },
+                    { "plugin", PluginWireValue(pluginFingerprint) },
+                    { "host", HostWireValue() },
+                    { "process", ProcessWireValue(pid) },
+                    { "capabilities", CapabilitiesWireValue() },
                     {
-                        "adapter",
+                        "bootstrap",
                         new Dictionary<string, object?>(StringComparer.Ordinal)
                         {
-                            { "id", AdapterIdentity.AdapterId },
-                            { "profile", AdapterIdentity.Profile },
-                            { "version", AdapterIdentity.PluginVersion },
+                            { "nonce", nonce },
+                            { "config_sha256", configSha256 },
+                            { "issued_at", FormatUtc(issuedUtc) },
+                            { "expires_at", FormatUtc(expiresUtc) },
                         }
-                    },
-                    {
-                        "plugin",
-                        new Dictionary<string, object?>(StringComparer.Ordinal)
-                        {
-                            { "id", AdapterIdentity.PluginId },
-                            { "version", AdapterIdentity.PluginVersion },
-                            { "fingerprint", server.PluginFingerprint },
-                        }
-                    },
-                    {
-                        "capabilities",
-                        CapabilitiesWireValue()
-                    },
-                    {
-                        "expires_at",
-                        server.ExpiresUtc.ToString(
-                            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-                            CultureInfo.InvariantCulture)
                     },
                 };
             payload.Add(
@@ -1954,28 +2020,150 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     { "algorithm", "SHA-256" },
                     { "sha256", CanonicalJson.Sha256Hex(payload) },
                 });
+            return payload;
+        }
+
+        private static byte[] Serialize(Dictionary<string, object?> payload)
+        {
             byte[] bytes = CanonicalJson.SerializeUtf8(payload);
-            using (FileStream stream = new FileStream(
-                path,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                4096,
-                FileOptions.WriteThrough))
+            if (bytes.Length == 0 || bytes.Length > MaxBootstrapAdvertisementBytes)
             {
-                stream.Write(bytes, 0, bytes.Length);
-                stream.Flush(true);
+                throw new AdapterFailureException(
+                    "LPF_BOOTSTRAP_CONTEXT",
+                    "The bootstrap advertisement is outside its byte limit.");
             }
-            PrivatePathPolicy.RequirePrivateFile(
-                path,
-                context.PrivateRoot,
-                ".json");
+            return bytes;
+        }
+
+        private static void WritePrivateNoReplace(
+            string path,
+            string privateRoot,
+            byte[] bytes)
+        {
+            bool created = false;
+            try
+            {
+                using (FileStream stream = new FileStream(
+                    path,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    FileOptions.WriteThrough))
+                {
+                    created = true;
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+                string verified = PrivatePathPolicy.RequirePrivateFile(
+                    path,
+                    privateRoot,
+                    ".json");
+                if (new FileInfo(verified).Length != bytes.Length)
+                {
+                    throw new AdapterFailureException(
+                        "LPF_BOOTSTRAP_CONTEXT",
+                        "The bootstrap advertisement changed before validation.");
+                }
+            }
+            catch
+            {
+                if (created)
+                {
+                    try
+                    {
+                        File.Delete(path);
+                    }
+                    catch
+                    {
+                        // The private-root DACL and no-replace creation gate
+                        // are the security boundary; never mask the original
+                        // failure with an untrusted path diagnostic.
+                    }
+                }
+                throw;
+            }
+        }
+
+        private static Dictionary<string, object?> AdapterWireValue()
+        {
+            return new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                { "id", AdapterIdentity.AdapterId },
+                { "profile", AdapterIdentity.Profile },
+                { "version", AdapterIdentity.PluginVersion },
+            };
+        }
+
+        private static Dictionary<string, object?> PluginWireValue(
+            string pluginFingerprint)
+        {
+            CanonicalJson.RequireSha256(pluginFingerprint, "pluginFingerprint");
+            return new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                { "id", AdapterIdentity.PluginId },
+                { "version", AdapterIdentity.PluginVersion },
+                { "fingerprint", pluginFingerprint },
+            };
+        }
+
+        private static Dictionary<string, object?> HostWireValue()
+        {
+            return new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                { "product", "autocad" },
+                { "release", AdapterIdentity.HostRelease },
+                { "runtime", AdapterIdentity.HostRuntime },
+                { "mode", "full_host" },
+            };
+        }
+
+        private static Dictionary<string, object?> ProcessWireValue(int expectedPid)
+        {
+            using (Process process = Process.GetCurrentProcess())
+            {
+                if (process.Id != expectedPid)
+                {
+                    throw new AdapterFailureException(
+                        "LPF_BOOTSTRAP_CONTEXT",
+                        "The bootstrap process identity changed.");
+                }
+                long creation = process.StartTime.ToUniversalTime().ToFileTimeUtc();
+                long session = process.SessionId;
+                string instance = CanonicalJson.Sha256Hex(
+                    new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        { "creation_time_100ns", creation.ToString(CultureInfo.InvariantCulture) },
+                        { "pid", (long)process.Id },
+                        { "windows_session_id", session },
+                    });
+                return new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    { "windows_session_id", session },
+                    {
+                        "creation_time_100ns",
+                        creation.ToString(CultureInfo.InvariantCulture)
+                    },
+                    { "instance_fingerprint", instance },
+                    {
+                        "executable_fingerprint",
+                        AutodeskHostBinding.CurrentExecutableFingerprint()
+                    },
+                };
+            }
         }
 
         private static List<object?> CapabilitiesWireValue()
         {
             return NativeCadCapabilities.ToWireValue(
                 AdapterIdentity.Capabilities);
+        }
+
+        private static string FormatUtc(DateTime value)
+        {
+            return value.ToUniversalTime().ToString(
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                CultureInfo.InvariantCulture);
         }
     }
 
