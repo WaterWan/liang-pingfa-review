@@ -56,17 +56,17 @@ jobs:
             foreach ($script in $scripts) {
               $env:LPF_OPERATOR_SCRIPT_TO_PARSE = $script
               & $shell -NoProfile -NonInteractive -Command @'
-$tokens = $null
-$errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile(
-  $env:LPF_OPERATOR_SCRIPT_TO_PARSE,
-  [ref]$tokens,
-  [ref]$errors
-) | Out-Null
-if ($errors.Count -ne 0) {
-  throw "Operator script parsing failed."
-}
-'@
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $env:LPF_OPERATOR_SCRIPT_TO_PARSE,
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) {
+            throw "Operator script parsing failed."
+          }
+          '@
               if ($LASTEXITCODE -ne 0) {
                 throw "Operator script parsing failed."
               }
