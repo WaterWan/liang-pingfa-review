@@ -557,6 +557,8 @@ def validate_console_result(
         != native_artifact_integrity(checked_manifest)
         or checked["manifest_schema_version"] != checked_manifest["schema_version"]
         or checked["nonce"] != checked_manifest["nonce"]
+        or checked["runtime_package_fingerprint"]
+        != checked_manifest["environment"]["runtime_package_fingerprint"]
         or checked["final_revision_fingerprint"] != final["revision_fingerprint"]
         or checked["transaction"]
         != {"preflight": "passed", "outcome": "committed", "rollback": "not_required"}
@@ -635,6 +637,10 @@ def geometry_from_console_export(
         != native_artifact_integrity(checked_result)
         or checked["console_result_schema_version"] != checked_result["schema_version"]
         or checked["nonce"] != checked_manifest["nonce"]
+        or checked["runtime_package_fingerprint"]
+        != checked_manifest["environment"]["runtime_package_fingerprint"]
+        or checked["runtime_package_fingerprint"]
+        != checked_result["runtime_package_fingerprint"]
         or checked["final_revision_fingerprint"]
         != checked_result["final_revision_fingerprint"]
         or checked["final_document_binding"]
@@ -656,6 +662,8 @@ def geometry_from_console_export(
         != checked_result["final_document_binding"]["database_instance_fingerprint"]
         or geometry["source"]
         != checked_result["final_document_binding"]["output_copy_binding"]
+        or geometry["binding"]["plugin"]["fingerprint"]
+        != checked_manifest["environment"]["runtime_package_fingerprint"]
         or native_execution_stable_host_binding_digest(
             geometry,
             checked_manifest["marker_policy_binding"],
@@ -707,6 +715,10 @@ def build_native_verification(
         != native_artifact_integrity(checked_manifest)
         or checked_export["console_result_integrity_sha256"]
         != native_artifact_integrity(checked_result)
+        or checked_result["runtime_package_fingerprint"]
+        != checked_manifest["environment"]["runtime_package_fingerprint"]
+        or checked_export["runtime_package_fingerprint"]
+        != checked_result["runtime_package_fingerprint"]
     ):
         raise PipelineError(
             ErrorCode.NATIVE_VERIFICATION_INVALID,
@@ -758,6 +770,9 @@ def build_native_verification(
             "export_integrity_sha256": native_artifact_integrity(checked_export),
             "export_schema_version": checked_export["schema_version"],
         },
+        "runtime_package_fingerprint": checked_result[
+            "runtime_package_fingerprint"
+        ],
         "output_binding": native_output_binding(output_description, now=current),
         "transition_digest": canonical_sha256(
             {

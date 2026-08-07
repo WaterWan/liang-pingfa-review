@@ -262,7 +262,11 @@ def native_apply(
                     ErrorCode.NATIVE_CAPABILITY_MISMATCH,
                     "native apply requires a host executable fingerprint",
                 )
-            client = NativeBridgeClient(checked_session, config=checked_config)
+            client = NativeBridgeClient(
+                checked_session,
+                config=checked_config,
+                component_leases=component_leases,
+            )
             fresh_export = client.export_exact_geometry()
             manifest = build_native_manifest(
                 checked_audit,
