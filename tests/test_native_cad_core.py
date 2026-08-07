@@ -1115,6 +1115,13 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                 self._command_output(completed),
             )
             result = json.loads(completed.stdout.decode("utf-8"))
+            # The SDK-free core intentionally has no knowledge of a loaded
+            # adapter package. The real adapter writer adds this v2 runtime
+            # attestation immediately before it publishes the result.
+            result["runtime_package_fingerprint"] = manifest["environment"][
+                "runtime_package_fingerprint"
+            ]
+            result = attach_integrity(result)
             self.assertEqual(
                 manifest["integrity"]["sha256"],
                 result["manifest_integrity_sha256"],
@@ -1163,6 +1170,13 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                 self._command_output(readback_completed),
             )
             console_export = json.loads(readback_completed.stdout.decode("utf-8"))
+            console_export["runtime_package_fingerprint"] = manifest["environment"][
+                "runtime_package_fingerprint"
+            ]
+            console_export["console_result_integrity_sha256"] = result["integrity"][
+                "sha256"
+            ]
+            console_export = attach_integrity(console_export)
             geometry_from_console_export(
                 manifest,
                 console_export,

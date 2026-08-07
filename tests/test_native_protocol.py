@@ -38,6 +38,7 @@ from liang_pingfa_review.native_bridge import (
     ProcessIdentity,
     WindowsNamedPipe,
     _read_component_dacl,
+    consume_native_bridge_bootstrap,
     consume_native_session,
     prepare_native_session,
     validate_component_dacl,
@@ -266,6 +267,9 @@ class _GeneratedOwnedSecretFile:
 
     def read_chunks(self, _chunk_size: int = 1024 * 1024):
         yield self.payload
+
+    def read_prefix(self, length: int) -> bytes:
+        return self.payload[:length]
 
     def write_bytes(self, payload: bytes) -> None:
         self.payload = payload
@@ -1076,10 +1080,10 @@ class NativeProtocolTests(unittest.TestCase):
         expires_milliseconds = int((clock.value + seconds) * 1000)
         descriptor["monotonic_clock"] = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK
         descriptor["monotonic_boot_id"] = "a" * 32
-        descriptor["monotonic_issued"] = str(
-            expires_milliseconds
-            - native_contracts_module.MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
-        )
+        # Match the persisted whole-second wall interval.  The generated
+        # client tests then vary only the remaining lifetime, rather than
+        # constructing a descriptor with two unrelated signed deadlines.
+        descriptor["monotonic_issued"] = str(int((clock.value - 1) * 1000))
         descriptor["monotonic_expires"] = str(expires_milliseconds)
         return attach_integrity(descriptor)
 
@@ -2201,6 +2205,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         *,
         created_at: datetime | None = None,
         mode: str = "read_only",
+        expires_at: datetime | None = None,
     ) -> NativeBridgeHandshakeContext:
         return NativeBridgeHandshakeContext(
             prepared_process=self._process(descriptor),
@@ -2215,6 +2220,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
             monotonic_boot_id=descriptor["monotonic_boot_id"],
             monotonic_issued=descriptor["monotonic_issued"],
             monotonic_expires=descriptor["monotonic_expires"],
+            expires_at=expires_at,
         )
 
     def test_generated_adapter_gate_binds_the_first_client_health_id(self) -> None:
@@ -2261,21 +2267,25 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         clock: _GeneratedClock,
         *,
         created_at: datetime | None = None,
+        lifetime_milliseconds: int = (
+            native_contracts_module.MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+        ),
     ) -> dict[str, Any]:
         """Build a signed private descriptor from one fake boot clock."""
 
         created = created_at if created_at is not None else clock.current
         issued = int(clock.value * 1000)
+        lifetime = timedelta(milliseconds=lifetime_milliseconds)
         descriptor = session()
         descriptor["created_at"] = format_utc(created)
         descriptor["expires_at"] = format_utc(
-            created + native_contracts_module.MAX_NATIVE_SESSION_LIFETIME
+            created + lifetime
         )
         descriptor["monotonic_clock"] = native_contracts_module.NATIVE_SESSION_MONOTONIC_CLOCK
         descriptor["monotonic_boot_id"] = "a" * 32
         descriptor["monotonic_issued"] = str(issued)
         descriptor["monotonic_expires"] = str(
-            issued + native_contracts_module.MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
+            issued + lifetime_milliseconds
         )
         return attach_integrity(descriptor)
 
@@ -2339,6 +2349,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         created_at: datetime | None = None,
         mode: str = "read_only",
         clock: _GeneratedClock | None = None,
+        expires_at: datetime | None = None,
         session_capabilities: list[str] | None = None,
         omit_bridge_nonce: bool = False,
         invalid_challenge: bool = False,
@@ -2370,6 +2381,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                         else (clock.current if clock is not None else None)
                     ),
                     mode=mode,
+                    expires_at=expires_at,
                 ),
                 config=config(),
                 transport=pipe,
@@ -2422,6 +2434,7 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 *,
                 config: dict[str, Any],
                 session_clock: Any,
+                component_leases: Any,
             ) -> None:
                 self.context = context
                 contexts.append(context)
@@ -2457,8 +2470,11 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 ),
             ),
             mock.patch(
-                "liang_pingfa_review.native_bridge.validate_native_installation",
-                side_effect=lambda _config: events.append("installation"),
+                "liang_pingfa_review.native_bridge.acquire_native_installation_leases",
+                side_effect=lambda _config: SimpleNamespace(
+                    require_bindings=lambda: events.append("installation"),
+                    close=lambda: events.append("installation-close"),
+                ),
             ),
             mock.patch(
                 "liang_pingfa_review.native_bridge.inspect_process",
@@ -2490,12 +2506,21 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
 
         origin = datetime(2030, 1, 1, tzinfo=UTC)
         clock = _GeneratedClock(origin)
-        descriptor = self._clocked_descriptor(clock)
-        context = self._context(descriptor, created_at=origin)
-        # Preparation was long-running, then the wall clock rolled back while
-        # staying inside the strict UTC interval. The uptime clock did not.
-        clock.advance(299)
-        clock.current -= timedelta(seconds=298)
+        descriptor = self._clocked_descriptor(
+            clock,
+            lifetime_milliseconds=120_000,
+        )
+        context = self._context(
+            descriptor,
+            created_at=origin,
+            expires_at=origin + timedelta(minutes=2),
+        )
+        # A short bootstrap-derived session was long-running, then the wall
+        # clock rolled back while staying inside the strict UTC interval. The
+        # original uptime deadline, rather than a renewed five-minute window,
+        # still limits its later RPC.
+        clock.advance(119)
+        clock.current -= timedelta(seconds=118)
         methods: list[str] = []
 
         def handshake_response(request: dict[str, Any]) -> dict[str, Any]:
@@ -2563,19 +2588,23 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
         self.assertEqual(post_handshake_pipe.frame_count, 0)
 
     def test_handshake_after_original_uptime_expiry_publishes_no_descriptor(self) -> None:
-        """Completion never mints a fresh five-minute deadline after session RPC."""
+        """A short bootstrap budget is never renewed after session RPC."""
 
         clock = _GeneratedClock(datetime.now(UTC))
-        descriptor = self._clocked_descriptor(clock)
+        descriptor = self._clocked_descriptor(
+            clock,
+            lifetime_milliseconds=120_000,
+        )
         client, pipe, methods, _selected = self._client(
             descriptor=descriptor,
             clock=clock,
+            expires_at=clock.current + timedelta(minutes=2),
         )
         original_get_session = client.get_session
 
         def delayed_get_session() -> dict[str, Any]:
             result = original_get_session()
-            clock.advance(301)
+            clock.advance(121)
             return result
 
         with mock.patch(
@@ -2769,6 +2798,23 @@ class NativeBridgeHandshakeTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, expected_code)
                 self.assertTrue(client.invalid)
                 self.assertTrue(pipe.closed)
+
+    def test_bridge_rejects_runtime_package_fingerprint_drift(self) -> None:
+        """Health/session plugin identity is the complete package fingerprint."""
+
+        descriptor = session()
+        descriptor["plugin"]["fingerprint"] = "f" * 64
+        descriptor = attach_integrity(descriptor)
+        client, pipe, _methods, _selected = self._client(descriptor=descriptor)
+        with mock.patch(
+            "liang_pingfa_review.native_bridge.inspect_process",
+            return_value=self._process(descriptor),
+        ):
+            with self.assertRaises(PipelineError) as raised:
+                client.complete_session_descriptor()
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_CAPABILITY_MISMATCH)
+        self.assertTrue(client.invalid)
+        self.assertTrue(pipe.closed)
 
     def test_rejects_non_read_only_preparation_before_connecting(self) -> None:
         descriptor = session()
@@ -3467,6 +3513,178 @@ class NativeSessionDescriptorTests(unittest.TestCase):
                 )
 
 
+class NativeBootstrapDescriptorTests(unittest.TestCase):
+    """Exercise the distinct one-use C# bootstrap claim namespace."""
+
+    def setUp(self) -> None:
+        self.parent = Path("/generated/private-bootstrap-root")
+        self.path = self.parent / "bootstrap.json"
+
+    def _consume_patches(self, backend: _GeneratedSessionBackend):
+        chain = _GeneratedDirectoryChain(self.parent)
+        return (
+            mock.patch("liang_pingfa_review.native_bridge._require_windows"),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.lexical_absolute_path",
+                return_value=self.path,
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.platform_backend",
+                return_value=backend,
+            ),
+            mock.patch(
+                "liang_pingfa_review.native_bridge.acquire_lexical_directory_chain",
+                return_value=chain,
+            ),
+        )
+
+    @staticmethod
+    def _bootstrap(
+        *,
+        issued_at: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> dict:
+        issued = (issued_at or datetime.now(UTC)).replace(microsecond=0)
+        expires = (expires_at or issued + timedelta(minutes=2)).replace(
+            microsecond=0
+        )
+        return attach_integrity(
+            {
+                "schema_version": "liang-pingfa/native-bridge-bootstrap/v1",
+                "protocol": {
+                    "version": "liang-pingfa/native-bridge/v1",
+                    "major": 1,
+                    "minor": 0,
+                },
+                "pid": 1234,
+                "pipe": r"\\.\pipe\liang-pingfa-native-a1b2c3d4e5f6g7h8",
+                "mode": "read_only",
+                "adapter": {
+                    "id": "liang-pingfa-autocad-adapter",
+                    "profile": "autocad2025",
+                    "version": "2.0.0",
+                },
+                "plugin": {
+                    "id": "liang-pingfa-autocad-plugin",
+                    "version": "2.0.0",
+                    "fingerprint": "a" * 64,
+                },
+                "host": {
+                    "product": "autocad",
+                    "release": "2025",
+                    "runtime": "net8",
+                    "mode": "full_host",
+                },
+                "process": {
+                    "windows_session_id": 1,
+                    "creation_time_100ns": "123456789",
+                    "instance_fingerprint": "b" * 64,
+                    "executable_fingerprint": "c" * 64,
+                },
+                "capabilities": [
+                    "create_review_marker/v1",
+                    "read.exact_geometry/v1",
+                    "read.inventory/v1",
+                    "translate_dbtext/v1",
+                ],
+                "bootstrap": {
+                    "nonce": "d" * 43,
+                    "config_sha256": "e" * 64,
+                    "issued_at": format_utc(issued),
+                    "expires_at": format_utc(expires),
+                },
+            }
+        )
+
+    def test_claim_is_one_use_canonical_and_private(self) -> None:
+        bootstrap = self._bootstrap()
+        opened = _GeneratedOwnedSecretFile(
+            self.path,
+            payload=canonical_json_bytes(bootstrap),
+        )
+        backend = _GeneratedSessionBackend(self.parent, existing=opened)
+        with ExitStack() as stack:
+            for patcher in self._consume_patches(backend):
+                stack.enter_context(patcher)
+            with consume_native_bridge_bootstrap(self.path) as claimed:
+                self.assertEqual(claimed, bootstrap)
+        self.assertTrue(opened.renamed)
+        self.assertTrue(opened.delete_requested)
+        self.assertTrue(opened.closed)
+        self.assertFalse(backend.path_exists(opened.path))
+        self.assertTrue(
+            opened.path.name.startswith(".liang-pingfa-native-bootstrap-claimed-")
+        )
+
+    def test_concrete_bootstrap_rejects_forged_tssd_profile(self) -> None:
+        forged = self._bootstrap()
+        forged["adapter"]["profile"] = "tssd2025"
+        with self.assertRaises(PipelineError):
+            validate_native_contract("bootstrap", attach_integrity(forged))
+
+    def test_concrete_bootstrap_rejects_mismatched_autocad_host_identity(self) -> None:
+        forged = self._bootstrap()
+        forged["host"]["release"] = "2024"
+        forged["host"]["runtime"] = "net48"
+        with self.assertRaises(PipelineError):
+            validate_native_contract("bootstrap", attach_integrity(forged))
+
+    def test_replay_stale_and_expired_bootstraps_fail_before_pipe_use(self) -> None:
+        cases = (
+            (
+                "expired",
+                self._bootstrap(
+                    issued_at=datetime.now(UTC) - timedelta(minutes=3),
+                    expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                ),
+                self.path,
+            ),
+            (
+                "stale-claimed-name",
+                self._bootstrap(),
+                self.parent
+                / (".liang-pingfa-native-bootstrap-claimed-" + "a" * 64 + ".json"),
+            ),
+        )
+        for label, bootstrap, candidate in cases:
+            with self.subTest(label=label):
+                opened = _GeneratedOwnedSecretFile(
+                    candidate,
+                    payload=canonical_json_bytes(bootstrap),
+                )
+                backend = _GeneratedSessionBackend(self.parent, existing=opened)
+                self.path = candidate
+                with ExitStack() as stack:
+                    for patcher in self._consume_patches(backend):
+                        stack.enter_context(patcher)
+                    with self.assertRaises(PipelineError) as raised:
+                        with consume_native_bridge_bootstrap(candidate):
+                            self.fail("invalid bootstrap reached a consumer")
+                self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+                if label == "expired":
+                    self.assertTrue(opened.renamed)
+                    self.assertTrue(opened.delete_requested)
+                else:
+                    self.assertFalse(opened.renamed)
+        self.path = self.parent / "bootstrap.json"
+
+    def test_oversized_bootstrap_fails_before_hash_parse_or_pipe_use(self) -> None:
+        opened = _GeneratedOwnedSecretFile(
+            self.path,
+            payload=b"x" * (native_bridge_module._BOOTSTRAP_MAX_BYTES + 1),
+        )
+        backend = _GeneratedSessionBackend(self.parent, existing=opened)
+        with ExitStack() as stack:
+            for patcher in self._consume_patches(backend):
+                stack.enter_context(patcher)
+            with self.assertRaises(PipelineError) as raised:
+                with consume_native_bridge_bootstrap(self.path):
+                    self.fail("oversized bootstrap reached a consumer")
+        self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_INVALID)
+        self.assertFalse(opened.renamed)
+        self.assertTrue(opened.closed)
+
+
 @unittest.skipUnless(os.name == "nt", "Windows named-pipe APIs are Windows-only")
 class WindowsNamedPipeTests(unittest.TestCase):
     """Exercise production overlapped I/O against generated local pipes only."""
@@ -3570,8 +3788,10 @@ class WindowsNamedPipeTests(unittest.TestCase):
                 # named pipe. Component installation is deliberately outside
                 # this source-free protocol test and is independently tested
                 # by the retained-installation/DACL suite.
+                component_leases = mock.Mock()
                 with mock.patch(
-                    "liang_pingfa_review.native_bridge.validate_native_installation"
+                    "liang_pingfa_review.native_bridge.acquire_native_installation_leases",
+                    return_value=component_leases,
                 ):
                     descriptor = prepare_native_session(
                         pid=process.pid,
@@ -3591,7 +3811,11 @@ class WindowsNamedPipeTests(unittest.TestCase):
                 # the preparation client closes the first one.
                 time.sleep(0.1)
                 with consume_native_session(descriptor_path) as consumed:
-                    client = NativeBridgeClient(consumed, config=config())
+                    client = NativeBridgeClient(
+                        consumed,
+                        config=config(),
+                        component_leases=component_leases,
+                    )
                     try:
                         self.assertEqual(client.health()["kind"], "health")
                         self.assertEqual(
@@ -3647,7 +3871,11 @@ class WindowsNamedPipeTests(unittest.TestCase):
                     side_effect=advancing_utc_now,
                 ),
             ):
-                client = NativeBridgeClient(descriptor, config=config())
+                client = NativeBridgeClient(
+                    descriptor,
+                    config=config(),
+                    component_leases=mock.Mock(),
+                )
                 with self.assertRaises(PipelineError) as raised:
                     client.health()
             self.assertEqual(raised.exception.code, ErrorCode.NATIVE_SESSION_EXPIRED)
