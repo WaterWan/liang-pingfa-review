@@ -87,6 +87,13 @@ unless file ID, creation time, size, last-write time, and two independent
 complete-file hashes agree before, between, and after the passes. These
 trusted-local-session proof inputs are folded into opaque binding fingerprints
 and are never emitted as timestamps or raw hashes in public logs.
+The public `file_identity_fingerprint` is deliberately narrower and frozen
+across Python and C#: canonical SHA-256 over
+`creation_time_100ns`, NTFS volume serial (`first`), `windows-file-id`
+namespace, and the unsigned high/low-combined file index (`second`). Size and
+last-write time are excluded from that identity digest but remain mandatory
+independent stable-capture checks; source SHA-256, byte size, header, and path
+fingerprint remain their separate source-binding fields.
 
 The typed `CoreManifestV2` binds the exact prewrite/private-input source and
 a v2 `FinalOutputConstraintsV2` authorization, never predicted final bytes.
@@ -228,22 +235,25 @@ dotnet build native-cad\src\LiangPingfa.NativeCad.AutoCAD.Adapter\LiangPingfa.Na
   -p:UseAutodeskApiStubs=true `
   -p:CadHostProfile=autocad2025
 
-# Licensed operator build. CadSdkDir is an explicit local, non-reparse SDK
-# directory containing AcMgd.dll, AcDbMgd.dll, and AcCoreMgd.dll.
-dotnet build native-cad\src\LiangPingfa.NativeCad.AutoCAD.Adapter\LiangPingfa.NativeCad.AutoCAD.Adapter.csproj `
-  -c Release --nologo `
-  -p:BuildAutoCadAdapter=true `
-  -p:UseAutodeskApiStubs=false `
-  -p:CadHostProfile=autocad2025 `
-  -p:CadSdkDir=<absolute-licensed-sdk-directory>
+# Licensed operator package. Every path is explicit; the receipt stays under
+# an existing current-user/SYSTEM-only private NTFS root.
+native-cad\scripts\build-autocad-adapter.ps1 `
+  -Profile autocad2025 `
+  -CadSdkDir <absolute-licensed-sdk-directory> `
+  -PackageDirectory <new-operator-package-directory> `
+  -PrivateRoot <existing-private-ntfs-root> `
+  -ReceiptPath <existing-private-ntfs-root>\adapter-build-receipt.json
 ```
 
-Profiles are explicit: `autocad2024`/`tssd2024` use `net48`;
-`autocad2025`/`tssd2025` and `autocad2026`/`tssd2026` use
-`net8.0-windows`. Autodesk's AutoCAD 2026 managed API documentation specifies
-.NET 8 compatibility; this project does not guess or target .NET 10.
-`tssd*` aliases are source build profiles only and remain unqualified until
-private licensed-host evidence is supplied.
+Profiles are explicit: `autocad2024` uses `net48`; `autocad2025` uses
+`net8.0-windows`; and `autocad2026` uses `net10.0-windows`. Autodesk's current
+[managed .NET compatibility table](https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Customization/files/GUID-A6C680F2-DE2E-418A-A182-E4884073338A.htm)
+specifies .NET 10 for AutoCAD 2026 Update 1.2 and later. The explicit 2026
+profile therefore must not be compiled as .NET 8.
+TSSD is not implemented, built, advertised, or qualified by this concrete
+AutoCAD adapter. A future TSSD integration must use a distinct adapter ID and
+version with TSSD-specific product identity, plugin/vendor evidence, and any
+required object enablers; it must not label an AutoCAD host as TSSD.
 
 `UseAutodeskApiStubs=true` builds against the project-owned, reflection-marked
 syntax-only declarations. The stub DLL is never copied to adapter output or a
@@ -252,7 +262,167 @@ only; it is not runtime qualification. Real mode rejects missing/relative/
 reparse SDK paths, copied SDK files, `pack`, and `publish`. It never searches
 PATH, the registry, Program Files, or downloads a vendor SDK.
 
-The optional `LiangPingfa.NativeCad.AutoCAD.RealHost.Tests` project prints
-`SKIP` unless an operator explicitly supplies licensed SDK/Core Console and a
-generated private fixture. It is intentionally not public-CI evidence and
-does not access user drawings.
+The optional `LiangPingfa.NativeCad.AutoCAD.RealHost.Tests` project is a
+single `net8.0-windows`, SDK-free qualification launcher. It prints `SKIP`
+unless an operator explicitly supplies a Core Console and generated private
+fixture. It accepts the profile-specific adapter package only as an external
+path passed to the PowerShell qualification script; it never links, reflects
+over, or loads that adapter assembly. This lets the same runner build for the
+2024, 2025, and .NET 10-based 2026 profiles without cross-TFM references. It
+is intentionally not public-CI evidence and does not access user drawings.
+
+When launching this runner, set the opt-in gates `LPF_REALHOST_TESTS=1` and
+`LIANG_PINGFA_RUN_REAL_HOST=1`; all bindings are explicit environment variables:
+`LPF_REALHOST_PHASE`, `LPF_REALHOST_PROFILE`, `LPF_REALHOST_PYTHON`,
+`LPF_REALHOST_HOST`, `LPF_REALHOST_CORE_CONSOLE`,
+`LPF_REALHOST_ADAPTER_PACKAGE`, `LIANG_PINGFA_REAL_HOST_RECEIPT`,
+`LPF_REALHOST_NATIVE_CONFIG`, `LPF_REALHOST_BOOTSTRAP`,
+`LPF_REALHOST_SESSION`, `LPF_REALHOST_SOURCE`, `LPF_REALHOST_WORK_ROOT`,
+`LPF_REALHOST_EVIDENCE_OUTPUT`, `LPF_REALHOST_REPOSITORY_ROOT`, and
+`LPF_REALHOST_POWERSHELL`. `LIANG_PINGFA_REAL_HOST_RECEIPT` is required to
+be the existing, normal absolute local path of the current-user/SYSTEM-only
+private build receipt generated by `build-autocad-adapter.ps1`; the runner
+checks that path and its owner/DACL before forwarding it exactly once as
+`-ReceiptPath`. Receipt schema, integrity, package, and runtime binding
+validation remain authoritative in `qualify-real-host.ps1`. The runner never
+prints the receipt path, content, or hashes.
+
+`build-autocad-adapter.ps1` and `qualify-real-host.ps1` support **Windows
+PowerShell 5.1+** and PowerShell 7+. Their repository-owned compatibility
+helper avoids PowerShell 7-only JSON/hash APIs. Before qualification accepts a
+receipt, Python performs strict duplicate-key parsing, schema/receipt
+validation, and complete package verification; PowerShell JSON conversion is
+never a receipt trust boundary.
+
+For example, retain the private receipt only in the current shell:
+
+```powershell
+$env:LPF_REALHOST_TESTS = "1"
+$env:LIANG_PINGFA_RUN_REAL_HOST = "1"
+$env:LIANG_PINGFA_REAL_HOST_RECEIPT = <private-root>\adapter-build-receipt.json
+dotnet run --project native-cad\tests\LiangPingfa.NativeCad.AutoCAD.RealHost.Tests `
+  -c Release --nologo
+```
+
+## Private operator flow: bootstrap, audit, translate, fresh readback
+
+The actual source supports automatic `DBText` translation in its narrow,
+field-free direct-Modelspace profile. It does not automate AutoCAD UI,
+mouse/focus, NETLOAD, or selection. A licensed operator must perform these
+steps on a clean, saved document and a private working copy:
+
+1. Install the supported licensed AutoCAD host and matching managed SDK,
+   then use `build-autocad-adapter.ps1` above. The package contains only
+   repository-authored adapter/core/protocol DLLs, profile-required adapter
+   `.deps.json`, PDBs, docs, and a context template—never `Ac*.dll`, object
+   enablers, SDK files, or syntax stubs. Its private v2 receipt records the
+   exact allowlist and hashes every package file. Its **critical runtime
+   package** is profile-specific:
+
+   | Profile | Target framework | Critical runtime files |
+   | --- | --- | --- |
+   | `autocad2024` | `net48` | `LiangPingfa.NativeCad.AutoCAD.Adapter.dll`, `LiangPingfa.NativeCad.Core.dll`, `LiangPingfa.NativeCad.Protocol.dll` |
+   | `autocad2025` | `net8.0-windows` | the three DLLs plus `LiangPingfa.NativeCad.AutoCAD.Adapter.deps.json` |
+   | `autocad2026` | `net10.0-windows` | the three DLLs plus `LiangPingfa.NativeCad.AutoCAD.Adapter.deps.json` |
+
+   The package fingerprint is SHA-256 over the package-format version,
+   profile, target framework, and ordinal-sorted NFC file-name/byte-size/
+   SHA-256 records. PDBs, docs, and the template remain receipt-allowlisted
+   but are not critical runtime inputs. A missing, renamed, case-colliding,
+   substituted, or extra file fails receipt/config/qualification validation.
+   The receipt and all SDK hashes are private and ignored by Git.
+2. Create a current-user/SYSTEM-only private NTFS root, native config, and
+   bootstrap context. The config's optional `bootstrap` object carries the
+   exact base64url nonce and whole-second expiry. Its required
+   `runtime_package` object copies the receipt's format/profile/framework/
+   fingerprint/components and adds only the private package directory; both
+   plugin entries carry the same `runtime_package_fingerprint` while their
+   `sha256` remains the adapter DLL hash. Set the same nonce, expiry,
+   canonical config SHA-256, runtime-package fingerprint, private root, and
+   new output path through the
+   exact `LIANG_PINGFA_NATIVE_BOOTSTRAP_NONCE`,
+   `LIANG_PINGFA_NATIVE_BOOTSTRAP_EXPIRES_AT`,
+   `LIANG_PINGFA_NATIVE_BOOTSTRAP_CONFIG_SHA256`, and
+   `LIANG_PINGFA_NATIVE_BOOTSTRAP_OUTPUT` variables (plus
+   `LIANG_PINGFA_NATIVE_PRIVATE_ROOT` and
+   `LIANG_PINGFA_NATIVE_BOOTSTRAP_RUNTIME_PACKAGE_SHA256`). The SHA-256 is
+   over Python's canonical validated config object, not arbitrary
+   pretty-printed bytes. For example, with the private config path held only
+   in the current shell:
+
+   ```powershell
+   $env:LPF_BOOTSTRAP_CONFIG = <private-config.json>
+   $configHash = python -c "import os; from pathlib import Path; from liang_pingfa_review.canonical import canonical_sha256; from liang_pingfa_review.native_contracts import load_native_config; print(canonical_sha256(load_native_config(Path(os.environ['LPF_BOOTSTRAP_CONFIG']))))"
+   $env:LIANG_PINGFA_NATIVE_BOOTSTRAP_CONFIG_SHA256 = $configHash
+   $env:LIANG_PINGFA_NATIVE_BOOTSTRAP_RUNTIME_PACKAGE_SHA256 = <receipt-runtime-package-fingerprint>
+   ```
+3. Manually NETLOAD the operator package from an AutoCAD trusted location.
+   In the explicitly selected, clean saved document, manually run
+   `LPF_NATIVE_BRIDGE_BOOTSTRAP`. It creates exactly one bounded private
+   `native-bridge-bootstrap/v1` advertisement with current-user/SYSTEM DACL,
+   no replacement, no session ID, and a process/plugin/config/nonce binding.
+4. Let Python atomically consume that one-use file; never put the pipe,
+   nonce, or bootstrap path in a log:
+
+   ```powershell
+   python -m liang_pingfa_review native-session prepare `
+     --bootstrap <private-bootstrap.json> `
+     --native-config <private-config.json> `
+     --session-out <new-private-audit-session.json>
+   python -m liang_pingfa_review native-audit `
+     --input <authorized-private-source.dwg> `
+     --session <new-private-audit-session.json> `
+     --audit-out <new-private-audit.json> `
+     --report-out <new-private-audit.md> `
+     --native-config <private-config.json>
+   ```
+
+5. Review or create a private translation intent, run `native-plan`, then
+   manually create a **fresh** bootstrap in the unchanged full host. A session
+   descriptor and bootstrap are one-use by design; Python prepares a fresh
+   apply session before `native-apply`. The apply command saves only a new
+   output copy and runs the fixed Core Console write plus independent fresh
+   readback verification. Run `native-verify` on that output.
+
+For a generated, authorized private fixture only, the opt-in
+`qualify-real-host.ps1` runs the two explicit phases (`audit`, then `apply`)
+with `LIANG_PINGFA_RUN_REAL_HOST=1`. It never launches or controls a GUI. It
+requires the private `-ReceiptPath` produced by the build, hashes every
+receipt-listed runtime component before bootstrap and immediately before
+apply, and repeats receipt/package/config checks after audit and after
+readback/verification. It rejects a missing/tampered receipt, package-root
+switch, unlisted file, missing metadata, or same-size Core/Protocol/deps
+substitution before a success/evidence record can be published. It separately
+records source hash/identity/mtime before and after, requires changed output
+bytes, and requires the no-reparse full-host executable's SHA-256 to equal
+the integrity-checked audit/session fingerprint and the private native
+configuration's full-host binding. Core Console remains independently bound
+to its configured executable fingerprint, while both write/readback adapter
+results must advertise the same runtime-package fingerprint. Private state
+retains matching digests, while the redacted summary exposes neither host
+path nor digest. Passing its dry-run or any public stub build is not runtime
+qualification.
+TSSD has no profile in this build or qualification path; qualifying it
+requires the distinct, TSSD-specific adapter and evidence described above.
+
+The audit phase explicitly receives the same private receipt that built the
+package; the apply phase repeats it with a fresh bootstrap:
+
+```powershell
+native-cad\scripts\qualify-real-host.ps1 `
+  -Phase audit -Profile autocad2025 `
+  -PythonExecutable <python.exe> `
+  -HostExecutable <licensed-full-host.exe> `
+  -CoreConsoleExecutable <licensed-core-console.exe> `
+  -AdapterPackage <operator-package-directory> `
+  -ReceiptPath <private-root>\adapter-build-receipt.json `
+  -NativeConfig <private-root>\native-config.json `
+  -Bootstrap <private-root>\bootstrap.json `
+  -SessionPath <private-root>\audit-session.json `
+  -SourceDrawing <private-root>\liang-pingfa-qualification-fixture.dwg `
+  -WorkRoot <private-root> -EvidenceOutput <private-evidence-root>
+```
+
+`-Phase apply` uses the same immutable package/config/receipt values but a
+new bootstrap and session path. Do not replace a package directory, receipt,
+or any component between phases.

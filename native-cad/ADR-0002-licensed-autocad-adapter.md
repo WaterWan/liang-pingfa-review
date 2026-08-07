@@ -37,14 +37,19 @@ The supported compilation profiles are:
 
 | Profile | Target framework | Status |
 | --- | --- | --- |
-| `autocad2024`, `tssd2024` | `net48` | source/stub only |
-| `autocad2025`, `tssd2025` | `net8.0-windows` | source/stub only |
-| `autocad2026`, `tssd2026` | `net8.0-windows` | source/stub only |
+| `autocad2024` | `net48` | source/stub only |
+| `autocad2025` | `net8.0-windows` | source/stub only |
+| `autocad2026` | `net10.0-windows` | source/stub only |
 
-Autodesk's AutoCAD 2026 managed API documentation states .NET 8
-compatibility. The project therefore does not assume a .NET 10 host. TSSD
-profiles are aliases that make source compilation explicit; they are
-unqualified until a licensed operator records private evidence.
+Autodesk's current [AutoCAD 2026 managed compatibility
+table](https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Customization/files/GUID-A6C680F2-DE2E-418A-A182-E4884073338A.htm)
+specifies .NET 10 for Update 1.2 and later (while 2026 through Update 1.1
+used .NET 8). The explicit 2026 source profile tracks the current supported
+API and must not silently retain `net8.0-windows`. TSSD is not implemented
+or qualified by this adapter. The vendor-neutral protocol can support a
+future external TSSD adapter only under a distinct adapter ID/version with
+TSSD-specific product identity, plugin/vendor evidence, and object-enabler
+requirements; it cannot route TSSD through this AutoCAD implementation.
 
 The plugin registers only `LPF_NATIVE_BRIDGE_BOOTSTRAP`,
 `LPF_NATIVE_EXECUTE_MANIFEST`, and `LPF_NATIVE_EXPORT_MANIFEST`. All command
@@ -59,6 +64,16 @@ only session ID, and the server atomically adopts the first valid `health`
 request's ID for that pipe lifetime. Static `health` requires no drawing
 access; `get_session` captures the first document snapshot only after the
 bootstrap command has returned.
+
+The persisted `native-bridge-bootstrap/v1` advertisement is an exact,
+bounded, canonical, one-use private file below an explicit private NTFS root.
+It is no-replace, current-user/SYSTEM DACL-checked, and binds schema/protocol,
+PID/pipe/process identity, read-only mode, adapter/plugin/host/runtime,
+canonical capabilities, expiry, nonce, and canonical private-config SHA-256.
+Python atomically renames and claims it before parsing or pipe use; a replay,
+wrong config, nonce mismatch, expiry, reparse/DACL failure, host/plugin/
+capability mismatch, PID reuse, or process image drift fails before a pipe
+connection. The advertisement never carries a session ID.
 
 The adapter maps deterministic handles, owners, physical container order,
 direct Modelspace `DBText`, `LINE`, and simple zero-bulge `LWPOLYLINE`.
@@ -154,6 +169,41 @@ hashes. Transaction snapshots reuse that immutable binding rather than
 hashing the DWG once per operation. It rehashes only at security boundaries:
 immediately before the write transaction, immediately before `SaveAs`, after
 save/reopen for the final binding, and before readback/result publication.
+The artifact-safe `file_identity_fingerprint` is a different, frozen
+cross-language projection: canonical SHA-256 of only
+`creation_time_100ns`, volume serial `first`, `windows-file-id` namespace,
+and unsigned combined file index `second`. Byte size and last-write time are
+not identity components; they remain separate stability/content proof checks,
+as do source SHA-256, header, and path fingerprint.
+
+The deployable adapter is a complete repository-authored runtime package, not
+an adapter-DLL-only identity. Its v1 package record hashes the format version,
+explicit AutoCAD profile, profile TFM, and ordinal-sorted NFC
+`name/byte-size/SHA-256` records. Every profile contains Adapter/Core/Protocol;
+2025/2026 additionally require the adapter `.deps.json`. PDBs, README, and
+the bootstrap template may accompany the package but remain noncritical
+receipt allowlist entries. The private v2 build receipt hashes every allowed
+file, contains all critical component records and the package fingerprint, and
+never includes Autodesk, TSSD, object-enabler, or syntax-stub binaries.
+
+The active v2 config repeats the package descriptor (with a private package
+directory) and each plugin carries the same runtime-package fingerprint while
+retaining its direct Adapter DLL hash. Python leases every critical component
+and its ancestor DACL through bridge/Core Console completion, rechecks the
+aggregate package fingerprint, and rejects unexpected/case-colliding package
+entries. The adapter recomputes the same fingerprint from its own directory
+before bootstrap, every bridge operation, Core Console manifest processing,
+and result/export publication. Bridge v1's structural DTO is frozen: its
+existing plugin fingerprint carries the runtime-package fingerprint; no v1
+field is added. Active v2 audit/plan/manifest/result/export/verification
+artifacts bind that value explicitly where their schemas permit it.
+
+The qualification runner receives a mandatory private receipt path. It checks
+receipt integrity, the complete directory allowlist, every component
+hash/size, config/package agreement, and distinct host/Core Console
+executables before bootstrap, after audit, immediately before apply, and after
+readback/verification. A receipt/package mismatch cannot produce an evidence
+success record.
 
 ## Consequences
 
@@ -161,10 +211,28 @@ Public CI compiles source using the original syntax-only stubs, exercises
 reflection/static checks, and verifies missing-SDK/pack/publish/copy failure
 paths. It does **not** load AutoCAD, TSSD, RealDWG, an object enabler, or a
 user drawing. Passing public checks does not establish runtime compatibility,
-license compliance, save behavior, or TSSD qualification.
+license compliance, save behavior, or any TSSD qualification.
 
 `LiangPingfa.NativeCad.AutoCAD.RealHost.Tests` is intentionally optional. It
 skips unless an operator explicitly provides a licensed SDK, Core Console,
 and generated private fixture. The initial real-host qualification matrix
 requires translation evidence only; it does not require or claim delete.
 Such private evidence is required before any runtime qualification statement.
+
+The operator-facing `build-autocad-adapter.ps1` accepts no discovered SDK:
+`-Profile`, `-CadSdkDir`, package destination, private root, and receipt path
+are explicit. It validates fixed local NTFS/no-reparse inputs, references only
+the three named Autodesk DLLs with `Private=false`, packages only
+repository-authored output, and records private fingerprints. It does not
+pack/publish or copy a vendor/stub binary. `qualify-real-host.ps1` similarly
+requires an explicit host, Core Console, package, config, bootstrap, session,
+source, work root, and evidence root. Its separate audit/apply phases force a
+fresh manual bootstrap/session before mutation and never automate GUI input or
+NETLOAD.
+
+Both operator scripts support Windows PowerShell 5.1+ and PowerShell 7+.
+Their shared helper uses .NET Framework `BitConverter` for lowercase hash
+encoding and ordered ordinal JSON conversion rather than PowerShell 7-only
+APIs. PowerShell parsing is not a receipt trust boundary: qualification first
+uses Python's strict duplicate-key parser, receipt/schema validation, and full
+package verification.

@@ -350,13 +350,19 @@ CAD 快照执行固定 manifest 的 `translate_dbtext`、`delete_auxiliary_overl
 before/allowed-delta/after 读回验证。它还包含原创的、**仅语法**
 `Autodesk.*` API stub，以便下一检查点编写窄适配器边界。
 
-这只是内存模型、协议与回滚语义的可执行证明；不加载厂商 SDK、没有 AutoCAD
-命令、不能部署，且**不证明**真实 AutoCAD、RealDWG、TSSD、ODA 或任何宿主
-事务运行时兼容性。实际 AutoCAD adapter 和命令映射仍在下一检查点，当前不得将
-stub 或核心测试称为真实宿主能力。
+SDK-free core/stub 测试仍只证明内存模型、协议与回滚语义，绝不证明真实
+AutoCAD、RealDWG、TSSD、ODA 或任何宿主事务运行时兼容性。仓库现在也提供
+受控的实际 AutoCAD adapter **源码**、private bootstrap 和 operator scripts；
+它们使持证操作人员能够构建、手动 NETLOAD、Python audit/plan/copy-only apply/
+fresh readback，但不让 public CI、stub 或 fake-SDK 测试变成运行时资格声明。
+完整受许可流程见 `native-cad/README.md`。
 
-操作人员必须显式选择外部适配器、PID 和其公布的本地随机命名管道；工具绝不
-枚举第一个进程、扫描 PATH/注册表、选择窗口或在 ODA/原生之间自动回退。协议
+操作人员可显式选择 PID/pipe，也可使用
+`native-session prepare --bootstrap <private-file> --native-config <private-config>`：
+Python 原子 claim 一次性的 C# bootstrap advertisement，并在连接前验证 private
+DACL/reparse、expiry、nonce/config SHA-256、adapter/plugin/host/capability 和进程
+identity。bootstrap 不含 session ID；Python 仍是唯一 session ID owner。工具绝不
+枚举第一个进程、扫描 PATH/注册表、选择窗口、自动 NETLOAD 或在 ODA/原生之间自动回退。协议
 仅允许固定的只读 health/session/document/inventory/精确几何导出请求，绑定
 进程创建时间、Windows 会话、服务器 PID、nonce/challenge、文档、插件、协议
 和能力。未知方法、额外帧、文档漂移或会话过期都会失败关闭。
