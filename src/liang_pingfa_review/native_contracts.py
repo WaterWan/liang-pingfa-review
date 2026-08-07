@@ -67,6 +67,16 @@ from .native_protocol import (
     NativeProtocolError,
     derive_challenge_response,
 )
+from .runtime_package import (
+    ADAPTER_ASSEMBLY,
+    CORE_ASSEMBLY,
+    PROTOCOL_ASSEMBLY,
+    build_runtime_package_descriptor,
+    normalize_runtime_package_descriptor,
+    required_runtime_component_names,
+    runtime_component_by_name,
+    target_framework_for_profile,
+)
 
 
 NativeArtifactKind = Literal[
@@ -82,6 +92,7 @@ NativeArtifactKind = Literal[
 ]
 NativeSchemaKind = Literal[
     "config",
+    "bootstrap",
     "request",
     "response",
     "inventory",
@@ -106,6 +117,9 @@ _SCHEMA_FILES: dict[NativeSchemaKind, str] = {
     # acquire session-lifetime or write-authorization fields.
     "request": "native-bridge-request-v1.schema.json",
     "response": "native-bridge-response-v1.schema.json",
+    # A bootstrap advertisement is a separate, private, one-use descriptor.
+    # It is not a session and never carries a Python-owned session ID.
+    "bootstrap": "native-bridge-bootstrap-v1.schema.json",
     # Every active persisted/native-workflow artifact uses an explicit v2
     # namespace.  v1 files are retained only by _SUPPORTED_SCHEMA_FILES for
     # legacy validation, reporting, and deliberately narrow migration.
@@ -124,6 +138,7 @@ _SCHEMA_FILES: dict[NativeSchemaKind, str] = {
 
 _ACTIVE_SCHEMA_VERSIONS: Final[dict[NativeSchemaKind, str]] = {
     "config": "liang-pingfa/native-adapter-config/v2",
+    "bootstrap": "liang-pingfa/native-bridge-bootstrap/v1",
     "request": "liang-pingfa/native-bridge/v1",
     "response": "liang-pingfa/native-bridge/v1",
     "inventory": "liang-pingfa/native-inventory-export/v2",
@@ -147,6 +162,9 @@ _SUPPORTED_SCHEMA_FILES: Final[dict[NativeSchemaKind, dict[str, str]]] = {
     "config": {
         "liang-pingfa/native-adapter-config/v1": "native-adapter-config-v1.schema.json",
         "liang-pingfa/native-adapter-config/v2": "native-adapter-config-v2.schema.json",
+    },
+    "bootstrap": {
+        "liang-pingfa/native-bridge-bootstrap/v1": "native-bridge-bootstrap-v1.schema.json",
     },
     "request": {
         "liang-pingfa/native-bridge/v1": "native-bridge-request-v1.schema.json",
@@ -233,6 +251,11 @@ MAX_NATIVE_SEGMENTS: Final = MAX_NATIVE_GEOMETRY_SEGMENTS
 MAX_TRANSLATION = 1_000_000.0
 PRIVATE_RECORD_CARDINALITY: Final = "explicit_private"
 AUTOCAD_ADAPTER_ID: Final = "liang-pingfa-autocad-adapter"
+_AUTOCAD_ADAPTER_PROFILES: Final[dict[str, tuple[str, str]]] = {
+    "autocad2024": ("2024", "net48"),
+    "autocad2025": ("2025", "net8"),
+    "autocad2026": ("2026", "net10"),
+}
 _OPERATION_PROFILE_CAPABILITIES: Final[dict[str, str]] = {
     "translate_dbtext/v1": "translate_dbtext/v1",
     "delete_auxiliary_overlay_text/v1": "delete_auxiliary_overlay_text/v1",
@@ -544,6 +567,8 @@ def attach_native_integrity(
 def _error_for(kind: NativeSchemaKind) -> ErrorCode:
     if kind == "config":
         return ErrorCode.NATIVE_CONFIG_INVALID
+    if kind == "bootstrap":
+        return ErrorCode.NATIVE_SESSION_INVALID
     if kind in {"request", "response", "inventory"}:
         return ErrorCode.NATIVE_PROTOCOL_INVALID
     return _ARTIFACT_ERRORS[kind]
@@ -1179,7 +1204,7 @@ def geometry_adapter_binding(export: Mapping[str, Any]) -> dict[str, Any]:
     binding = cast(Mapping[str, Any], export["binding"])
     adapter = cast(Mapping[str, Any], binding["adapter"])
     plugin = cast(Mapping[str, Any], binding["plugin"])
-    return {
+    result = {
         "adapter_id": adapter["id"],
         "adapter_profile": adapter["profile"],
         "adapter_version": adapter["version"],
@@ -1190,6 +1215,12 @@ def geometry_adapter_binding(export: Mapping[str, Any]) -> dict[str, Any]:
         "protocol_minor": binding["protocol_minor"],
         "capabilities_digest": canonical_sha256(binding["capabilities"]),
     }
+    # Frozen v1 evidence has no package-runtime field. Preserve its original
+    # projection exactly; active v2 carries the explicit duplicate so public
+    # audit/plan records visibly bind the complete loaded package.
+    if is_active_native_contract("geometry", export):
+        result["runtime_package_fingerprint"] = plugin["fingerprint"]
+    return result
 
 
 def prewrite_revision_binding(
@@ -1538,7 +1569,7 @@ def native_host_binding(
     expected_plugin = {
         "id": config["plugins"]["readback"]["id"],
         "version": config["plugins"]["readback"]["version"],
-        "fingerprint": config["plugins"]["readback"]["sha256"],
+        "fingerprint": config["plugins"]["readback"]["runtime_package_fingerprint"],
     }
     capabilities = sorted(cast(list[str], session["capabilities"]))
     if (
@@ -1560,6 +1591,9 @@ def native_host_binding(
                 "geometry_limits": config["geometry_limits"],
                 "marker_policy": native_marker_policy_binding(config),
                 "operation_profiles": config["operation_profiles"],
+                "runtime_package_fingerprint": config["runtime_package"][
+                    "fingerprint"
+                ],
                 "write_revision_transition": config["write_revision_transition"],
             },
             "core_console_fingerprint": config["core_console"]["sha256"],
@@ -1574,10 +1608,83 @@ def native_host_binding(
             "write_plugin": {
                 "fingerprint": config["plugins"]["write"]["sha256"],
                 "id": config["plugins"]["write"]["id"],
+                "runtime_package_fingerprint": config["plugins"]["write"][
+                    "runtime_package_fingerprint"
+                ],
                 "version": config["plugins"]["write"]["version"],
             },
         }
     )
+
+
+def require_qualification_host_binding(
+    audit: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    host_executable_sha256: str,
+    profile: str,
+) -> None:
+    """Require private audit/config evidence for one retained full-host binary.
+
+    Callers must load persisted values through :func:`load_native_artifact`
+    and :func:`load_native_config`; this helper deliberately accepts only
+    their already bounded, integrity-checked mappings.  Core Console is
+    intentionally absent: its separate configured role is checked by the
+    qualification launcher rather than compared to a full-host audit.
+    """
+
+    checked_audit = require_active_native_contract("audit", audit)
+    checked_config = require_active_native_contract("config", config)
+    if re.fullmatch(r"[a-f0-9]{64}", host_executable_sha256) is None:
+        raise PipelineError(
+            ErrorCode.NATIVE_CAPABILITY_MISMATCH,
+            "qualification host executable fingerprint is invalid",
+        )
+    compatibility = cast(Mapping[str, Any], checked_config["host_compatibility"])
+    expected_host = {
+        "product": compatibility["host_product"],
+        "release": compatibility["host_release"],
+        "runtime": compatibility["host_runtime"],
+        "mode": compatibility["audit_host_mode"],
+    }
+    expected_adapter = {
+        "adapter_id": checked_config["adapter"]["id"],
+        "adapter_profile": checked_config["adapter"]["profile"],
+        "adapter_version": checked_config["adapter"]["version"],
+        "plugin_id": checked_config["plugins"]["readback"]["id"],
+        "plugin_version": checked_config["plugins"]["readback"]["version"],
+        "plugin_fingerprint": checked_config["plugins"]["readback"][
+            "runtime_package_fingerprint"
+        ],
+        "runtime_package_fingerprint": checked_config["runtime_package"][
+            "fingerprint"
+        ],
+        "protocol_major": checked_config["protocol"]["major"],
+        "protocol_minor": checked_config["protocol"]["minor"],
+    }
+    audited_adapter = cast(Mapping[str, Any], checked_audit["adapter_binding"])
+    if (
+        checked_audit["host_executable_fingerprint"] == "unavailable"
+        or not compare_digest(
+            host_executable_sha256,
+            cast(str, checked_audit["host_executable_fingerprint"]),
+        )
+        or not compare_digest(
+            host_executable_sha256,
+            cast(str, checked_config["full_host"]["sha256"]),
+        )
+        or checked_config["adapter"]["profile"] != profile
+        or checked_audit["config_fingerprint"] != canonical_sha256(checked_config)
+        or checked_audit["audited_host_identity"] != expected_host
+        or any(
+            audited_adapter[field] != value
+            for field, value in expected_adapter.items()
+        )
+    ):
+        raise PipelineError(
+            ErrorCode.NATIVE_CAPABILITY_MISMATCH,
+            "qualification full-host binding differs",
+        )
 
 
 def native_marker_fingerprint(operation: Mapping[str, Any]) -> str:
@@ -2007,9 +2114,10 @@ def validate_native_session_monotonic_bounds(
     ``GetTickCount64`` is a cross-process Windows uptime source.  Its values
     are persisted as decimal strings rather than JSON numbers so an adapter
     cannot silently lose a high unsigned 64-bit tick through a floating-point
-    JSON implementation.  The fixed interval is deliberately exact: a
-    descriptor has one five-minute budget that begins at preparation, never a
-    new budget at handshake completion or client construction.
+    JSON implementation.  A descriptor has one positive, bounded budget that
+    begins at preparation, never a new budget at handshake completion or
+    client construction.  A one-use bootstrap may cap that budget below the
+    five-minute maximum.
     """
 
     if (
@@ -2034,14 +2142,9 @@ def validate_native_session_monotonic_bounds(
     expires = uptime(monotonic_expires)
     if expires <= issued:
         raise ValueError("native session monotonic lifetime is not positive")
-    if (
-        issued
-        > MAX_NATIVE_SESSION_UPTIME_MILLISECONDS
-        - MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS
-    ):
-        raise ValueError("native session monotonic deadline wraps")
-    if expires - issued != MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS:
-        raise ValueError("native session monotonic lifetime is not fixed")
+    lifetime = expires - issued
+    if lifetime > MAX_NATIVE_SESSION_LIFETIME_MILLISECONDS:
+        raise ValueError("native session monotonic lifetime exceeds fixed maximum")
     return issued, expires
 
 
@@ -2122,6 +2225,13 @@ def _validate_audit_semantics(artifact: dict[str, Any]) -> None:
         or artifact["geometry_schema_version"] != _ACTIVE_SCHEMA_VERSIONS["geometry"]
     ):
         raise ValueError("native audit version binding differs")
+    if is_active_native_contract("audit", artifact):
+        adapter_binding = cast(Mapping[str, Any], artifact["adapter_binding"])
+        if (
+            adapter_binding["runtime_package_fingerprint"]
+            != adapter_binding["plugin_fingerprint"]
+        ):
+            raise ValueError("native audit runtime package binding differs")
     if records != sorted(records, key=lambda item: cast(str, item["target_id"])):
         raise ValueError("native audit records are not ordered")
     records_by_id = {record["target_id"]: record for record in records}
@@ -2235,6 +2345,13 @@ def _validate_plan_semantics(artifact: dict[str, Any]) -> None:
     ids = [cast(str, item["operation_id"]) for item in operations]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate native plan operation")
+    if is_active_native_contract("plan", artifact):
+        adapter_binding = cast(Mapping[str, Any], artifact["adapter_binding"])
+        if (
+            adapter_binding["runtime_package_fingerprint"]
+            != adapter_binding["plugin_fingerprint"]
+        ):
+            raise ValueError("native plan runtime package binding differs")
     targets: set[str] = set()
     profiles = set(cast(list[str], artifact["operation_profiles"]))
     for operation in operations:
@@ -2494,6 +2611,7 @@ def _validate_manifest_semantics(
     prewrite = cast(Mapping[str, Any], artifact["expected_prewrite_revision"])
     source = cast(Mapping[str, Any], geometry["source"])
     document = cast(Mapping[str, Any], geometry["document"])
+    environment = cast(Mapping[str, Any], artifact["environment"])
     # v2 intentionally binds only the input private copy.  The final file's
     # hash/size/identity do not exist until SaveAs has completed; only a
     # narrowly scoped, integrity-covered constraint set can be authored
@@ -2561,6 +2679,10 @@ def _validate_manifest_semantics(
             deadline_check=deadline_check,
         )
         or prewrite["adapter_binding"] != geometry_adapter_binding(geometry)
+        or environment["runtime_package_fingerprint"]
+        != geometry["binding"]["plugin"]["fingerprint"]
+        or environment["runtime_package_fingerprint"]
+        != prewrite["adapter_binding"]["runtime_package_fingerprint"]
         or prewrite["native_host_binding"] != artifact["native_host_binding"]
         or prewrite["stable_host_binding_digest"]
         != artifact["stable_host_binding_digest"]
@@ -2854,6 +2976,8 @@ def validate_native_contract(
     try:
         if kind == "config":
             _validate_config_semantics(normalized)
+        elif kind == "bootstrap":
+            _validate_bootstrap_semantics(normalized)
         elif kind == "inventory":
             _validate_inventory_semantics(
                 normalized,
@@ -2909,6 +3033,14 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
     if not operation_profiles["translate_dbtext/v1"]:
         raise ValueError("initial native translation profile must be explicitly enabled")
     if config["adapter"]["id"] == AUTOCAD_ADAPTER_ID:
+        _require_autocad_adapter_host_identity(
+            cast(Mapping[str, Any], config["adapter"]),
+            {
+                "product": config["host_compatibility"]["host_product"],
+                "release": config["host_compatibility"]["host_release"],
+                "runtime": config["host_compatibility"]["host_runtime"],
+            },
+        )
         for profile, capability in _OPERATION_PROFILE_CAPABILITIES.items():
             if operation_profiles[profile] and capability not in required:
                 raise ValueError(
@@ -2923,6 +3055,37 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
         "readback"
     ]["command"] != "LPF_NATIVE_EXPORT_MANIFEST":
         raise ValueError("native command is not fixed")
+    runtime_package: Mapping[str, Any] | None = None
+    if is_active_native_contract("config", config):
+        runtime_package = normalize_runtime_package_descriptor(
+            cast(Mapping[str, Any], config["runtime_package"]),
+            require_directory=True,
+        )
+        adapter_component = runtime_component_by_name(runtime_package, ADAPTER_ASSEMBLY)
+        expected_runtime_fingerprint = runtime_package["fingerprint"]
+        for plugin in plugins.values():
+            if (
+                plugin["runtime_package_fingerprint"] != expected_runtime_fingerprint
+                or plugin["sha256"] != adapter_component["sha256"]
+            ):
+                raise ValueError("plugin does not bind the complete runtime package")
+        if config["adapter"]["id"] == AUTOCAD_ADAPTER_ID:
+            if runtime_package["profile"] != config["adapter"]["profile"]:
+                raise ValueError("runtime package profile differs from adapter")
+            expected_plugin_path = os.path.normcase(
+                os.path.normpath(
+                    os.fspath(
+                        Path(cast(str, runtime_package["directory"]))
+                        / ADAPTER_ASSEMBLY
+                    )
+                )
+            )
+            for plugin in plugins.values():
+                if (
+                    os.path.normcase(os.path.normpath(cast(str, plugin["path"])))
+                    != expected_plugin_path
+                ):
+                    raise ValueError("plugin path escapes the runtime package")
     host_compatibility = cast(dict[str, Any], config["host_compatibility"])
     if (
         host_compatibility["audit_host_mode"] != "full_host"
@@ -2973,6 +3136,17 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
             or any(ord(character) < 0x20 or ord(character) == 0x7F for character in path)
         ):
             raise ValueError("unsafe native installation path")
+    if runtime_package is not None:
+        runtime_directory = cast(str, runtime_package["directory"])
+        if (
+            not runtime_directory
+            or '"' in runtime_directory
+            or any(
+                ord(character) < 0x20 or ord(character) == 0x7F
+                for character in runtime_directory
+            )
+        ):
+            raise ValueError("unsafe runtime package directory")
     marker_policy = native_marker_policy_binding(config)
     if (
         marker_policy["policy_version"] != "marker-policy/v1"
@@ -2993,6 +3167,34 @@ def _validate_config_semantics(config: dict[str, Any]) -> None:
         raise ValueError("native marker policy is not fixed")
     _finite_bits(cast(str, marker_policy["height_bits"]))
     _finite_bits(cast(str, marker_policy["rotation_bits"]))
+
+
+def _validate_bootstrap_semantics(bootstrap: dict[str, Any]) -> None:
+    """Bind the concrete adapter's advertised profile to its host identity."""
+
+    if bootstrap["adapter"]["id"] == AUTOCAD_ADAPTER_ID:
+        _require_autocad_adapter_host_identity(
+            cast(Mapping[str, Any], bootstrap["adapter"]),
+            cast(Mapping[str, Any], bootstrap["host"]),
+        )
+
+
+def _require_autocad_adapter_host_identity(
+    adapter: Mapping[str, Any],
+    host: Mapping[str, Any],
+) -> None:
+    """Reject labels that could make the AutoCAD implementation impersonate TSSD."""
+
+    expected_host = _AUTOCAD_ADAPTER_PROFILES.get(cast(str, adapter["profile"]))
+    if (
+        expected_host is None
+        or host["product"] != "autocad"
+        or host["release"] != expected_host[0]
+        or host["runtime"] != expected_host[1]
+    ):
+        raise ValueError(
+            "AutoCAD adapter profile must match its AutoCAD product, release, and runtime"
+        )
 
 
 def _private_native_input_error(kind: NativeSchemaKind) -> PipelineError:
@@ -3182,8 +3384,10 @@ def migrate_native_v1_to_v2(
 ) -> dict[str, Any]:
     """Explicitly migrate the one v1 shape that preserves all v2 semantics.
 
-    Adapter configuration is declarative and its v2 schema only changes the
-    namespace.  Session/audit/plan/manifest/result/readback artifacts are
+    Adapter configuration is declarative.  A migrated v1 configuration gets
+    an explicit unusable full-host placeholder because v1 never carried that
+    fingerprint; it therefore cannot qualify a host without a new v2 config.
+    Session/audit/plan/manifest/result/readback artifacts are
     intentionally *not* migrated: their published v1 shapes lack mandatory
     same-boot, stable-host, or actual-output bindings.  Inventing any of
     those values would make a legacy read look like fresh authorization.
@@ -3200,6 +3404,59 @@ def migrate_native_v1_to_v2(
         )
     migrated = dict(checked)
     migrated["schema_version"] = _ACTIVE_SCHEMA_VERSIONS["config"]
+    # v1 never recorded a full-host executable binding.  Do not mislabel the
+    # Core Console as that host: retain an explicit non-matching placeholder
+    # so this historical configuration can be read/migrated but can never
+    # satisfy real-host qualification against an audited executable.
+    migrated["full_host"] = {
+        "path": "legacy-full-host-unavailable",
+        "sha256": "0" * 64,
+    }
+    # v1 predated the complete runtime-package contract. Preserve that
+    # absence as an explicitly unusable package rather than silently
+    # projecting its single plugin hash onto Core/Protocol/deps. The
+    # directory is deliberately non-existent, every component is a sentinel,
+    # and component leasing consequently refuses execution before any host
+    # work. This is migration/read compatibility only, never qualification.
+    profile = cast(str, checked["adapter"]["profile"])
+    legacy_target_framework = cast(
+        str,
+        checked["host_compatibility"]["host_runtime"],
+    )
+    try:
+        component_names = required_runtime_component_names(profile)
+        target_framework = target_framework_for_profile(profile)
+    except ValueError:
+        component_names = (
+            ADAPTER_ASSEMBLY,
+            CORE_ASSEMBLY,
+            PROTOCOL_ASSEMBLY,
+        )
+        target_framework = legacy_target_framework
+    runtime_package = build_runtime_package_descriptor(
+        profile=profile,
+        target_framework=target_framework,
+        components=[
+            {
+                "name": name,
+                "byte_size": 1,
+                "sha256": "0" * 64,
+            }
+            for name in component_names
+        ],
+    )
+    migrated["runtime_package"] = {
+        **runtime_package,
+        "directory": "legacy-runtime-package-unavailable",
+    }
+    migrated["plugins"] = {
+        name: {
+            **cast(Mapping[str, Any], value),
+            "sha256": "0" * 64,
+            "runtime_package_fingerprint": runtime_package["fingerprint"],
+        }
+        for name, value in cast(Mapping[str, Any], checked["plugins"]).items()
+    }
     # Config has no integrity carrier. Validate the exact transformed object
     # rather than accepting a caller-supplied partial projection.
     return validate_native_contract("config", migrated)

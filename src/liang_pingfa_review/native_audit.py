@@ -18,6 +18,7 @@ from typing import Any
 from .canonical import (
     acquire_source_lease,
     attach_integrity,
+    canonical_sha256,
     format_utc,
     normalize_nfc_text,
     utc_now,
@@ -175,6 +176,10 @@ def build_native_audit(
     artifact = {
         "schema_version": "liang-pingfa/native-audit/v2",
         "config_schema_version": checked_config["schema_version"],
+        # Qualification compares this to its current validated configuration
+        # so a later profile/runtime/capability policy substitution cannot
+        # reuse otherwise well-formed audit evidence.
+        "config_fingerprint": canonical_sha256(checked_config),
         "session_schema_version": checked_session["schema_version"],
         "geometry_schema_version": checked_export["schema_version"],
         "audit_id": "native-audit-" + sha256(
@@ -189,6 +194,10 @@ def build_native_audit(
         "scope": "native-representation-and-readability-only",
         "source": source,
         "adapter_binding": geometry_adapter_binding(checked_export),
+        # This explicit projection lets the private qualification runner
+        # reject a binary that is compatible by name/profile but was audited
+        # from a different full-host product or runtime.
+        "audited_host_identity": dict(checked_export["binding"]["host"]),
         "host_executable_fingerprint": checked_export["binding"]["process"][
             "executable_fingerprint"
         ],
