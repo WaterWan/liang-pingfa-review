@@ -125,7 +125,10 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             Dictionary<string, object?> environment = RequireObject(
                 manifest,
                 "environment");
-            ValidateEnvironment(environment, mode);
+            ValidateEnvironment(
+                environment,
+                mode,
+                context.RuntimePackageFingerprint);
             GeometryExportV2 preconditions = ReadGeometry(
                 RequireString(manifest, "preconditions_geometry_json"),
                 marker);
@@ -377,13 +380,15 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
 
         private static void ValidateEnvironment(
             Dictionary<string, object?> environment,
-            ConsoleOperationMode mode)
+            ConsoleOperationMode mode,
+            string runtimePackageFingerprint)
         {
             RequireExactKeys(
                 environment,
                 "core_console_fingerprint",
                 "write_plugin_fingerprint",
                 "readback_plugin_fingerprint",
+                "runtime_package_fingerprint",
                 "write_command",
                 "readback_command",
                 "write_revision_transition",
@@ -427,6 +432,18 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     "LPF_MANIFEST_ENVIRONMENT",
                     "The loaded adapter fingerprint differs from the manifest.");
             }
+
+            if (!string.Equals(
+                    RequireSha256(environment, "runtime_package_fingerprint"),
+                    runtimePackageFingerprint,
+                    StringComparison.Ordinal))
+            {
+                throw Failure(
+                    "LPF_MANIFEST_ENVIRONMENT",
+                    "The runtime package fingerprint differs from the manifest.");
+            }
+            AdapterIdentity.RequireRuntimePackageFingerprint(
+                runtimePackageFingerprint);
 
             string processExecutable = AutodeskHostBinding.CurrentExecutableFingerprint();
             if (!string.Equals(
@@ -979,6 +996,7 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                 "plugin_id",
                 "plugin_version",
                 "plugin_fingerprint",
+                "runtime_package_fingerprint",
                 "protocol_major",
                 "protocol_minor",
                 "capabilities_digest");
@@ -1004,6 +1022,10 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     StringComparison.Ordinal) ||
                 !string.Equals(
                     RequireSha256(values, "plugin_fingerprint"),
+                    binding.PluginFingerprint,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    RequireSha256(values, "runtime_package_fingerprint"),
                     binding.PluginFingerprint,
                     StringComparison.Ordinal) ||
                 RequireInteger(values, "protocol_major", 1, 1) != 1 ||

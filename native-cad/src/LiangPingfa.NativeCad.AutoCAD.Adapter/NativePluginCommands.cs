@@ -47,6 +47,7 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
         public static void ExecuteManifest()
         {
             ConsoleCommandContext context = ConsoleCommandContext.Require();
+            context.RequireRuntimePackageIntegrity();
             RequireResultFileName(context.ResultPath, "native-console-result.json");
             ParsedManifest manifest = ManifestProjectionReader.Read(
                 context.ManifestPath,
@@ -69,10 +70,12 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     document.Name,
                     context.PrivateRoot,
                     result);
+                context.RequireRuntimePackageIntegrity();
                 NativeConsoleArtifactWriter.WriteResult(
                     context.ResultPath,
                     context.RunId,
-                    result);
+                    result,
+                    context.RuntimePackageFingerprint);
             }
             finally
             {
@@ -85,6 +88,7 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
         public static void ExportManifest()
         {
             ConsoleCommandContext context = ConsoleCommandContext.Require();
+            context.RequireRuntimePackageIntegrity();
             RequireResultFileName(context.ResultPath, "native-console-export.json");
             ParsedManifest manifest = ManifestProjectionReader.Read(
                 context.ManifestPath,
@@ -92,7 +96,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                 ConsoleOperationMode.Export);
             NativeConsoleReceipt receipt = NativeConsoleArtifactWriter.ReadReceipt(
                 context.PrivateRoot,
-                manifest.CoreManifest);
+                manifest.CoreManifest,
+                context.RuntimePackageFingerprint);
             Document document = NativeCommandRuntime.RequireCurrentPrivateDocument(
                 context.PrivateRoot);
             AutodeskCadDatabase database = NativeCommandRuntime.CreateDatabase(
@@ -106,12 +111,14 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                 // The separate readback command publishes an artifact, so
                 // revalidate the held private DWG immediately beforehand.
                 database.RequireCurrentPrivateBinding();
+                context.RequireRuntimePackageIntegrity();
                 NativeConsoleArtifactWriter.WriteExport(
                     context.ResultPath,
                     context.RunId,
                     manifest.CoreManifest,
                     receipt,
-                    export);
+                    export,
+                    context.RuntimePackageFingerprint);
             }
             finally
             {
@@ -259,10 +266,14 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
         internal static void WriteResult(
             string path,
             string runId,
-            ManifestExecutionResultV2 result)
+            ManifestExecutionResultV2 result,
+            string runtimePackageFingerprint)
         {
+            AdapterIdentity.RequireRuntimePackageFingerprint(
+                runtimePackageFingerprint);
             Dictionary<string, object?> payload = result.ToWireValue();
             payload["run_id"] = runId;
+            payload["runtime_package_fingerprint"] = runtimePackageFingerprint;
             WriteCanonicalNew(
                 path,
                 CanonicalizeConsoleResultPayload(payload));
@@ -273,8 +284,20 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             string runId,
             CoreManifestV2 manifest,
             NativeConsoleReceipt receipt,
-            GeometryExportV2 export)
+            GeometryExportV2 export,
+            string runtimePackageFingerprint)
         {
+            AdapterIdentity.RequireRuntimePackageFingerprint(
+                runtimePackageFingerprint);
+            if (!string.Equals(
+                    receipt.RuntimePackageFingerprint,
+                    runtimePackageFingerprint,
+                    StringComparison.Ordinal))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RECEIPT",
+                    "The write/readback runtime package differs.");
+            }
             byte[] geometry = export.ToCanonicalJsonUtf8();
             string geometryJson = new UTF8Encoding(false, true).GetString(geometry);
             Dictionary<string, object?> payload =
@@ -294,6 +317,10 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                         NativeCadProtocolV2.ConsoleResultSchemaVersion
                     },
                     { "nonce", manifest.Nonce },
+                    {
+                        "runtime_package_fingerprint",
+                        runtimePackageFingerprint
+                    },
                     {
                         "final_revision_fingerprint",
                         export.Document.RevisionFingerprint
@@ -342,7 +369,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
 
         internal static NativeConsoleReceipt ReadReceipt(
             string privateRoot,
-            CoreManifestV2 manifest)
+            CoreManifestV2 manifest,
+            string runtimePackageFingerprint)
         {
             string path = PrivatePathPolicy.RequirePrivateFile(
                 Path.Combine(privateRoot, ResultReceiptFileName),
@@ -367,7 +395,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                 "transaction",
                 "operation_results",
                 "integrity",
-                "manifest_schema_version");
+                "manifest_schema_version",
+                "runtime_package_fingerprint");
             VerifyIntegrity(result);
             RequireLiteral(
                 RequireString(result, "schema_version"),
@@ -382,6 +411,9 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             RequireLiteral(
                 RequireString(result, "manifest_schema_version"),
                 NativeCadProtocolV2.ManifestSchemaVersion);
+            RequireLiteral(
+                RequireString(result, "runtime_package_fingerprint"),
+                runtimePackageFingerprint);
             RequireLiteral(
                 RequireString(result, "final_revision_transition"),
                 "save_reopen_changed");
@@ -423,7 +455,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                 final,
                 binding,
                 RequireString(final, "database_instance_fingerprint"),
-                RequireString(final, "revision_fingerprint"));
+                RequireString(final, "revision_fingerprint"),
+                runtimePackageFingerprint);
         }
 
         private static void WriteCanonicalNew(
@@ -743,13 +776,15 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             Dictionary<string, object?> finalDocumentBinding,
             NativeSourceBindingV2 outputBinding,
             string databaseFingerprint,
-            string revisionFingerprint)
+            string revisionFingerprint,
+            string runtimePackageFingerprint)
         {
             IntegritySha256 = integritySha256;
             FinalDocumentBinding = finalDocumentBinding;
             OutputBinding = outputBinding;
             DatabaseFingerprint = databaseFingerprint;
             RevisionFingerprint = revisionFingerprint;
+            RuntimePackageFingerprint = runtimePackageFingerprint;
         }
 
         internal string IntegritySha256 { get; private set; }
@@ -761,6 +796,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
         internal string DatabaseFingerprint { get; private set; }
 
         internal string RevisionFingerprint { get; private set; }
+
+        internal string RuntimePackageFingerprint { get; private set; }
 
         internal void RequireMatches(GeometryExportV2 export)
         {

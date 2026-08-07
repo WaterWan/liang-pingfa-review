@@ -23,12 +23,14 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             string manifestPath,
             string resultPath,
             string runId,
-            string privateRoot)
+            string privateRoot,
+            string runtimePackageFingerprint)
         {
             ManifestPath = manifestPath;
             ResultPath = resultPath;
             RunId = runId;
             PrivateRoot = privateRoot;
+            RuntimePackageFingerprint = runtimePackageFingerprint;
         }
 
         internal string ManifestPath { get; private set; }
@@ -39,6 +41,14 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
 
         internal string PrivateRoot { get; private set; }
 
+        internal string RuntimePackageFingerprint { get; private set; }
+
+        internal void RequireRuntimePackageIntegrity()
+        {
+            AdapterIdentity.RequireRuntimePackageFingerprint(
+                RuntimePackageFingerprint);
+        }
+
         internal static ConsoleCommandContext Require()
         {
             RejectUnexpectedNativeEnvironment(
@@ -48,6 +58,7 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     AdapterIdentity.ResultEnvironmentVariable,
                     AdapterIdentity.RunIdEnvironmentVariable,
                     AdapterIdentity.PrivateRootEnvironmentVariable,
+                    AdapterIdentity.RuntimePackageSha256EnvironmentVariable,
                 });
 
             string privateRoot = PrivatePathPolicy.RequirePrivateRoot(
@@ -62,7 +73,17 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                 ".json");
             string runId = AdapterIdentity.RequireFixedRunId(
                 RequireEnvironment(AdapterIdentity.RunIdEnvironmentVariable));
-            return new ConsoleCommandContext(manifest, result, runId, privateRoot);
+            string runtimePackageFingerprint =
+                RequireEnvironment(
+                    AdapterIdentity.RuntimePackageSha256EnvironmentVariable);
+            AdapterIdentity.RequireRuntimePackageFingerprint(
+                runtimePackageFingerprint);
+            return new ConsoleCommandContext(
+                manifest,
+                result,
+                runId,
+                privateRoot,
+                runtimePackageFingerprint);
         }
 
         internal static string RequireEnvironment(string name)
@@ -118,23 +139,35 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
     {
         private BootstrapCommandContext(
             string nonce,
+            string configSha256,
             string outputPath,
             string privateRoot,
-            DateTime expiresUtc)
+            DateTime issuedUtc,
+            DateTime expiresUtc,
+            string runtimePackageFingerprint)
         {
             Nonce = nonce;
+            ConfigSha256 = configSha256;
             OutputPath = outputPath;
             PrivateRoot = privateRoot;
+            IssuedUtc = issuedUtc;
             ExpiresUtc = expiresUtc;
+            RuntimePackageFingerprint = runtimePackageFingerprint;
         }
 
         internal string Nonce { get; private set; }
+
+        internal string ConfigSha256 { get; private set; }
 
         internal string OutputPath { get; private set; }
 
         internal string PrivateRoot { get; private set; }
 
+        internal DateTime IssuedUtc { get; private set; }
+
         internal DateTime ExpiresUtc { get; private set; }
+
+        internal string RuntimePackageFingerprint { get; private set; }
 
         internal static BootstrapCommandContext Require()
         {
@@ -145,6 +178,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     AdapterIdentity.BootstrapOutputEnvironmentVariable,
                     AdapterIdentity.PrivateRootEnvironmentVariable,
                     AdapterIdentity.BootstrapExpiryEnvironmentVariable,
+                    AdapterIdentity.BootstrapConfigSha256EnvironmentVariable,
+                    AdapterIdentity.BootstrapRuntimePackageSha256EnvironmentVariable,
                 });
 
             string root = PrivatePathPolicy.RequirePrivateRoot(
@@ -181,6 +216,32 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
 
             string expiry = ConsoleCommandContext.RequireEnvironment(
                 AdapterIdentity.BootstrapExpiryEnvironmentVariable);
+            string configSha256 = ConsoleCommandContext.RequireEnvironment(
+                AdapterIdentity.BootstrapConfigSha256EnvironmentVariable);
+            string runtimePackageFingerprint =
+                ConsoleCommandContext.RequireEnvironment(
+                    AdapterIdentity.BootstrapRuntimePackageSha256EnvironmentVariable);
+            if (configSha256.Length != 64)
+            {
+                throw new AdapterFailureException(
+                    "LPF_BOOTSTRAP_CONTEXT",
+                    "The bootstrap config fingerprint is invalid.");
+            }
+            for (int index = 0; index < configSha256.Length; index++)
+            {
+                char character = configSha256[index];
+                if (!((character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f')))
+                {
+                    throw new AdapterFailureException(
+                        "LPF_BOOTSTRAP_CONTEXT",
+                        "The bootstrap config fingerprint is invalid.");
+                }
+            }
+            AdapterIdentity.RequireRuntimePackageFingerprint(
+                runtimePackageFingerprint);
+
+            DateTime issuedUtc = DateTime.UtcNow;
             DateTime expiresUtc;
             if (!DateTime.TryParseExact(
                     expiry,
@@ -188,15 +249,22 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                     out expiresUtc) ||
-                expiresUtc <= DateTime.UtcNow ||
-                expiresUtc > DateTime.UtcNow.AddMinutes(5))
+                expiresUtc <= issuedUtc ||
+                expiresUtc > issuedUtc.AddMinutes(5))
             {
                 throw new AdapterFailureException(
                     "LPF_BOOTSTRAP_CONTEXT",
                     "The bootstrap expiry is invalid.");
             }
 
-            return new BootstrapCommandContext(nonce, output, root, expiresUtc);
+            return new BootstrapCommandContext(
+                nonce,
+                configSha256,
+                output,
+                root,
+                issuedUtc,
+                expiresUtc,
+                runtimePackageFingerprint);
         }
     }
 
@@ -567,12 +635,14 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
 
         internal static string IdentityFingerprint(ByHandleFileInformation information)
         {
+            // This frozen projection is the public cross-language file
+            // identity carrier. Size and last-write time intentionally stay
+            // out of it: SameStableMetadata independently uses both to prove
+            // that the two hash passes observed stable content.
             Dictionary<string, object?> identity =
                 new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
                     { "creation_time_100ns", FileTimeValue(information.CreationTime) },
-                    { "last_write_time_100ns", FileTimeValue(information.LastWriteTime) },
-                    { "byte_size", FileSize(information) },
                     { "first", (ulong)information.VolumeSerialNumber },
                     { "namespace", "windows-file-id" },
                     { "second", FileIndex(information) },
