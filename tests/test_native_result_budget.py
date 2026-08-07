@@ -114,6 +114,9 @@ class NativeResultBudgetTests(unittest.TestCase):
             "manifest_integrity_sha256": manifest["integrity"]["sha256"],
             "manifest_schema_version": manifest["schema_version"],
             "nonce": manifest["nonce"],
+            "runtime_package_fingerprint": manifest["environment"][
+                "runtime_package_fingerprint"
+            ],
             "final_revision_fingerprint": "b" * 64,
             "final_revision_transition": "save_reopen_changed",
             "final_document_binding": {

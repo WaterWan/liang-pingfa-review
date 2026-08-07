@@ -214,6 +214,9 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                                     "liang-pingfa/native-console-result/v2"
                                 ),
                                 "nonce": "a" * 43,
+                                "runtime_package_fingerprint": self._environment[
+                                    "LIANG_PINGFA_NATIVE_RUNTIME_PACKAGE_SHA256"
+                                ],
                                 "final_revision_fingerprint": exported["document"][
                                     "revision_fingerprint"
                                 ],
@@ -243,6 +246,9 @@ class NativeCoreConsoleExecutionTests(unittest.TestCase):
                                 "liang-pingfa/native-edit-manifest/v2"
                             ),
                             "nonce": "a" * 43,
+                            "runtime_package_fingerprint": self._environment[
+                                "LIANG_PINGFA_NATIVE_RUNTIME_PACKAGE_SHA256"
+                            ],
                             "final_revision_fingerprint": digest("revision"),
                             "final_revision_transition": "save_reopen_changed",
                             "final_document_binding": {

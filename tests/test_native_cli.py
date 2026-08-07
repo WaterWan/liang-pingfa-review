@@ -134,6 +134,65 @@ class NativeCliTests(unittest.TestCase):
         self.assertIs(raised.exception, publication_failure)
         emit.assert_not_called()
 
+    def test_native_session_bootstrap_prepare_uses_claimed_descriptor_only(self) -> None:
+        arguments = SimpleNamespace(
+            native_config=Path("generated-private-config.json"),
+            bootstrap=Path("generated-private-bootstrap.json"),
+            pid=None,
+            pipe=None,
+            session_out=Path("generated-private-session.json"),
+        )
+        descriptor = session()
+        with (
+            mock.patch.object(
+                cli,
+                "prepare_native_session_from_bootstrap",
+                return_value=descriptor,
+            ) as bootstrap_prepare,
+            mock.patch.object(cli, "prepare_native_session") as explicit_prepare,
+            mock.patch.object(cli, "load_native_config", return_value=config()),
+            mock.patch.object(cli, "write_private_native_session_descriptor") as writer,
+            mock.patch.object(cli, "_emit") as emit,
+        ):
+            cli._native_session_prepare(arguments)
+        bootstrap_prepare.assert_called_once_with(
+            bootstrap_path=arguments.bootstrap,
+            config=config(),
+        )
+        explicit_prepare.assert_not_called()
+        writer.assert_called_once_with(arguments.session_out, descriptor)
+        self.assertEqual(
+            emit.call_args.args[0],
+            {"status": "ok", "command": "native-session prepare"},
+        )
+
+    def test_native_session_parser_requires_one_complete_prepare_mode(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "native-session",
+                    "prepare",
+                    "--native-config",
+                    "private.json",
+                    "--session-out",
+                    "session.json",
+                ]
+            )
+        parsed = parser.parse_args(
+            [
+                "native-session",
+                "prepare",
+                "--bootstrap",
+                "private-bootstrap.json",
+                "--native-config",
+                "private.json",
+                "--session-out",
+                "session.json",
+            ]
+        )
+        self.assertEqual(parsed.bootstrap, Path("private-bootstrap.json"))
+
     def test_native_audit_and_plan_mark_only_machine_json_private(self) -> None:
         """CLI routes native pairs to the mixed retained-handle publisher."""
 
