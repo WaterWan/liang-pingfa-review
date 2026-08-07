@@ -9,6 +9,7 @@
     "created_at",
     "audit_binding",
     "plan_binding",
+    "runtime_package_fingerprint",
     "output_binding",
     "transition_digest",
     "operation_results",
@@ -35,6 +36,9 @@
     },
     "plan_binding": {
       "$ref": "#/$defs/planBinding"
+    },
+    "runtime_package_fingerprint": {
+      "$ref": "#/$defs/sha256"
     },
     "output_binding": {
       "$ref": "#/$defs/outputBinding"

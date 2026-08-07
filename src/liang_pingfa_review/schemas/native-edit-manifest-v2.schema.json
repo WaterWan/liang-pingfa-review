@@ -288,6 +288,7 @@
           "$ref": "#/$defs/sha256"
         },
         "file_identity_fingerprint": {
+          "$comment": "SHA-256 of the frozen creation-time, volume-serial, namespace, and file-index projection; source size and last-write are checked independently.",
           "$ref": "#/$defs/sha256"
         },
         "dwg_header_signature": {
@@ -315,6 +316,7 @@
           "minimum": 0
         },
         "file_identity_fingerprint": {
+          "$comment": "SHA-256 of the frozen creation-time, volume-serial, namespace, and file-index projection; source size and last-write are checked independently.",
           "$ref": "#/$defs/sha256"
         },
         "path_fingerprint": {
@@ -380,6 +382,7 @@
         "core_console_fingerprint",
         "write_plugin_fingerprint",
         "readback_plugin_fingerprint",
+        "runtime_package_fingerprint",
         "write_command",
         "readback_command",
         "write_revision_transition",
@@ -395,6 +398,9 @@
           "$ref": "#/$defs/sha256"
         },
         "readback_plugin_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_package_fingerprint": {
           "$ref": "#/$defs/sha256"
         },
         "write_command": {
@@ -482,6 +488,7 @@
         "plugin_id",
         "plugin_version",
         "plugin_fingerprint",
+        "runtime_package_fingerprint",
         "protocol_major",
         "protocol_minor",
         "capabilities_digest"
@@ -518,6 +525,9 @@
           "pattern": "^[0-9A-Za-z._-]+$"
         },
         "plugin_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_package_fingerprint": {
           "$ref": "#/$defs/sha256"
         },
         "protocol_major": {
