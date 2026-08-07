@@ -6,7 +6,6 @@
     <AssemblyName>LiangPingfa.NativeCad.AutoCAD.RealHost.Tests</AssemblyName>
     <RootNamespace>LiangPingfa.NativeCad.AutoCAD.RealHost.Tests</RootNamespace>
     <BuildRealHostTests Condition="'$(BuildRealHostTests)' == ''">false</BuildRealHostTests>
-    <RealHostSdkDir Condition="'$(RealHostSdkDir)' == ''"></RealHostSdkDir>
     <RealHostCoreConsole Condition="'$(RealHostCoreConsole)' == ''"></RealHostCoreConsole>
     <RealHostPrivateFixture Condition="'$(RealHostPrivateFixture)' == ''"></RealHostPrivateFixture>
     <CadHostProfile Condition="'$(CadHostProfile)' == ''">autocad2025</CadHostProfile>
@@ -15,22 +14,19 @@
     <IsPublishable>false</IsPublishable>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
   </PropertyGroup>
-  <ItemGroup Condition="'$(BuildRealHostTests)' == 'true'">
-    <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.AutoCAD.Adapter\LiangPingfa.NativeCad.AutoCAD.Adapter.csproj">
-      <AdditionalProperties>BuildAutoCadAdapter=true;UseAutodeskApiStubs=false;CadHostProfile=$(CadHostProfile);CadSdkDir=$(RealHostSdkDir)</AdditionalProperties>
-      <Private>false</Private>
-      <CopyLocal>false</CopyLocal>
-    </ProjectReference>
-  </ItemGroup>
   <Target Name="ValidateRealHostGate" BeforeTargets="PrepareForBuild">
     <Error Condition="'$(BuildRealHostTests)' != 'true' And '$(BuildRealHostTests)' != 'false'"
            Text="LiangPingfa.RealHostTests: BuildRealHostTests must be exactly true or false." />
-    <Error Condition="'$(BuildRealHostTests)' == 'true' And ('$(RealHostSdkDir)' == '' Or '$(RealHostCoreConsole)' == '' Or '$(RealHostPrivateFixture)' == '')"
-           Text="LiangPingfa.RealHostTests: explicit licensed SDK, Core Console, and generated private fixture paths are required." />
+    <!-- The runner never loads or builds the profile-targeted adapter.  Its
+         package is supplied later as an external qualification argument. -->
+    <Error Condition="'$(BuildRealHostTests)' == 'true' And ('$(RealHostCoreConsole)' == '' Or '$(RealHostPrivateFixture)' == '')"
+           Text="LiangPingfa.RealHostTests: explicit Core Console and generated private fixture paths are required." />
     <Error Condition="'$(BuildRealHostTests)' == 'true' And !Exists('$(RealHostCoreConsole)')"
            Text="LiangPingfa.RealHostTests: configured Core Console is unavailable." />
     <Error Condition="'$(BuildRealHostTests)' == 'true' And !Exists('$(RealHostPrivateFixture)')"
            Text="LiangPingfa.RealHostTests: generated private fixture is unavailable." />
+    <Error Condition="'$(CadHostProfile)' != 'autocad2024' And '$(CadHostProfile)' != 'autocad2025' And '$(CadHostProfile)' != 'autocad2026'"
+           Text="LiangPingfa.RealHostTests: CadHostProfile must be one explicit AutoCAD profile." />
   </Target>
   <Target Name="RejectRealHostPack" BeforeTargets="Pack;Publish">
     <Error Text="LiangPingfa.RealHostTests cannot be packaged or published." />
