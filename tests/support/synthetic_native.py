@@ -25,6 +25,15 @@ from liang_pingfa_review.native_protocol import (
     PROTOCOL_VERSION,
     derive_challenge_response,
 )
+from liang_pingfa_review.runtime_package import (
+    ADAPTER_ASSEMBLY,
+    ADAPTER_DEPS,
+    CORE_ASSEMBLY,
+    PROTOCOL_ASSEMBLY,
+    RUNTIME_PACKAGE_FORMAT,
+    runtime_package_fingerprint,
+    target_framework_for_profile,
+)
 
 
 def digest(seed: str) -> str:
@@ -46,15 +55,105 @@ def adapter() -> dict[str, str]:
     return {"id": "test-adapter", "profile": "test-profile", "version": "1.0.0"}
 
 
+def runtime_package(
+    *,
+    profile: str = "test-profile",
+    target_framework: str = "test-runtime",
+    directory: str = "generated-adapter-package",
+) -> dict[str, Any]:
+    """Return a complete source-free repository runtime package fixture."""
+
+    components = [
+        {
+            "name": ADAPTER_ASSEMBLY,
+            "byte_size": 101,
+            "sha256": digest("adapter-runtime"),
+        },
+        {
+            "name": CORE_ASSEMBLY,
+            "byte_size": 102,
+            "sha256": digest("core-runtime"),
+        },
+        {
+            "name": PROTOCOL_ASSEMBLY,
+            "byte_size": 103,
+            "sha256": digest("protocol-runtime"),
+        },
+    ]
+    if profile != "autocad2024" and profile.startswith("autocad"):
+        components.append(
+            {
+                "name": ADAPTER_DEPS,
+                "byte_size": 104,
+                "sha256": digest("adapter-deps-runtime"),
+            }
+        )
+    fingerprint = runtime_package_fingerprint(
+        format_version=RUNTIME_PACKAGE_FORMAT,
+        profile=profile,
+        target_framework=target_framework,
+        components=components,
+    )
+    return {
+        "format_version": RUNTIME_PACKAGE_FORMAT,
+        "directory": directory,
+        "profile": profile,
+        "target_framework": target_framework,
+        "fingerprint": fingerprint,
+        "components": components,
+    }
+
+
+def autocad_runtime_package(
+    profile: str,
+    *,
+    directory: str = "generated-adapter-package",
+) -> dict[str, Any]:
+    """Return a profile-correct fixture package for concrete AutoCAD tests."""
+
+    return runtime_package(
+        profile=profile,
+        target_framework=target_framework_for_profile(profile),
+        directory=directory,
+    )
+
+
+def configure_autocad_runtime_package(
+    value: dict[str, Any],
+    profile: str,
+    *,
+    directory: str = "generated-adapter-package",
+) -> None:
+    """Retarget a generated config to one concrete AutoCAD package profile."""
+
+    package = autocad_runtime_package(profile, directory=directory)
+    adapter_component = next(
+        item for item in package["components"] if item["name"] == ADAPTER_ASSEMBLY
+    )
+    value["runtime_package"] = package
+    for plugin_value in value["plugins"].values():
+        plugin_value.update(
+            {
+                "path": directory + "/" + ADAPTER_ASSEMBLY,
+                "sha256": adapter_component["sha256"],
+                "runtime_package_fingerprint": package["fingerprint"],
+            }
+        )
+
+
 def plugin() -> dict[str, str]:
     return {
         "id": "test-plugin",
         "version": "1.0.0",
-        "fingerprint": digest("readback-plugin"),
+        "fingerprint": runtime_package()["fingerprint"],
     }
 
 
 def config() -> dict[str, Any]:
+    package = runtime_package()
+    adapter_component = next(
+        item for item in package["components"] if item["name"] == ADAPTER_ASSEMBLY
+    )
     return {
         "schema_version": "liang-pingfa/native-adapter-config/v2",
         "adapter": adapter(),
@@ -63,23 +162,30 @@ def config() -> dict[str, Any]:
             "read.exact_geometry/v1",
             "read.inventory/v1",
         ],
+        "full_host": {
+            "path": "generated-full-host.exe",
+            "sha256": digest("host-executable"),
+        },
         "core_console": {"path": "generated-core.exe", "sha256": digest("core")},
         "plugins": {
             "write": {
                 "id": "test-plugin",
                 "version": "1.0.0",
-                "path": "generated-write.dll",
-                "sha256": digest("write-plugin"),
+                "path": "generated-adapter-package/LiangPingfa.NativeCad.AutoCAD.Adapter.dll",
+                "sha256": adapter_component["sha256"],
+                "runtime_package_fingerprint": package["fingerprint"],
                 "command": "LPF_NATIVE_EXECUTE_MANIFEST",
             },
             "readback": {
                 "id": "test-plugin",
                 "version": "1.0.0",
-                "path": "generated-readback.dll",
-                "sha256": digest("readback-plugin"),
+                "path": "generated-adapter-package/LiangPingfa.NativeCad.AutoCAD.Adapter.dll",
+                "sha256": adapter_component["sha256"],
+                "runtime_package_fingerprint": package["fingerprint"],
                 "command": "LPF_NATIVE_EXPORT_MANIFEST",
             },
         },
+        "runtime_package": package,
         "host_compatibility": {
             "host_family": "external-host",
             "minimum_version": "1.0",

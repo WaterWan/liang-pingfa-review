@@ -12,6 +12,8 @@ import sys
 import time
 from typing import Any
 
+from tests.support.synthetic_native import runtime_package
+
 from liang_pingfa_review.native_protocol import (
     PIPE_IO_CHUNK_BYTES,
     PROTOCOL_VERSION,
@@ -143,7 +145,7 @@ def _handshake_identity() -> dict[str, Any]:
         "plugin": {
             "id": "test-plugin",
             "version": "1.0.0",
-            "fingerprint": sha256(b"readback-plugin").hexdigest(),
+            "fingerprint": runtime_package()["fingerprint"],
         },
         "host": {
             "product": "external-host",
