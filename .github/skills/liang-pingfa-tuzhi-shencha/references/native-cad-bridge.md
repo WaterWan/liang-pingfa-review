@@ -231,17 +231,25 @@ reparse 的 `CadSdkDir`，其中仅可有 `AcMgd.dll`、`AcDbMgd.dll` 与
 不得搜索 PATH、registry 或安装目录；不得下载、复制、pack 或 publish 厂商 DLL。
 缺少 SDK、错误 profile、reparse、copied DLL 或 stub deployment 都必须失败关闭。
 
-profile 是明确的：`autocad2024`/`tssd2024` 为 `net48`；
-`autocad2025`/`tssd2025` 及 `autocad2026`/`tssd2026` 为
-`net8.0-windows`。Autodesk 2026 managed API 文档指定 .NET 8 兼容性，因此
-不得猜测 .NET 10。`tssd*` 仅表示可编译源码 profile，在私有许可宿主证据出现前
-仍为未资格认证状态。
+profile 是明确的：`autocad2024` 为 `net48`；`autocad2025` 为
+`net8.0-windows`；`autocad2026` 为 `net10.0-windows`。Autodesk 当前 2026
+managed compatibility table 规定
+Update 1.2 及以后使用 .NET 10；不得将 2026 profile 错留在 .NET 8。
+当前 AutoCAD adapter 不实现、构建、advertise 或资格认证 TSSD。未来 TSSD
+adapter 必须有不同 adapter ID/version、TSSD-specific product identity、
+plugin/vendor evidence 和必要 object enabler；不得把 AutoCAD host 标为 TSSD。
 
 真实 adapter 只注册三个固定命令：
 
 - `LPF_NATIVE_BRIDGE_BOOTSTRAP`：full-host/session 命令；只从私有 env
-  nonce/output/root/expiry 创建随机、one-instance、本地 named pipe
-  advertisement。pipe 拒绝远程 client，DACL 只给当前 user 与 SYSTEM，并核验
+  nonce/output/root/expiry/**canonical config SHA-256** 创建随机、one-instance、
+  本地 named pipe advertisement。`native-bridge-bootstrap/v1` 是 bounded、
+  canonical、no-replace、current-user/SYSTEM DACL 的一次性私有文件，含
+  schema/protocol、PID/pipe、read-only mode、adapter/plugin/host/runtime、
+  canonical capabilities、进程 identity、nonce/config binding 和 expiry，
+  **绝不含 session ID**。Python 先原子 rename claim、验 DACL/reparse/expiry/
+  nonce/config/plugin/host/capability/process，再连接 pipe；第二消费者、replay、
+  stale 或错 config 均在 pipe 使用前失败。pipe 拒绝远程 client，DACL 只给当前 user 与 SYSTEM，并核验
   client PID/SID/Windows session。pipe worker 不直接访问 Autodesk database；
   它只做 bounded canonical UTF-8 framing/auth，随后经
   `ExecuteInCommandContextAsync` 和 document lock 调度只读导出。
@@ -285,9 +293,9 @@ generated-private-fixture gate 获得私有证据，不能由 stub 或 CI 推断
 TrustedInstaller service SID 所有；该 SID 只作为所有者例外，不把任意 service
 SID 或该链上 Everyone/Users 的显式或继承写入 ACE 视为受信。
 
-脚本严格只有 `_.NETLOAD`、一个经指纹验证的 DLL 路径和一个固定配置命令；
-manifest 路径仅经一个私有环境变量传递。没有 UI、Editor prompt、鼠标、
-键盘、焦点、窗口发现、SendKeys、动态命令或脚本。写入超时为 120 秒，读回
+没有脚本自动执行 NETLOAD、UI、Editor prompt、鼠标、键盘、焦点、窗口发现、
+SendKeys、动态命令或脚本。NETLOAD 与 bootstrap 命令由持证操作人员在明确的
+clean/saved document 中手动执行。写入超时为 120 秒，读回
 超时为 60 秒，标准输出/错误均有固定上限且不会出现在报告中。
 `native-console-result/v2` 的硬读取上限固定为 256 KiB，不得因大量操作而提高；v2
 最多 1,024 个 native operations（覆盖已验证的 623-operation 场景），并在
@@ -387,3 +395,36 @@ cardinality-independent; they contain no raw private fields.
 固定命令、协议、能力、超时和 marker policy。无法满足任何本地文件信任、
 NTFS、DACL、指纹、会话或读回条件时，保持只读结论；不要尝试 ODA 回退或 GUI
 自动化。
+
+### 持证操作人员的实际运行顺序
+
+1. 安装匹配的受许可 host/SDK，使用
+   `native-cad/scripts/build-autocad-adapter.ps1` 显式给出 profile、SDK、
+   新 package 路径、private root 和 private receipt。该 package 只能包含本仓库
+   adapter/core/protocol DLL、PDB、deps JSON、文档/template；不得有 vendor DLL、
+   stub、SDK、receipt 或 evidence。receipt 必须列出所有 allowlisted file 和
+   Adapter/Core/Protocol（2025/2026 还包括 `.deps.json`）的 size/SHA-256；其
+   runtime-package fingerprint 对 format/profile/TFM/按 NFC 文件名排序的组件
+   记录计算。
+2. 在 private NTFS root 创建 config 和 bootstrap nonce/expiry；手动 NETLOAD
+   package，并在明确的 clean/saved full-host drawing 内手动运行
+   `LPF_NATIVE_BRIDGE_BOOTSTRAP`。config 必须携带 receipt 的完整
+   `runtime_package` 和 plugin `runtime_package_fingerprint`；bootstrap 环境还
+   必须提供同一 fingerprint。不得由 Python 或 qualification script 自动 NETLOAD。
+3. 用
+   `native-session prepare --bootstrap <private-file> --native-config <private-config>`
+   让 Python claim advertisement 并生成 client-owned one-use audit session；随后
+   `native-doctor`、`native-audit`、reviewed private intent、`native-plan`。
+4. apply 前操作人员必须在未改变的 full host 中再次手动 bootstrap。新
+   bootstrap/session 用于 `native-apply`，它只保存新 output copy，并执行
+   Core Console write、fresh readback 和 `native-verify`。
+5. 只对生成且获授权的 private fixture，使用
+   `qualify-real-host.ps1 -Phase audit`，再在 fresh bootstrap 后使用
+   `-Phase apply`，同时显式设置 `LIANG_PINGFA_RUN_REAL_HOST=1` 和传入同一
+   private `-ReceiptPath`。脚本在 bootstrap 前、audit 后、apply 前和
+   readback/verify 后重新验证 receipt、package allowlist、每个 critical hash/
+   size 和 config fingerprint；receipt 缺失/篡改、extra/vendor/stub 文件、deps/
+   Core/Protocol 替换或 package-root switch 均不得产生 evidence success。脚本仅产生
+   private redacted summary/evidence；public CI、stub 编译和 dry-run 都不是
+   runtime qualification。当前路径没有 TSSD profile；TSSD 必须先实现上述不同
+   adapter/evidence 路径。

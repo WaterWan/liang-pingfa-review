@@ -151,11 +151,16 @@ ODA 转换必须在受验证 NTFS 与限制性 DACL 的两个独立随机私有�
 
 ## 可选原生 CAD Bridge
 
-原生 Bridge 是与上述 ODA 两阶段工作流分离的可选通道。仅当操作人员明确选择
-外部适配器、PID 和已公布的本地随机命名管道时，才读取
+原生 Bridge 是与上述 ODA 两阶段工作流分离的可选通道。操作人员可明确选择
+外部适配器、PID 和已公布的本地随机命名管道，或由
+`native-session prepare --bootstrap <private-file> --native-config <private-config>`
+原子 claim 一次性 private bootstrap advertisement；后者在连接前检查
+DACL/reparse、expiry、nonce/config、plugin/host/capability 和 PID/process identity，
+且 Python 始终拥有 session ID。详细边界见
 [可选原生 CAD Bridge](references/native-cad-bridge.md)。默认只读；不扫描进程、
 注册表或 PATH，不选择窗口，不使用 GUI、鼠标、键盘、焦点或自动化，也绝不在
-原生失败时回退到 ODA（反之亦然）。
+原生失败时回退到 ODA（反之亦然）。手动 NETLOAD 与 full-host bootstrap 绝不由
+Python 或 qualification script 自动执行。
 
 已发布 native v1 artifact 是冻结、legacy-read-only 的读取表面，不能执行原生写入；
 active session/audit/plan/manifest/result/export/verification 均为 v2。v1 缺少
@@ -170,8 +175,12 @@ read-only wire request/response，不是 v1 写入兼容声明。
 conformance claim，不是本项目可证明的内部事实；公开 CI 的生成 mock 也不构成
 外部宿主集成声明。外部许可、对象启用器和专有组件由操作人员负责，仓库不分发。
 `native-cad` 的 SDK-free 内存事务核心和 syntax-only API stubs 只证明固定协议/
-允许差异模型；它们不是 AutoCAD runtime command、adapter 或兼容性证明，真实映射
-仍留给下一检查点。
+允许差异模型；它们不是 runtime qualification。受许可操作人员可用实际 adapter
+source/package 执行窄 `DBText` translation、copy-only apply 和 fresh readback；
+但只有显式 `LIANG_PINGFA_RUN_REAL_HOST=1` 的 private evidence 才可资格认证，
+public CI、dry-run、fake SDK 和 stub 都不能作此声明。当前 AutoCAD adapter
+没有 TSSD profile；TSSD 需要独立 adapter ID、TSSD-specific host identity、
+plugin/vendor evidence 和 object enabler 后才可能资格认证。
 
 原生会话描述符、机器可读 audit/intent/plan/manifest/Core Console result/export/
 verification（以及任何恢复日志）均为私有最终文件：它们只允许当前用户和 `SYSTEM`，
