@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -37,29 +38,41 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             "LIANG_PINGFA_NATIVE_BOOTSTRAP_OUTPUT";
         internal const string BootstrapExpiryEnvironmentVariable =
             "LIANG_PINGFA_NATIVE_BOOTSTRAP_EXPIRES_AT";
+        internal const string BootstrapConfigSha256EnvironmentVariable =
+            "LIANG_PINGFA_NATIVE_BOOTSTRAP_CONFIG_SHA256";
+        internal const string BootstrapRuntimePackageSha256EnvironmentVariable =
+            "LIANG_PINGFA_NATIVE_BOOTSTRAP_RUNTIME_PACKAGE_SHA256";
+        internal const string RuntimePackageSha256EnvironmentVariable =
+            "LIANG_PINGFA_NATIVE_RUNTIME_PACKAGE_SHA256";
+        internal const string RuntimePackageFormatVersion =
+            "liang-pingfa/autocad-runtime-package/v1";
+        internal const string AdapterAssemblyName =
+            "LiangPingfa.NativeCad.AutoCAD.Adapter.dll";
+        internal const string CoreAssemblyName =
+            "LiangPingfa.NativeCad.Core.dll";
+        internal const string ProtocolAssemblyName =
+            "LiangPingfa.NativeCad.Protocol.dll";
+        internal const string AdapterDepsName =
+            "LiangPingfa.NativeCad.AutoCAD.Adapter.deps.json";
+        private static readonly string[] RuntimeAuxiliaryFileNames =
+        {
+            "LiangPingfa.NativeCad.AutoCAD.Adapter.pdb",
+            "LiangPingfa.NativeCad.Core.pdb",
+            "LiangPingfa.NativeCad.Protocol.pdb",
+            "README.md",
+            "native-bootstrap-context.template.json",
+        };
 
         internal static string Profile
         {
             get
             {
 #if LPF_AUTOCAD_2024
-#if LPF_TSSD_PROFILE
-                return "tssd2024";
-#else
                 return "autocad2024";
-#endif
 #elif LPF_AUTOCAD_2025
-#if LPF_TSSD_PROFILE
-                return "tssd2025";
-#else
                 return "autocad2025";
-#endif
 #elif LPF_AUTOCAD_2026
-#if LPF_TSSD_PROFILE
-                return "tssd2026";
-#else
                 return "autocad2026";
-#endif
 #else
                 throw new AdapterFailureException(
                     "LPF_ADAPTER_PROFILE",
@@ -92,8 +105,24 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
             {
 #if NET48
                 return "net48";
+#elif NET10_0_OR_GREATER
+                return "net10";
 #else
                 return "net8";
+#endif
+            }
+        }
+
+        internal static string RuntimeTargetFramework
+        {
+            get
+            {
+#if NET48
+                return "net48";
+#elif NET10_0_OR_GREATER
+                return "net10.0-windows";
+#else
+                return "net8.0-windows";
 #endif
             }
         }
@@ -118,6 +147,265 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter
         {
             string path = Assembly.GetExecutingAssembly().Location;
             return HashFile(path);
+        }
+
+        /// <summary>
+        /// Recompute the complete repository-authored runtime package
+        /// fingerprint from the adapter's actual assembly directory.  The
+        /// package explicitly excludes Autodesk/TSSD/stub binaries and PDB/
+        /// documentation sidecars; those are never runtime dependencies.
+        /// </summary>
+        internal static string RuntimePackageFingerprint()
+        {
+            string assembly = Assembly.GetExecutingAssembly().Location;
+            if (string.IsNullOrEmpty(assembly) ||
+                !string.Equals(
+                    Path.GetFileName(assembly),
+                    AdapterAssemblyName,
+                    StringComparison.Ordinal))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The adapter runtime assembly location is unavailable.");
+            }
+
+            string? directory = Path.GetDirectoryName(assembly);
+            if (string.IsNullOrEmpty(directory))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The adapter runtime package directory is unavailable.");
+            }
+
+            RequireLoadedRuntimeAssembliesInDirectory(directory);
+            return RuntimePackageFingerprintForDirectory(directory);
+        }
+
+        /// <summary>
+        /// Testable package calculation that has the exact same byte contract
+        /// as the private PowerShell receipt and Python configuration gate.
+        /// </summary>
+        internal static string RuntimePackageFingerprintForDirectory(string directory)
+        {
+            if (string.IsNullOrEmpty(directory) || !Path.IsPathRooted(directory))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The adapter runtime package directory is invalid.");
+            }
+            RequireExactRuntimePackageInventory(directory);
+
+            List<RuntimePackageComponent> components =
+                new List<RuntimePackageComponent>();
+            foreach (string name in RuntimeComponentNames())
+            {
+                components.Add(CaptureRuntimeComponent(directory, name));
+            }
+            components.Sort(
+                delegate(RuntimePackageComponent left, RuntimePackageComponent right)
+                {
+                    return string.CompareOrdinal(left.Name, right.Name);
+                });
+
+            StringBuilder canonical = new StringBuilder();
+            canonical.Append(RuntimePackageFormatVersion).Append('\n');
+            canonical.Append(Profile).Append('\n');
+            canonical.Append(RuntimeTargetFramework).Append('\n');
+            foreach (RuntimePackageComponent component in components)
+            {
+                canonical.Append(component.Name).Append('\t');
+                canonical.Append(component.ByteSize.ToString(CultureInfo.InvariantCulture));
+                canonical.Append('\t').Append(component.Sha256).Append('\n');
+            }
+            return CanonicalJson.Sha256Hex(
+                new UTF8Encoding(false, true).GetBytes(canonical.ToString()));
+        }
+
+        internal static string RequireRuntimePackageFingerprint(string expected)
+        {
+            try
+            {
+                CanonicalJson.RequireSha256(
+                    expected,
+                    "runtime package fingerprint");
+            }
+            catch (CanonicalJsonException)
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The runtime package fingerprint is invalid.");
+            }
+
+            string actual = RuntimePackageFingerprint();
+            if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The runtime package fingerprint differs.");
+            }
+            return actual;
+        }
+
+        private static IEnumerable<string> RuntimeComponentNames()
+        {
+            yield return AdapterAssemblyName;
+            yield return CoreAssemblyName;
+            yield return ProtocolAssemblyName;
+#if !NET48
+            yield return AdapterDepsName;
+#endif
+        }
+
+        private static void RequireLoadedRuntimeAssembliesInDirectory(
+            string directory)
+        {
+            RequireLoadedRuntimeAssembly(
+                Assembly.GetExecutingAssembly(),
+                directory,
+                AdapterAssemblyName);
+            RequireLoadedRuntimeAssembly(
+                typeof(GeometryExportV2).Assembly,
+                directory,
+                CoreAssemblyName);
+            RequireLoadedRuntimeAssembly(
+                typeof(CanonicalJson).Assembly,
+                directory,
+                ProtocolAssemblyName);
+        }
+
+        private static void RequireLoadedRuntimeAssembly(
+            Assembly assembly,
+            string directory,
+            string expectedName)
+        {
+            string location = assembly.Location;
+            string? parent = string.IsNullOrEmpty(location)
+                ? null
+                : Path.GetDirectoryName(location);
+            if (
+                string.IsNullOrEmpty(parent) ||
+                !string.Equals(
+                    Path.GetFileName(location),
+                    expectedName,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    Path.GetFullPath(parent).TrimEnd(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar),
+                    Path.GetFullPath(directory).TrimEnd(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "A loaded runtime assembly escaped the package directory.");
+            }
+        }
+
+        private static void RequireExactRuntimePackageInventory(string directory)
+        {
+            HashSet<string> allowed = new HashSet<string>(
+                StringComparer.Ordinal);
+            foreach (string name in RuntimeComponentNames())
+            {
+                allowed.Add(name);
+            }
+            for (int index = 0; index < RuntimeAuxiliaryFileNames.Length; index++)
+            {
+                allowed.Add(RuntimeAuxiliaryFileNames[index]);
+            }
+
+            HashSet<string> seen = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            string[] entries;
+            try
+            {
+                entries = Directory.GetFileSystemEntries(directory);
+            }
+            catch (Exception)
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The adapter runtime package inventory is unavailable.");
+            }
+
+            for (int index = 0; index < entries.Length; index++)
+            {
+                string entry = entries[index];
+                string name = Path.GetFileName(entry);
+                FileAttributes attributes;
+                try
+                {
+                    attributes = File.GetAttributes(entry);
+                }
+                catch (Exception)
+                {
+                    throw new AdapterFailureException(
+                        "LPF_RUNTIME_PACKAGE",
+                        "The adapter runtime package inventory is unavailable.");
+                }
+                if (
+                    string.IsNullOrEmpty(name) ||
+                    (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint))
+                        != 0 ||
+                    !allowed.Contains(name) ||
+                    !seen.Add(name))
+                {
+                    throw new AdapterFailureException(
+                        "LPF_RUNTIME_PACKAGE",
+                        "The adapter runtime package inventory differs.");
+                }
+            }
+            if (seen.Count != allowed.Count)
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "The adapter runtime package inventory differs.");
+            }
+        }
+
+        private static RuntimePackageComponent CaptureRuntimeComponent(
+            string directory,
+            string name)
+        {
+            string path = Path.Combine(directory, name);
+            FileInfo before = new FileInfo(path);
+            if (!before.Exists || before.Length <= 0 ||
+                !string.Equals(before.Name, name, StringComparison.Ordinal))
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "A required runtime package component is unavailable.");
+            }
+            long size = before.Length;
+            DateTime writeTime = before.LastWriteTimeUtc;
+            string digest = HashFile(path);
+            FileInfo after = new FileInfo(path);
+            if (!after.Exists || after.Length != size ||
+                after.LastWriteTimeUtc != writeTime)
+            {
+                throw new AdapterFailureException(
+                    "LPF_RUNTIME_PACKAGE",
+                    "A runtime package component changed while it was read.");
+            }
+            return new RuntimePackageComponent(name, size, digest);
+        }
+
+        private sealed class RuntimePackageComponent
+        {
+            internal RuntimePackageComponent(string name, long byteSize, string sha256)
+            {
+                Name = name;
+                ByteSize = byteSize;
+                Sha256 = sha256;
+            }
+
+            internal string Name { get; private set; }
+
+            internal long ByteSize { get; private set; }
+
+            internal string Sha256 { get; private set; }
         }
 
         internal static string HashFile(string path)

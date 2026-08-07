@@ -10,16 +10,19 @@
     <CadHostProfile Condition="'$(CadHostProfile)' == ''">disabled</CadHostProfile>
     <CadSdkDir Condition="'$(CadSdkDir)' == ''"></CadSdkDir>
 
-    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2024' Or '$(CadHostProfile)' == 'tssd2024'">net48</TargetFramework>
-    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2025' Or '$(CadHostProfile)' == 'tssd2025'">net8.0-windows</TargetFramework>
-    <!-- Autodesk documents AutoCAD 2026 managed API compatibility with .NET 8. -->
-    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2026' Or '$(CadHostProfile)' == 'tssd2026'">net8.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2024'">net48</TargetFramework>
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2025'">net8.0-windows</TargetFramework>
+    <!-- Autodesk's 2026 compatibility table requires .NET 10 for Update 1.2
+         and later. The explicit 2026 profile follows the current supported
+         API rather than silently compiling a stale .NET 8 plugin. -->
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2026'">net10.0-windows</TargetFramework>
     <!-- A disabled build is not a profile fallback; it exists only so MSBuild
          can evaluate this project and report the explicit opt-in failure. -->
     <TargetFramework Condition="'$(TargetFramework)' == ''">net8.0-windows</TargetFramework>
 
-    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2024' Or '$(CadHostProfile)' == 'tssd2024'">net48</LiangPingfaAdapterExpectedTargetFramework>
-    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2025' Or '$(CadHostProfile)' == 'tssd2025' Or '$(CadHostProfile)' == 'autocad2026' Or '$(CadHostProfile)' == 'tssd2026'">net8.0-windows</LiangPingfaAdapterExpectedTargetFramework>
+    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2024'">net48</LiangPingfaAdapterExpectedTargetFramework>
+    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2025'">net8.0-windows</LiangPingfaAdapterExpectedTargetFramework>
+    <LiangPingfaAdapterExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2026'">net10.0-windows</LiangPingfaAdapterExpectedTargetFramework>
     <LiangPingfaAdapterExpectedTargetFramework Condition="'$(LiangPingfaAdapterExpectedTargetFramework)' == ''">net8.0-windows</LiangPingfaAdapterExpectedTargetFramework>
 
     <AssemblyName>LiangPingfa.NativeCad.AutoCAD.Adapter</AssemblyName>
@@ -38,10 +41,9 @@
          net48 profile requires the operator/CI Windows targeting pack. -->
     <AutomaticallyUseReferenceAssemblyPackages>false</AutomaticallyUseReferenceAssemblyPackages>
     <DefineConstants>$(DefineConstants);LPF_AUTOCAD_ADAPTER</DefineConstants>
-    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2024' Or '$(CadHostProfile)' == 'tssd2024'">$(DefineConstants);LPF_AUTOCAD_2024</DefineConstants>
-    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2025' Or '$(CadHostProfile)' == 'tssd2025'">$(DefineConstants);LPF_AUTOCAD_2025</DefineConstants>
-    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2026' Or '$(CadHostProfile)' == 'tssd2026'">$(DefineConstants);LPF_AUTOCAD_2026</DefineConstants>
-    <DefineConstants Condition="'$(CadHostProfile)' == 'tssd2024' Or '$(CadHostProfile)' == 'tssd2025' Or '$(CadHostProfile)' == 'tssd2026'">$(DefineConstants);LPF_TSSD_PROFILE</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2024'">$(DefineConstants);LPF_AUTOCAD_2024</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2025'">$(DefineConstants);LPF_AUTOCAD_2025</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2026'">$(DefineConstants);LPF_AUTOCAD_2026</DefineConstants>
     <DefineConstants Condition="'$(UseAutodeskApiStubs)' == 'true'">$(DefineConstants);LPF_AUTODESK_API_STUBS</DefineConstants>
   </PropertyGroup>
 
@@ -82,8 +84,8 @@
           BeforeTargets="Restore;PrepareForBuild;ResolveReferences;CoreCompile;Pack;Publish">
     <Error Condition="'$(BuildAutoCadAdapter)' != 'true'"
            Text="LiangPingfa.AutoCadAdapter: BuildAutoCadAdapter=true is required; this project is not a default deployment artifact." />
-    <Error Condition="'$(CadHostProfile)' != 'autocad2024' And '$(CadHostProfile)' != 'tssd2024' And '$(CadHostProfile)' != 'autocad2025' And '$(CadHostProfile)' != 'tssd2025' And '$(CadHostProfile)' != 'autocad2026' And '$(CadHostProfile)' != 'tssd2026'"
-           Text="LiangPingfa.AutoCadAdapter: CadHostProfile must be one explicit supported profile." />
+    <Error Condition="'$(CadHostProfile)' != 'autocad2024' And '$(CadHostProfile)' != 'autocad2025' And '$(CadHostProfile)' != 'autocad2026'"
+           Text="LiangPingfa.AutoCadAdapter: CadHostProfile must be one explicit AutoCAD profile." />
     <Error Condition="'$(TargetFramework)' != '$(LiangPingfaAdapterExpectedTargetFramework)'"
            Text="LiangPingfa.AutoCadAdapter: target framework does not match CadHostProfile." />
     <Error Condition="'$(UseAutodeskApiStubs)' != 'true' And '$(UseAutodeskApiStubs)' != 'false'"
