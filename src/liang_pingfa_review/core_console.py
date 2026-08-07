@@ -756,6 +756,7 @@ def _minimal_environment(
     manifest_path: Path,
     result_path: Path,
     run_id: str,
+    runtime_package_fingerprint: str,
 ) -> dict[str, str]:
     """Create the small inherited environment allowed to an external console."""
 
@@ -772,6 +773,7 @@ def _minimal_environment(
             "LIANG_PINGFA_NATIVE_RESULT": os.fspath(result_path),
             "LIANG_PINGFA_NATIVE_RUN_ID": run_id,
             "LIANG_PINGFA_NATIVE_PRIVATE_ROOT": os.fspath(workspace.path),
+            "LIANG_PINGFA_NATIVE_RUNTIME_PACKAGE_SHA256": runtime_package_fingerprint,
         }
     )
     return environment
@@ -880,6 +882,9 @@ def run_core_console(
                 manifest_path=manifest_path,
                 result_path=result_path,
                 run_id=run_id,
+                runtime_package_fingerprint=checked["runtime_package"][
+                    "fingerprint"
+                ],
             ),
         )
         threads = [
