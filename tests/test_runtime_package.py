@@ -39,6 +39,7 @@ from tests.support.synthetic_native import (
     configure_autocad_runtime_package,
     config as synthetic_config,
 )
+from tests.support.dotnet_subprocess import run_dotnet
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -64,12 +65,10 @@ _PROFILE_OUTPUTS = {
 
 
 def _run(*arguments: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        ["dotnet", *arguments],
+    return run_dotnet(
+        *arguments,
         cwd=PROJECT_ROOT,
-        capture_output=True,
-        check=False,
-    )
+    )  # type: ignore[return-value]
 
 
 def _output(result: subprocess.CompletedProcess[bytes]) -> str:

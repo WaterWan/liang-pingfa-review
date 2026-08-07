@@ -56,6 +56,7 @@ from tests.support.synthetic_native import (
     configure_autocad_runtime_package,
     config as synthetic_native_config,
 )
+from tests.support.dotnet_subprocess import run_dotnet
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -94,12 +95,10 @@ AUTOCAD_ADAPTER_CAPABILITIES = [
 
 
 def _run(*arguments: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        ["dotnet", *arguments],
+    return run_dotnet(
+        *arguments,
         cwd=PROJECT_ROOT,
-        capture_output=True,
-        check=False,
-    )
+    )  # type: ignore[return-value]
 
 
 def _output(result: subprocess.CompletedProcess[bytes]) -> str:
@@ -1292,8 +1291,7 @@ Write-Output '{"status":"ok","qualification":"argument-captured"}'
                     "LPF_REALHOST_ARGUMENT_CAPTURE": os.fspath(argument_capture),
                 }
             )
-            runner_command = [
-                "dotnet",
+            runner_arguments = [
                 "run",
                 "--project",
                 os.fspath(REALHOST_TEST_PROJECT),
@@ -1304,12 +1302,10 @@ Write-Output '{"status":"ok","qualification":"argument-captured"}'
 
             missing_receipt_environment = runner_environment.copy()
             del missing_receipt_environment["LIANG_PINGFA_REAL_HOST_RECEIPT"]
-            missing_runner_receipt = subprocess.run(
-                runner_command,
+            missing_runner_receipt = run_dotnet(
+                *runner_arguments,
                 cwd=PROJECT_ROOT,
                 env=missing_receipt_environment,
-                capture_output=True,
-                check=False,
             )
             self.assertNotEqual(0, missing_runner_receipt.returncode)
             self.assertFalse(argument_capture.exists())
@@ -1318,22 +1314,18 @@ Write-Output '{"status":"ok","qualification":"argument-captured"}'
             nonexistent_receipt_environment["LIANG_PINGFA_REAL_HOST_RECEIPT"] = (
                 os.fspath(work / "missing-runner-receipt.json")
             )
-            nonexistent_runner_receipt = subprocess.run(
-                runner_command,
+            nonexistent_runner_receipt = run_dotnet(
+                *runner_arguments,
                 cwd=PROJECT_ROOT,
                 env=nonexistent_receipt_environment,
-                capture_output=True,
-                check=False,
             )
             self.assertNotEqual(0, nonexistent_runner_receipt.returncode)
             self.assertFalse(argument_capture.exists())
 
-            runner_result = subprocess.run(
-                runner_command,
+            runner_result = run_dotnet(
+                *runner_arguments,
                 cwd=PROJECT_ROOT,
                 env=runner_environment,
-                capture_output=True,
-                check=False,
             )
             self.assertEqual(0, runner_result.returncode, _output(runner_result))
             self.assertNotIn(os.fspath(receipt), _output(runner_result))
@@ -1720,9 +1712,14 @@ ConvertTo-Json -InputObject @($observed) -Compress
     def test_console_export_uses_adapter_core_and_python_carrier_profile(self) -> None:
         """Exercise the adapter writer path against generated opaque carriers."""
 
-        for project in (ADAPTER_TEST_PROJECT, CORE_TEST_PROJECT):
-            result = _run("build", str(project), "-c", "Release", "--nologo")
-            self.assertEqual(0, result.returncode, _output(result))
+        for iteration in range(3):
+            for project in (ADAPTER_TEST_PROJECT, CORE_TEST_PROJECT):
+                result = _run("build", str(project), "-c", "Release", "--nologo")
+                self.assertEqual(
+                    0,
+                    result.returncode,
+                    f"iteration {iteration}: {_output(result)}",
+                )
 
         rules = opaque_embedded_json_rules("console_export")
 

@@ -37,6 +37,7 @@ from liang_pingfa_review.native_verify import (
     validate_console_result,
 )
 from tests.support.synthetic_native import config, entity, geometry, intent, session
+from tests.support.dotnet_subprocess import run_dotnet_command
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -208,7 +209,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Build the C# vector runner that this Python suite executes."""
 
-        completed = subprocess.run(
+        completed = run_dotnet_command(
             [
                 "dotnet",
                 "build",
@@ -326,7 +327,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
         )
         for name, properties in probes:
             with self.subTest(probe=name):
-                completed = subprocess.run(
+                completed = run_dotnet_command(
                     [
                         "dotnet",
                         "build",
@@ -403,7 +404,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            completed = subprocess.run(
+            completed = run_dotnet_command(
                 [
                     "dotnet",
                     "build",
@@ -484,7 +485,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             package_directory = Path(temporary)
-            rejected = subprocess.run(
+            rejected = run_dotnet_command(
                 [
                     "dotnet",
                     "pack",
@@ -508,7 +509,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
             self.assertEqual([], list(package_directory.glob("*.nupkg")))
 
             publish_directory = package_directory / "publish"
-            published = subprocess.run(
+            published = run_dotnet_command(
                 [
                     "dotnet",
                     "publish",
@@ -542,7 +543,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                 / "LiangPingfa.NativeCad.Core"
                 / "LiangPingfa.NativeCad.Core.csproj"
             )
-            packed = subprocess.run(
+            packed = run_dotnet_command(
                 [
                     "dotnet",
                     "pack",
@@ -707,7 +708,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
-                    completed = subprocess.run(
+                    completed = run_dotnet_command(
                         [
                             "dotnet",
                             "run",
@@ -757,7 +758,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                     )
                     inner_path = temporary_path / f"depth-inner-{index}.json"
                     inner_path.write_text(text, encoding="utf-8")
-                    completed = subprocess.run(
+                    completed = run_dotnet_command(
                         [
                             "dotnet",
                             "run",
@@ -811,7 +812,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
-                    outer_completed = subprocess.run(
+                    outer_completed = run_dotnet_command(
                         [
                             "dotnet",
                             "run",
@@ -859,7 +860,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
             for token in fixture["rejected_number_tokens"]:
                 with self.subTest(token=token):
                     payload_path.write_text(token, encoding="utf-8")
-                    completed = subprocess.run(
+                    completed = run_dotnet_command(
                         [
                             "dotnet",
                             "run",
@@ -938,7 +939,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
-                    completed = subprocess.run(
+                    completed = run_dotnet_command(
                         [
                             "dotnet",
                             "run",
@@ -1038,7 +1039,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                         ),
                         encoding="utf-8",
                     )
-                    completed = subprocess.run(
+                    completed = run_dotnet_command(
                         [
                             "dotnet",
                             "run",
@@ -1092,7 +1093,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
             manifest_path.write_bytes(
                 canonical_native_contract_bytes("manifest", manifest) + b"\n"
             )
-            completed = subprocess.run(
+            completed = run_dotnet_command(
                 [
                     "dotnet",
                     "run",
@@ -1147,7 +1148,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
                 ),
             )
 
-            readback_completed = subprocess.run(
+            readback_completed = run_dotnet_command(
                 [
                     "dotnet",
                     "run",
@@ -1203,7 +1204,7 @@ class NativeCadCoreCheckpointTests(unittest.TestCase):
             manifest_path.write_bytes(
                 canonical_native_contract_bytes("manifest", forged) + b"\n"
             )
-            rejected = subprocess.run(
+            rejected = run_dotnet_command(
                 [
                     "dotnet",
                     "run",

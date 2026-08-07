@@ -73,6 +73,7 @@ from tests.support.synthetic_native import (
     intent,
     session,
 )
+from tests.support.dotnet_subprocess import run_dotnet_command
 
 
 class NativeContractTests(unittest.TestCase):
@@ -1535,7 +1536,7 @@ static string[] Names<T>() =>
             )
             (temporary_root / "Program.cs").write_text(program, encoding="utf-8")
             try:
-                result = subprocess.run(
+                result = run_dotnet_command(
                     [
                         "dotnet",
                         "run",
