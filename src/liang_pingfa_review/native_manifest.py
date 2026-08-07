@@ -384,7 +384,10 @@ def _require_config_matches_export(
         binding["adapter"] != config["adapter"]
         or binding["plugin"]["id"] != plugin["id"]
         or binding["plugin"]["version"] != plugin["version"]
-        or binding["plugin"]["fingerprint"] != plugin["sha256"]
+        or binding["plugin"]["fingerprint"]
+        != plugin["runtime_package_fingerprint"]
+        or plugin["runtime_package_fingerprint"]
+        != config["runtime_package"]["fingerprint"]
         or not set(config["required_capabilities"]).issubset(binding["capabilities"])
     ):
         raise PipelineError(ErrorCode.NATIVE_CAPABILITY_MISMATCH, "fresh bridge capability drift")
@@ -724,6 +727,9 @@ def build_native_manifest(
             "write_plugin_fingerprint": checked_config["plugins"]["write"]["sha256"],
             "readback_plugin_fingerprint": checked_config["plugins"]["readback"][
                 "sha256"
+            ],
+            "runtime_package_fingerprint": checked_config["runtime_package"][
+                "fingerprint"
             ],
             "write_command": checked_config["plugins"]["write"]["command"],
             "readback_command": checked_config["plugins"]["readback"]["command"],

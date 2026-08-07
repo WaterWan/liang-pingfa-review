@@ -29,6 +29,75 @@ _POSTCONDITION_FOR_KIND = {
 }
 
 
+def generate_qualification_translation_intent(
+    audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create one deterministic +X translation for an authorized test fixture.
+
+    This is intentionally not a general edit suggestion. The real-host
+    qualification harness calls it only after proving that its source is an
+    operator-generated private fixture. A nonzero binary64 delta makes the
+    copy-only apply/readback evidence observable without relying on a marker
+    profile or deletion.
+    """
+
+    checked_audit = require_fresh_native_audit(audit)
+    actionable = {
+        finding["target_id"]
+        for finding in checked_audit["findings"]
+        if (
+            finding["actionability"] is True
+            and finding["profile"] == "translate_dbtext/v1"
+        )
+    }
+    candidates = sorted(
+        record["target_id"]
+        for record in checked_audit["records"]
+        if (
+            "translate_dbtext/v1" in record["eligible_profiles"]
+            and record["target_id"] in actionable
+        )
+    )
+    if not candidates:
+        raise PipelineError(
+            ErrorCode.NATIVE_OPERATION_INVALID,
+            "qualification fixture has no translation-eligible DBText",
+        )
+    target_id = candidates[0]
+    operation_seed = {
+        "audit_integrity_sha256": native_artifact_integrity(checked_audit),
+        "kind": "translate_dbtext",
+        "qualification_profile": "generated-private-fixture/v1",
+        "target_id": target_id,
+    }
+    operation = {
+        "operation_id": "native-operation-"
+        + canonical_sha256(operation_seed)[:24],
+        "kind": "translate_dbtext",
+        "target_id": target_id,
+        # +1.0 X is exactly representable. The later manifest construction
+        # independently rejects a fixture where this would not be a valid
+        # geometry transition.
+        "delta": ["3ff0000000000000", "0000000000000000", "0000000000000000"],
+    }
+    common = {
+        "audit_binding": {
+            **native_audit_binding(checked_audit),
+            "audit_schema_version": checked_audit["schema_version"],
+        },
+        "operations": [operation],
+    }
+    artifact = {
+        "schema_version": "liang-pingfa/native-edit-intent/v2",
+        "intent_id": "native-intent-" + canonical_sha256(common)[:32],
+        # The intent remains deterministic and cannot extend the audit's
+        # independent 15-minute validity window.
+        "created_at": checked_audit["created_at"],
+        **common,
+    }
+    return validate_native_contract("intent", attach_integrity(artifact))
+
+
 def _plan_adapter_binding(audit: Mapping[str, Any]) -> dict[str, Any]:
     # Carry the complete audited adapter/plugin/version/protocol tuple, not a
     # compatibility subset.  ``audit_binding`` integrity already protects it,
