@@ -19,10 +19,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Set up .NET contracts SDK
+      - name: Set up .NET SDKs for syntax-only native profiles
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Verify .NET Framework 4.8 targeting pack
+        run: |
+          $targetingPack = "${env:ProgramFiles(x86)}\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8"
+          if (-not (Test-Path $targetingPack -PathType Container)) {
+            throw "The Windows runner must provide the .NET Framework 4.8 targeting pack for autocad2024 syntax compilation."
+          }
       - name: Install project
         run: python -m pip install .
       - name: Validate repository
@@ -33,6 +41,38 @@ jobs:
         run: python scripts/validate_skill.py --tracked
       - name: Run full Windows suite including native handle tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Parse operator scripts in Windows PowerShell 5.1 and PowerShell 7
+        shell: powershell
+        run: |
+          $scripts = @(
+            "native-cad\scripts\powershell-compatibility.ps1",
+            "native-cad\scripts\build-autocad-adapter.ps1",
+            "native-cad\scripts\qualify-real-host.ps1"
+          )
+          foreach ($shell in @(
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe",
+            (Get-Command pwsh -ErrorAction Stop).Source
+          )) {
+            foreach ($script in $scripts) {
+              $env:LPF_OPERATOR_SCRIPT_TO_PARSE = $script
+              & $shell -NoProfile -NonInteractive -Command @'
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+  $env:LPF_OPERATOR_SCRIPT_TO_PARSE,
+  [ref]$tokens,
+  [ref]$errors
+) | Out-Null
+if ($errors.Count -ne 0) {
+  throw "Operator script parsing failed."
+}
+'@
+              if ($LASTEXITCODE -ne 0) {
+                throw "Operator script parsing failed."
+              }
+            }
+          }
+          Remove-Item Env:LPF_OPERATOR_SCRIPT_TO_PARSE -ErrorAction SilentlyContinue
       - name: Compile Python sources
         run: python -m compileall -q src tests scripts
       - name: Build SDK-free native bridge contracts
@@ -43,10 +83,17 @@ jobs:
         run: dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo
       - name: Run generated native CAD core tests
         run: dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build
-      - name: Build syntax-only AutoCAD adapter profiles and fail-closed probes
+      - name: Compile syntax-only AutoCAD adapter profiles and test hosts
         run: |
           native-cad\scripts\verify-autocad-adapter.ps1 -Configuration Release
-          dotnet run --project native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj -c Release --nologo
+          dotnet run --project native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj -c Release --nologo -p:CadHostProfile=autocad2025
+      - name: Confirm opt-in real-host runner is skipped in public CI
+        run: |
+          $runner = "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj"
+          foreach ($profile in @("autocad2024", "autocad2025", "autocad2026")) {
+            dotnet build $runner -c Release --nologo "-p:CadHostProfile=$profile"
+          }
+          dotnet run --project native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj -c Release --nologo
       - name: Check CLI help
         run: |
           python -m liang_pingfa_review --help
@@ -58,6 +105,7 @@ jobs:
           python -m liang_pingfa_review verify --help
           python -m liang_pingfa_review local-regression --help
           python -m liang_pingfa_review native-session --help
+          python -m liang_pingfa_review native-qualification-intent --help
           python -m liang_pingfa_review native-doctor --help
           python -m liang_pingfa_review native-audit --help
           python -m liang_pingfa_review native-plan --help
