@@ -41,6 +41,24 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                 }
 
                 if (arguments.Length == 2 &&
+                    string.Equals(
+                        arguments[0],
+                        "file-identity-fingerprint",
+                        StringComparison.Ordinal))
+                {
+                    return EmitFileIdentityFingerprint(arguments[1]);
+                }
+
+                if (arguments.Length == 2 &&
+                    string.Equals(
+                        arguments[0],
+                        "runtime-package-fingerprint",
+                        StringComparison.Ordinal))
+                {
+                    return EmitRuntimePackageFingerprint(arguments[1]);
+                }
+
+                if (arguments.Length == 2 &&
                     string.Equals(arguments[0], "pipe-tokens", StringComparison.Ordinal))
                 {
                     return EmitPipeTokens(arguments[1]);
@@ -55,11 +73,29 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                     return EmitCanonicalCapabilities();
                 }
 
+                if (arguments.Length == 6 &&
+                    string.Equals(
+                        arguments[0],
+                        "bootstrap-advertisement",
+                        StringComparison.Ordinal))
+                {
+                    return EmitBootstrapAdvertisement(
+                        arguments[1],
+                        arguments[2],
+                        arguments[3],
+                        arguments[4],
+                        arguments[5]);
+                }
+
                 if (arguments.Length != 0)
                 {
                     Console.Error.WriteLine(
                         "Usage: canonical-console-export <canonical-json-path> | " +
-                        "canonical-capabilities | pipe-tokens <count>");
+                        "file-identity-fingerprint <local-ntfs-dwg-path> | " +
+                        "runtime-package-fingerprint <package-directory> | " +
+                        "canonical-capabilities | pipe-tokens <count> | " +
+                        "bootstrap-advertisement <nonce> <config-sha256> " +
+                        "<plugin-sha256> <issued-at> <expires-at>");
                     return 64;
                 }
 
@@ -69,6 +105,8 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                 CheckFixedNtfsVolumePolicy();
                 CheckCanonicalCapabilities();
                 CheckPipeTokenGrammar();
+                CheckProfileRuntimeBinding();
+                CheckBootstrapAdvertisementWireShape();
                 CheckPrivateOwnerPolicy();
                 BridgeExpiryLifetimeTests.Run();
                 CheckBootstrapDoesNotBlockCommandContext();
@@ -82,15 +120,32 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                 CheckErasedPhysicalSequencePolicy();
                 CheckInitialWriteCapabilityBoundary();
                 CheckStableBindingCapture();
+                CheckFileIdentityProjection();
                 CheckStaticSafetyBoundaries();
                 Console.WriteLine("PASS: AutoCAD adapter syntax-only metadata and source safety checks");
                 return 0;
             }
+
             catch (Exception exception)
             {
                 Console.Error.WriteLine("FAIL: " + exception);
                 return 1;
             }
+        }
+
+        private static int EmitFileIdentityFingerprint(string path)
+        {
+            NativeSourceBindingV2 binding = NativeSourceBindingCapture.Capture(path);
+            Console.WriteLine(binding.FileIdentityFingerprint);
+            return 0;
+        }
+
+        private static int EmitRuntimePackageFingerprint(string directory)
+        {
+            Console.WriteLine(
+                AdapterIdentity.RuntimePackageFingerprintForDirectory(
+                    Path.GetFullPath(directory)));
+            return 0;
         }
 
         private static int EmitPipeTokens(string rawCount)
@@ -125,6 +180,98 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
             Console.WriteLine(CanonicalJson.Serialize(
                 NativeCadCapabilities.ToWireValue(AdapterIdentity.Capabilities)));
             return 0;
+        }
+
+        private static int EmitBootstrapAdvertisement(
+            string nonce,
+            string configSha256,
+            string pluginSha256,
+            string issuedAt,
+            string expiresAt)
+        {
+            DateTime issuedUtc;
+            DateTime expiresUtc;
+            if (!DateTime.TryParseExact(
+                    issuedAt,
+                    "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out issuedUtc) ||
+                !DateTime.TryParseExact(
+                    expiresAt,
+                    "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out expiresUtc))
+            {
+                Console.Error.WriteLine("bootstrap timestamps must be whole-second UTC values.");
+                return 64;
+            }
+            byte[] bytes = NativeBridgeAdvertisement.SerializeForTest(
+                nonce,
+                configSha256,
+                pluginSha256,
+                issuedUtc,
+                expiresUtc);
+            Console.Write(Encoding.UTF8.GetString(bytes));
+            return 0;
+        }
+
+        private static void CheckProfileRuntimeBinding()
+        {
+#if LPF_AUTOCAD_2024
+            Assert(
+                string.Equals(AdapterIdentity.HostRuntime, "net48", StringComparison.Ordinal),
+                "The 2024 adapter profile must bind net48.");
+            Assert(
+                string.Equals(AdapterIdentity.Profile, "autocad2024", StringComparison.Ordinal) &&
+                string.Equals(AdapterIdentity.HostRelease, "2024", StringComparison.Ordinal),
+                "The 2024 adapter must advertise its matching AutoCAD profile and release.");
+#elif LPF_AUTOCAD_2025
+            Assert(
+                string.Equals(AdapterIdentity.HostRuntime, "net8", StringComparison.Ordinal),
+                "The 2025 adapter profile must bind net8.");
+            Assert(
+                string.Equals(AdapterIdentity.Profile, "autocad2025", StringComparison.Ordinal) &&
+                string.Equals(AdapterIdentity.HostRelease, "2025", StringComparison.Ordinal),
+                "The 2025 adapter must advertise its matching AutoCAD profile and release.");
+#elif LPF_AUTOCAD_2026
+            Assert(
+                string.Equals(AdapterIdentity.HostRuntime, "net10", StringComparison.Ordinal),
+                "The 2026 adapter profile must bind net10.");
+            Assert(
+                string.Equals(AdapterIdentity.Profile, "autocad2026", StringComparison.Ordinal) &&
+                string.Equals(AdapterIdentity.HostRelease, "2026", StringComparison.Ordinal),
+                "The 2026 adapter must advertise its matching AutoCAD profile and release.");
+#else
+            throw new InvalidOperationException(
+                "The adapter test host was built without an explicit profile.");
+#endif
+        }
+
+        private static void CheckBootstrapAdvertisementWireShape()
+        {
+            string nonce = new string('a', 43);
+            string configSha256 = new string('b', 64);
+            string pluginSha256 = new string('c', 64);
+            DateTime issuedUtc = DateTime.UtcNow;
+            string advertisement = Encoding.UTF8.GetString(
+                NativeBridgeAdvertisement.SerializeForTest(
+                    nonce,
+                    configSha256,
+                    pluginSha256,
+                    issuedUtc,
+                    issuedUtc.AddMinutes(2)));
+            Assert(
+                advertisement.IndexOf(
+                    "\"schema_version\":\"liang-pingfa/native-bridge-bootstrap/v1\"",
+                    StringComparison.Ordinal) >= 0 &&
+                advertisement.IndexOf("\"session_id\"", StringComparison.Ordinal) < 0 &&
+                advertisement.IndexOf("\"config_sha256\":\"" + configSha256 + "\"",
+                    StringComparison.Ordinal) >= 0 &&
+                advertisement.IndexOf("\"runtime\":\"" + AdapterIdentity.HostRuntime + "\"",
+                    StringComparison.Ordinal) >= 0,
+                "Bootstrap advertisement lost its strict client-owned-session binding.");
         }
 
         private static void CheckCanonicalCapabilities()
@@ -1461,6 +1608,18 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                             DateTime.UtcNow.AddMinutes(1));
                     },
                     "Timestamp or size drift after hashing must be rejected.");
+                File.WriteAllBytes(path, original);
+                DateTime originalLastWrite = File.GetLastWriteTimeUtc(path);
+                AssertBindingCaptureRejects(
+                    path,
+                    NativeSourceBindingCapture.BindingCaptureFaultPoint.BetweenHashes,
+                    delegate
+                    {
+                        File.SetLastWriteTimeUtc(
+                            path,
+                            originalLastWrite.AddMinutes(2));
+                    },
+                    "Last-write drift without byte drift must be rejected.");
 
                 // A writer already open by AutoCAD prevents the preferred
                 // no-write lease. Capture must fall back to host-compatible
@@ -1518,6 +1677,74 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                     Directory.Delete(directory, true);
                 }
             }
+        }
+
+        private static void CheckFileIdentityProjection()
+        {
+            NativeSourceBindingCapture.ByHandleFileInformation baseline =
+                new NativeSourceBindingCapture.ByHandleFileInformation
+                {
+                    CreationTime = new NativeSourceBindingCapture.FileTime
+                    {
+                        LowDateTime = 0x7de98115,
+                        HighDateTime = 0x112210f4,
+                    },
+                    LastWriteTime = new NativeSourceBindingCapture.FileTime
+                    {
+                        LowDateTime = 1,
+                        HighDateTime = 2,
+                    },
+                    VolumeSerialNumber = 0x12345678,
+                    FileSizeHigh = 0,
+                    FileSizeLow = 42,
+                    FileIndexHigh = 0x12345678,
+                    FileIndexLow = 0x9abcdef0,
+                };
+            Assert(
+                string.Equals(
+                    CanonicalJson.Sha256Hex(new Dictionary<string, object?>(
+                    StringComparer.Ordinal)
+                    {
+                        { "creation_time_100ns", 1234567890123456789UL },
+                        { "first", 305419896UL },
+                        { "namespace", "windows-file-id" },
+                        { "second", 1311768467463790320UL },
+                    }),
+                    NativeSourceBindingCapture.IdentityFingerprint(baseline),
+                    StringComparison.Ordinal),
+                "File identity projection must match the frozen Python vector.");
+
+            NativeSourceBindingCapture.ByHandleFileInformation changedCreation = baseline;
+            changedCreation.CreationTime.LowDateTime++;
+            NativeSourceBindingCapture.ByHandleFileInformation changedVolume = baseline;
+            changedVolume.VolumeSerialNumber++;
+            NativeSourceBindingCapture.ByHandleFileInformation changedIndex = baseline;
+            changedIndex.FileIndexLow++;
+            NativeSourceBindingCapture.ByHandleFileInformation changedSizeAndWrite = baseline;
+            changedSizeAndWrite.FileSizeLow++;
+            changedSizeAndWrite.LastWriteTime.LowDateTime++;
+
+            string identity = NativeSourceBindingCapture.IdentityFingerprint(baseline);
+            Assert(
+                !string.Equals(
+                    identity,
+                    NativeSourceBindingCapture.IdentityFingerprint(changedCreation),
+                    StringComparison.Ordinal) &&
+                !string.Equals(
+                    identity,
+                    NativeSourceBindingCapture.IdentityFingerprint(changedVolume),
+                    StringComparison.Ordinal) &&
+                !string.Equals(
+                    identity,
+                    NativeSourceBindingCapture.IdentityFingerprint(changedIndex),
+                    StringComparison.Ordinal),
+                "Creation time, volume serial, and file index must identify distinct files.");
+            Assert(
+                string.Equals(
+                    identity,
+                    NativeSourceBindingCapture.IdentityFingerprint(changedSizeAndWrite),
+                    StringComparison.Ordinal),
+                "Size and last-write time must not alter file identity.");
         }
 
         private static void AssertBindingCaptureRejects(

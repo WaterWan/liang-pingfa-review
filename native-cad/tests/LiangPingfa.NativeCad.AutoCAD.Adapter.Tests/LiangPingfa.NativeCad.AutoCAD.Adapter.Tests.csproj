@@ -1,7 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <CadHostProfile Condition="'$(CadHostProfile)' == ''">autocad2025</CadHostProfile>
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2024'">net48</TargetFramework>
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2025'">net8.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(CadHostProfile)' == 'autocad2026'">net10.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net8.0-windows</TargetFramework>
+    <LiangPingfaAdapterTestExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2024'">net48</LiangPingfaAdapterTestExpectedTargetFramework>
+    <LiangPingfaAdapterTestExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2025'">net8.0-windows</LiangPingfaAdapterTestExpectedTargetFramework>
+    <LiangPingfaAdapterTestExpectedTargetFramework Condition="'$(CadHostProfile)' == 'autocad2026'">net10.0-windows</LiangPingfaAdapterTestExpectedTargetFramework>
+    <LiangPingfaAdapterTestExpectedTargetFramework Condition="'$(LiangPingfaAdapterTestExpectedTargetFramework)' == ''">net8.0-windows</LiangPingfaAdapterTestExpectedTargetFramework>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2024'">$(DefineConstants);LPF_AUTOCAD_2024</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2025'">$(DefineConstants);LPF_AUTOCAD_2025</DefineConstants>
+    <DefineConstants Condition="'$(CadHostProfile)' == 'autocad2026'">$(DefineConstants);LPF_AUTOCAD_2026</DefineConstants>
     <AssemblyName>LiangPingfa.NativeCad.AutoCAD.Adapter.Tests</AssemblyName>
     <RootNamespace>LiangPingfa.NativeCad.AutoCAD.Adapter.Tests</RootNamespace>
     <NativeCadPolicyMode>checkpoint-2-adapter-tests</NativeCadPolicyMode>
@@ -13,7 +24,7 @@
       <CopyLocal>true</CopyLocal>
     </ProjectReference>
     <ProjectReference Include="..\..\src\LiangPingfa.NativeCad.AutoCAD.Adapter\LiangPingfa.NativeCad.AutoCAD.Adapter.csproj">
-      <AdditionalProperties>BuildAutoCadAdapter=true;UseAutodeskApiStubs=true;CadHostProfile=autocad2025</AdditionalProperties>
+      <AdditionalProperties>BuildAutoCadAdapter=true;UseAutodeskApiStubs=true;CadHostProfile=$(CadHostProfile)</AdditionalProperties>
     </ProjectReference>
   </ItemGroup>
   <Import Project="..\..\NativeCad.RepositoryPolicy.targets" />

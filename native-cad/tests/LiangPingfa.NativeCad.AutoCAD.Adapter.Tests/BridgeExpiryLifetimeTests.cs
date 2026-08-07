@@ -422,7 +422,9 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                         stopwatch,
                         "The " + method + " " + responseKind +
                         " outlived its request deadline.");
-                    Assert(deadline.Token.IsCancellationRequested && pipeClosed,
+                    Assert(
+                        deadline.Token.IsCancellationRequested &&
+                        WaitForPipeClose(() => pipeClosed),
                         "The " + method + " " + responseKind +
                         " did not cancel and close its pipe.");
                 }
@@ -459,7 +461,9 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                         stopwatch,
                         "Delayed " + description +
                         " outlived its request deadline.");
-                    Assert(deadline.Token.IsCancellationRequested && pipeClosed,
+                    Assert(
+                        deadline.Token.IsCancellationRequested &&
+                        WaitForPipeClose(() => pipeClosed),
                         "Delayed " + description +
                         " did not close the active named pipe.");
                 }
@@ -476,6 +480,20 @@ namespace LiangPingfa.NativeCad.AutoCAD.Adapter.Tests
                 sessionDeadlineTimestamp,
                 CancellationToken.None,
                 CancellationToken.None);
+        }
+
+        private static bool WaitForPipeClose(Func<bool> closed)
+        {
+            Stopwatch wait = Stopwatch.StartNew();
+            while (wait.ElapsedMilliseconds < 500)
+            {
+                if (closed())
+                {
+                    return true;
+                }
+                Thread.Sleep(1);
+            }
+            return closed();
         }
 
         private static void AssertMethodDeadline(
