@@ -20,6 +20,7 @@ if str(SCRIPTS_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
 import validate_skill
+from tests.support.dotnet_subprocess import run_dotnet_command
 
 
 class ValidateSkillTests(unittest.TestCase):
@@ -862,7 +863,7 @@ class ValidateSkillTests(unittest.TestCase):
     def test_dotnet_build_then_validation_passes_without_cleanup(self) -> None:
         if shutil.which("dotnet") is None:
             self.skipTest(".NET SDK is unavailable outside the CI build image")
-        result = subprocess.run(
+        result = run_dotnet_command(
             [
                 "dotnet",
                 "build",
@@ -899,7 +900,7 @@ class ValidateSkillTests(unittest.TestCase):
                 # default profile. Every explicit profile is checked below.
                 continue
             with self.subTest(project=relative):
-                result = subprocess.run(
+                result = run_dotnet_command(
                     [
                         "dotnet",
                         "msbuild",
@@ -924,7 +925,7 @@ class ValidateSkillTests(unittest.TestCase):
                 validate_skill.NATIVE_CAD_ADAPTER_PROFILE_FRAMEWORKS.items()
             ):
                 with self.subTest(project=relative, profile=profile):
-                    result = subprocess.run(
+                    result = run_dotnet_command(
                         [
                             "dotnet",
                             "msbuild",
@@ -971,7 +972,7 @@ class ValidateSkillTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        rejected_framework = subprocess.run(
+        rejected_framework = run_dotnet_command(
             [
                 "dotnet",
                 "build",
@@ -1002,7 +1003,7 @@ class ValidateSkillTests(unittest.TestCase):
             / "native-cad/src/LiangPingfa.NativeCad.Protocol"
             / "LiangPingfa.NativeCad.Protocol.csproj"
         )
-        rejected_override = subprocess.run(
+        rejected_override = run_dotnet_command(
             [
                 "dotnet",
                 "build",
@@ -1079,13 +1080,15 @@ class ValidateSkillTests(unittest.TestCase):
             "'@"
         )
         self.assertIn(fixed_body, workflow)
+        here_string_line = workflow[: workflow.index(fixed_body)].count("\n") + 1
         workflow_path.write_text(
             workflow.replace(fixed_body, broken_body, 1),
             encoding="utf-8",
         )
 
         self.assert_validation_fails_with(
-            "validate workflow PowerShell here-string escaped the run block at line 59"
+            "validate workflow PowerShell here-string escaped the run block at line "
+            + str(here_string_line)
         )
 
     def test_invalid_name_fails(self) -> None:

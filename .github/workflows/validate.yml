@@ -12,6 +12,10 @@ permissions:
 jobs:
   validate-windows:
     runs-on: windows-latest
+    env:
+      DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER: "1"
+      MSBUILDDISABLENODEREUSE: "1"
+      UseSharedCompilation: "false"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -40,7 +44,9 @@ jobs:
       - name: Check forbidden tracked artifacts
         run: python scripts/validate_skill.py --tracked
       - name: Run full Windows suite including native handle tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        run: |
+          dotnet build-server shutdown
+          python -m unittest discover -s tests -p "test_*.py" -v
       - name: Parse operator scripts in Windows PowerShell 5.1 and PowerShell 7
         shell: powershell
         run: |
@@ -76,11 +82,11 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src tests scripts
       - name: Build SDK-free native bridge contracts
-        run: dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj -c Release --nologo
+        run: dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj -c Release --nologo -m:1
       - name: Verify frozen and active C# API surfaces
         run: dotnet run --project native-bridge-contracts/tests/LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj -c Release --nologo
       - name: Build SDK-free native CAD transaction core
-        run: dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo
+        run: dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo -m:1
       - name: Run generated native CAD core tests
         run: dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build
       - name: Compile syntax-only AutoCAD adapter profiles and test hosts
@@ -91,7 +97,7 @@ jobs:
         run: |
           $runner = "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj"
           foreach ($profile in @("autocad2024", "autocad2025", "autocad2026")) {
-            dotnet build $runner -c Release --nologo "-p:CadHostProfile=$profile"
+            dotnet build $runner -c Release --nologo -m:1 "-p:CadHostProfile=$profile"
           }
           dotnet run --project native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj -c Release --nologo
       - name: Check CLI help
