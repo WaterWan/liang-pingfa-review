@@ -68,6 +68,7 @@ NATIVE_SCHEMA_PATHS = (
     "native-console-export-v1.schema.json",
     "native-verification-v1.schema.json",
     "native-adapter-config-v2.schema.json",
+    "native-bridge-bootstrap-v1.schema.json",
     "native-inventory-export-v2.schema.json",
     "native-bridge-session-v2.schema.json",
     "native-geometry-export-v2.schema.json",
@@ -101,8 +102,13 @@ NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS = {
     NATIVE_CAD_PROJECT_PATHS[2]: "netstandard2.0",
     NATIVE_CAD_PROJECT_PATHS[3]: "net8.0",
     NATIVE_CAD_PROJECT_PATHS[4]: "profile-selected",
-    NATIVE_CAD_PROJECT_PATHS[5]: "net8.0-windows",
+    NATIVE_CAD_PROJECT_PATHS[5]: "profile-selected",
     NATIVE_CAD_PROJECT_PATHS[6]: "net8.0-windows",
+}
+NATIVE_CAD_ADAPTER_PROFILE_FRAMEWORKS = {
+    "autocad2024": "net48",
+    "autocad2025": "net8.0-windows",
+    "autocad2026": "net10.0-windows",
 }
 NATIVE_CAD_STUB_SOURCE_PATH = (
     "native-cad/src/LiangPingfa.NativeCad.AutoCAD.ApiStubs/AutodeskApiStubs.cs"
@@ -148,6 +154,7 @@ NATIVE_PROTOCOL_TEXT_PATHS = frozenset(
         "src/liang_pingfa_review/native_bridge.py",
         "src/liang_pingfa_review/schemas/native-bridge-session-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-bridge-session-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-bootstrap-v1.schema.json",
         "tests/support/mock_native_bridge.py",
         "tests/support/synthetic_native.py",
         "tests/test_native_protocol.py",
@@ -161,6 +168,7 @@ NATIVE_PIPE_LITERAL_CONTEXTS = NATIVE_PROTOCOL_TEXT_PATHS | frozenset(
         "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePipeBridge.cs",
         "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/ProfileDispatch.cs",
         "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/PrivatePaths.cs",
+        "src/liang_pingfa_review/schemas/native-bridge-bootstrap-v1.schema.json",
     }
 )
 TOPOLOGY_ROLE_ARRAYS = (
@@ -307,6 +315,7 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/plan.py",
         "src/liang_pingfa_review/raw_dxf.py",
         "src/liang_pingfa_review/reports.py",
+        "src/liang_pingfa_review/runtime_package.py",
         "src/liang_pingfa_review/snapshots.py",
         "src/liang_pingfa_review/temporary.py",
         "src/liang_pingfa_review/topology_ids.py",
@@ -331,6 +340,7 @@ ALLOWED_FILES = frozenset(
         "src/liang_pingfa_review/schemas/native-console-export-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-verification-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-adapter-config-v2.schema.json",
+        "src/liang_pingfa_review/schemas/native-bridge-bootstrap-v1.schema.json",
         "src/liang_pingfa_review/schemas/native-inventory-export-v2.schema.json",
         "src/liang_pingfa_review/schemas/native-bridge-session-v2.schema.json",
         "src/liang_pingfa_review/schemas/native-geometry-export-v2.schema.json",
@@ -395,9 +405,17 @@ ALLOWED_FILES = frozenset(
         "native-cad/Directory.Build.targets",
         "native-cad/NativeCad.RepositoryPolicy.targets",
         "native-cad/scripts/verify-autocad-adapter.ps1",
+        "native-cad/scripts/powershell-compatibility.ps1",
+        "native-cad/scripts/build-autocad-adapter.ps1",
+        "native-cad/scripts/qualify-real-host.ps1",
+        "native-cad/templates/native-bootstrap-context.template.json",
         "native-cad/LiangPingfa.NativeCad.sln",
         "native-cad/README.md",
         "native-cad/ADR-0001-sdk-free-transaction-core.md",
+        "native-cad/ADR-0002-licensed-autocad-adapter.md",
+        "native-cad/scripts/build-autocad-adapter.ps1",
+        "native-cad/scripts/qualify-real-host.ps1",
+        "native-cad/templates/native-bootstrap-context.template.json",
         "native-cad/ADR-0002-licensed-autocad-adapter.md",
         "native-cad/src/LiangPingfa.NativeCad.Protocol/LiangPingfa.NativeCad.Protocol.csproj",
         "native-cad/src/LiangPingfa.NativeCad.Protocol/CanonicalJson.cs",
@@ -431,6 +449,7 @@ ALLOWED_FILES = frozenset(
         "native-cad/tests/fixtures/native-cad-v2-golden.json",
         "tests/test_native_cad_core.py",
         "tests/test_autocad_adapter.py",
+        "tests/test_runtime_package.py",
     }
 )
 
@@ -1934,13 +1953,17 @@ def _validate_ci_workflow(root: Path, issues: list[str]) -> None:
         'python -m unittest discover -s tests -p "test_*.py" -v',
         "python -m compileall -q src tests scripts",
         "actions/setup-dotnet@v4",
-        'dotnet-version: "8.0.x"',
+        "8.0.x",
+        "10.0.x",
+        "Verify .NET Framework 4.8 targeting pack",
         "dotnet build native-bridge-contracts/LiangPingfa.NativeBridge.Contracts.csproj",
         "dotnet run --project native-bridge-contracts/tests/LiangPingfa.NativeBridge.Contracts.ApiSurface.Tests.csproj -c Release --nologo",
         "dotnet build native-cad/LiangPingfa.NativeCad.sln -c Release --nologo",
         "dotnet run --project native-cad/tests/LiangPingfa.NativeCad.Core.Tests -c Release --no-build",
         "native-cad\\scripts\\verify-autocad-adapter.ps1 -Configuration Release",
         "LiangPingfa.NativeCad.AutoCAD.Adapter.Tests.csproj",
+        "LiangPingfa.NativeCad.AutoCAD.RealHost.Tests.csproj",
+        "native-qualification-intent --help",
         "python -m liang_pingfa_review doctor",
         "python -m liang_pingfa_review native-doctor",
     ):
@@ -2217,7 +2240,10 @@ def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
                         "native CAD projects must not define TargetFrameworks: "
                         + relative
                     )
-                elif relative == NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
+                elif relative in {
+                    NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+                    NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+                }:
                     target_framework_count += 1
                 elif expected_framework is None:
                     issues.append(
@@ -2372,7 +2398,11 @@ def _validate_native_cad_msbuild_files(root: Path, issues: list[str]) -> None:
         if is_project_file and relative in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS:
             expected_target_framework_count = (
                 4
-                if relative == NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT
+                if relative
+                in {
+                    NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+                    NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+                }
                 else 1
             )
             if target_framework_count != expected_target_framework_count:
@@ -2473,10 +2503,14 @@ def _validate_native_cad_evaluated_target_frameworks(
         )
         return
 
+    dynamic_profile_projects = {
+        NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+        NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+    }
     for relative, expected in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items():
-        if relative == NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
-            # The adapter's TFM is intentionally selected only by an explicit
-            # host profile; a default evaluator must never choose one.
+        if relative in dynamic_profile_projects:
+            # Adapter source and its isolated test host select a TFM only
+            # from one explicit host profile; their defaults prove nothing.
             continue
         project = root / relative
         try:
@@ -2525,6 +2559,54 @@ def _validate_native_cad_evaluated_target_frameworks(
                 "native CAD evaluated TargetFramework differs from its "
                 f"checkpoint-1 allowlist value: {relative}"
             )
+
+    for relative in dynamic_profile_projects:
+        project = root / relative
+        for profile, expected in NATIVE_CAD_ADAPTER_PROFILE_FRAMEWORKS.items():
+            try:
+                completed = subprocess.run(
+                    [
+                        dotnet,
+                        "msbuild",
+                        str(project),
+                        "-nologo",
+                        f"-p:CadHostProfile={profile}",
+                        "-getProperty:TargetFramework",
+                        "-getProperty:TargetFrameworks",
+                    ],
+                    cwd=root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                issues.append(
+                    "native CAD profile TargetFramework inspection failed: "
+                    + relative
+                )
+                continue
+            try:
+                properties = json.loads(completed.stdout)["Properties"]
+                target_framework = properties["TargetFramework"]
+                target_frameworks = properties["TargetFrameworks"]
+            except (TypeError, KeyError, json.JSONDecodeError):
+                issues.append(
+                    "native CAD profile TargetFramework inspection was malformed: "
+                    + relative
+                )
+                continue
+            if (
+                completed.returncode != 0
+                or target_framework != expected
+                or target_frameworks != ""
+            ):
+                issues.append(
+                    "native CAD profile TargetFramework differs from its exact "
+                    f"allowlist value: {relative} ({profile})"
+                )
 
 
 def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
@@ -2631,6 +2713,155 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
         issues.append(
             "AutoCAD delete manifest must fail at pretransaction unsupported-operation preflight"
         )
+    bridge_source = _read_text(
+        root / "native-cad/src/LiangPingfa.NativeCad.AutoCAD.Adapter/NativePipeBridge.cs",
+        issues,
+    )
+    bootstrap_schema = _read_text(
+        root / "src/liang_pingfa_review/schemas/native-bridge-bootstrap-v1.schema.json",
+        issues,
+    )
+    if bridge_source is None or bootstrap_schema is None:
+        issues.append("AutoCAD bootstrap source/schema is unavailable")
+    else:
+        for required in (
+            "liang-pingfa/native-bridge-bootstrap/v1",
+            "MaxBootstrapAdvertisementBytes",
+            "FileMode.CreateNew",
+            "config_sha256",
+            "ProcessWireValue",
+            "HostWireValue",
+            "SerializeForTest",
+        ):
+            if required not in bridge_source:
+                issues.append(
+                    "AutoCAD bootstrap source lacks required private binding: "
+                    + required
+                )
+        try:
+            parsed_bootstrap = json.loads(bootstrap_schema)
+            required_fields = set(parsed_bootstrap["required"])
+            bootstrap_properties = parsed_bootstrap["properties"]
+            protocol_required = set(parsed_bootstrap["$defs"]["protocol"]["required"])
+            process_required = set(parsed_bootstrap["$defs"]["process"]["required"])
+            capability_prefixes = parsed_bootstrap["properties"]["capabilities"][
+                "prefixItems"
+            ]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            issues.append("native bootstrap schema is structurally invalid")
+        else:
+            if (
+                {
+                    "schema_version",
+                    "protocol",
+                    "pid",
+                    "pipe",
+                    "mode",
+                    "adapter",
+                    "plugin",
+                    "host",
+                    "process",
+                    "capabilities",
+                    "bootstrap",
+                    "integrity",
+                }
+                - required_fields
+                or "session_id" in bootstrap_properties
+                or protocol_required != {"version", "major", "minor"}
+                or process_required
+                != {
+                    "windows_session_id",
+                    "creation_time_100ns",
+                    "instance_fingerprint",
+                    "executable_fingerprint",
+                }
+                or [item.get("const") for item in capability_prefixes]
+                != [
+                    "create_review_marker/v1",
+                    "read.exact_geometry/v1",
+                    "read.inventory/v1",
+                    "translate_dbtext/v1",
+                ]
+            ):
+                issues.append(
+                    "native bootstrap schema must bind exact private C#/Python semantics"
+                )
+    if adapter_identity is not None:
+        for required in (
+            "BootstrapConfigSha256EnvironmentVariable",
+            "NET10_0_OR_GREATER",
+            'return "net10"',
+        ):
+            if required not in adapter_identity:
+                issues.append(
+                    "AutoCAD adapter identity lacks exact bootstrap/runtime binding: "
+                    + required
+                )
+
+    build_script = _read_text(
+        root / "native-cad/scripts/build-autocad-adapter.ps1",
+        issues,
+    )
+    qualification_script = _read_text(
+        root / "native-cad/scripts/qualify-real-host.ps1",
+        issues,
+    )
+    for label, script, required, forbidden in (
+        (
+            "licensed adapter build script",
+            build_script,
+            (
+                "CadSdkDir",
+                "PackageDirectory",
+                "PrivateRoot",
+                "ReceiptPath",
+                "UseAutodeskApiStubs=false",
+                "TargetFramework=$framework",
+                "Get-Sha256File",
+                "FileMode]::CreateNew",
+                "sdk_input_fingerprints",
+                "LiangPingfa.NativeCad.AutoCAD.ApiStubs.dll",
+            ),
+            ("invoke-expression", "dotnet pack", "dotnet publish"),
+        ),
+        (
+            "real-host qualification script",
+            qualification_script,
+            (
+                "LIANG_PINGFA_RUN_REAL_HOST",
+                "native-session",
+                "native-doctor",
+                "native-audit",
+                "native-qualification-intent",
+                "native-plan",
+                "native-apply",
+                "native-verify",
+                "Get-BoundFileState",
+                "Assert-AuditedHostBinding",
+                "load_native_artifact",
+                "require_qualification_host_binding",
+                "operator-must-create-a-fresh-bootstrap-for-apply",
+                "DryRun",
+            ),
+            (
+                "invoke-expression",
+                "sendkeys",
+                "sendinput",
+                "setforegroundwindow",
+                "netload",
+                "start-process",
+            ),
+        ),
+    ):
+        if script is None:
+            continue
+        lowered = script.casefold()
+        for value in required:
+            if value not in script:
+                issues.append(f"{label} lacks required fail-closed behavior: {value}")
+        for value in forbidden:
+            if value in lowered:
+                issues.append(f"{label} contains forbidden injection/UI behavior: {value}")
     core_manifest_source = _read_text(
         root / "native-cad/src/LiangPingfa.NativeCad.Core/ManifestExecution.cs",
         issues,
@@ -2681,7 +2912,11 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
     expected_frameworks = {
         relative: f"<TargetFramework>{framework}</TargetFramework>"
         for relative, framework in NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items()
-        if relative != NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT
+        if relative
+        not in {
+            NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+            NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+        }
     }
     forbidden_project_text = (
         "packagereference",
@@ -2727,13 +2962,11 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
             "<CadHostProfile",
             "<CadSdkDir",
             "autocad2024",
-            "tssd2024",
             "autocad2025",
-            "tssd2025",
             "autocad2026",
-            "tssd2026",
             "net48",
             "net8.0-windows",
+            "net10.0-windows",
             "AcMgd.dll",
             "AcDbMgd.dll",
             "AcCoreMgd.dll",
@@ -2750,12 +2983,18 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                     "native CAD adapter lacks required fail-closed build guard: "
                     + required
                 )
+        for profile, framework in NATIVE_CAD_ADAPTER_PROFILE_FRAMEWORKS.items():
+            if profile not in adapter_project or framework not in adapter_project:
+                issues.append(
+                    "native CAD adapter lacks an exact profile framework: "
+                    + profile
+                )
         for forbidden in (
             "packagereference",
             "teigha",
             "odafileconverter",
             "realdwg",
-            "tssd.dll",
+            "tssd",
         ):
             if forbidden in adapter_project.casefold():
                 issues.append(
@@ -2808,22 +3047,75 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                         + str(name)
                     )
 
+    adapter_test_project = _read_text(
+        root / NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+        issues,
+    )
+    if adapter_test_project is not None:
+        for profile, framework in NATIVE_CAD_ADAPTER_PROFILE_FRAMEWORKS.items():
+            if profile not in adapter_test_project or framework not in adapter_test_project:
+                issues.append(
+                    "native CAD adapter test host lacks an exact profile framework: "
+                    + profile
+                )
+        for required in (
+            "CadHostProfile=$(CadHostProfile)",
+            "LPF_AUTOCAD_2024",
+            "LPF_AUTOCAD_2025",
+            "LPF_AUTOCAD_2026",
+        ):
+            if required not in adapter_test_project:
+                issues.append(
+                    "native CAD adapter test host lacks profile-bound source compilation: "
+                    + required
+                )
+
     realhost_project = _read_text(root / NATIVE_CAD_REALHOST_TEST_PROJECT, issues)
     if realhost_project is not None:
         for required in (
             "BuildRealHostTests",
-            "RealHostSdkDir",
             "RealHostCoreConsole",
             "RealHostPrivateFixture",
             "ValidateRealHostGate",
             "RejectRealHostPack",
-            "BuildAutoCadAdapter=true",
-            "UseAutodeskApiStubs=false",
         ):
             if required not in realhost_project:
                 issues.append(
                     "native CAD optional real-host test lacks explicit gate: "
                     + required
+                )
+        if (
+            "ProjectReference" in realhost_project
+            or "LiangPingfa.NativeCad.AutoCAD.Adapter" in realhost_project
+        ):
+            issues.append(
+                "native CAD real-host runner must remain SDK-free and must not link the adapter"
+            )
+    realhost_source = _read_text(
+        root / "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/Program.cs",
+        issues,
+    )
+    if realhost_source is not None:
+        for required in (
+            "LPF_REALHOST_TESTS",
+            "LIANG_PINGFA_RUN_REAL_HOST",
+            "LPF_REALHOST_PHASE",
+            "LIANG_PINGFA_REAL_HOST_RECEIPT",
+            "qualify-real-host.ps1",
+            "ArgumentList",
+            "-ReceiptPath",
+            "SKIP: real-host qualification is opt-in",
+        ):
+            if required not in realhost_source:
+                issues.append(
+                    "native CAD real-host runner lacks explicit opt-in binding: "
+                    + required
+                )
+        for forbidden in ("SendKeys", "SendInput", "SetForegroundWindow", "NETLOAD"):
+            if forbidden.casefold() in realhost_source.casefold():
+                issues.append(
+                    "native CAD real-host runner contains forbidden GUI behavior: "
+                    + forbidden
                 )
 
     native_root = root / NATIVE_CAD_ROOT
@@ -2916,10 +3208,11 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                     "<reference",
                 ):
                     if (
-                        forbidden == "autodesk"
+                        forbidden in {"autodesk", "tssd"}
                         and relative in {
                             NATIVE_CAD_STUB_TEST_SOURCE_PATH,
                             "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.Adapter.Tests/Program.cs",
+                            "native-cad/tests/LiangPingfa.NativeCad.AutoCAD.RealHost.Tests/Program.cs",
                         }
                     ):
                         continue
@@ -3065,6 +3358,7 @@ def _validate_native_cad_checkpoint(root: Path, issues: list[str]) -> None:
                 "nfc-composed-combining",
                 "astral-values",
                 "integer-boundaries",
+                "windows-file-identity-projection",
                 "nested-objects-and-arrays",
             }
             vector_names: set[str] = set()

@@ -33,7 +33,7 @@
       Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.Core.Tests'">checkpoint-1-tests</_ExpectedNativeCadPolicyMode>
 
     <_ExpectedNativeCadTargetFramework
-      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter.Tests'">net8.0-windows</_ExpectedNativeCadTargetFramework>
+      Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter.Tests'">$(LiangPingfaAdapterTestExpectedTargetFramework)</_ExpectedNativeCadTargetFramework>
     <_ExpectedNativeCadPolicyMode
       Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter.Tests'">checkpoint-2-adapter-tests</_ExpectedNativeCadPolicyMode>
 
@@ -51,6 +51,11 @@
       Condition="'$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter' And '$(NativeCadPolicyMode)' == 'reviewed-autocad-adapter' And '$(LiangPingfaReviewedAutoCadAdapterReferences)' == 'true'">true</_NativeCadReviewedAdapterProject>
     <_NativeCadFutureAdapterReferencesAllowed
       Condition="'$(_NativeCadReviewedAdapterProject)' == 'true' And '$(BuildAutoCadAdapter)' == 'true' And '$(UseAutodeskApiStubs)' != 'true'">true</_NativeCadFutureAdapterReferencesAllowed>
+    <!-- The exact adapter source and its isolated syntax-only test host may
+         target net48 for the AutoCAD 2024 profile. These are framework
+         facades emitted by MSBuild, not package or proprietary references. -->
+    <_NativeCadNet48FrameworkReferencesAllowed
+      Condition="('$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter' Or '$(MSBuildProjectName)' == 'LiangPingfa.NativeCad.AutoCAD.Adapter.Tests') And '$(TargetFramework)' == 'net48'">true</_NativeCadNet48FrameworkReferencesAllowed>
   </PropertyGroup>
 
   <Target Name="EnforceNativeCadRepositoryPolicy"
@@ -86,7 +91,7 @@
         Condition="'%(FrameworkReference.Identity)' != 'Microsoft.NETCore.App' Or '%(FrameworkReference.IsImplicitlyDefined)' != 'true'" />
       <!-- netstandard2.0 resolves framework facades as Reference items. -->
       <_UnapprovedNativeCadReference Include="@(Reference)"
-        Condition="('%(Reference.NuGetPackageId)' != 'NETStandard.Library' And '%(Reference.NuGetPackageId)' != 'Microsoft.NETCore.App.Ref' And '%(Reference.ReferenceSourceTarget)' != 'ResolveProjectReferences') And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'AcMgd' Or '%(Reference.Identity)' == 'AcDbMgd' Or '%(Reference.Identity)' == 'AcCoreMgd')) And !('$(_NativeCadReviewedAdapterProject)' == 'true' And '$(TargetFramework)' == 'net48' And ('%(Reference.Identity)' == 'System' Or '%(Reference.Identity)' == 'System.Data' Or '%(Reference.Identity)' == 'System.Drawing' Or '%(Reference.Identity)' == 'System.Xml' Or '%(Reference.Identity)' == 'System.Core' Or '%(Reference.Identity)' == 'System.Runtime.Serialization' Or '%(Reference.Identity)' == 'System.Xml.Linq' Or '%(Reference.Identity)' == 'System.Numerics' Or '%(Reference.Identity)' == 'System.IO.Compression.FileSystem'))" />
+        Condition="('%(Reference.NuGetPackageId)' != 'NETStandard.Library' And '%(Reference.NuGetPackageId)' != 'Microsoft.NETCore.App.Ref' And '%(Reference.ReferenceSourceTarget)' != 'ResolveProjectReferences') And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'AcMgd' Or '%(Reference.Identity)' == 'AcDbMgd' Or '%(Reference.Identity)' == 'AcCoreMgd')) And !('$(_NativeCadNet48FrameworkReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'System' Or '%(Reference.Identity)' == 'System.Data' Or '%(Reference.Identity)' == 'System.Drawing' Or '%(Reference.Identity)' == 'System.Xml' Or '%(Reference.Identity)' == 'System.Core' Or '%(Reference.Identity)' == 'System.Runtime.Serialization' Or '%(Reference.Identity)' == 'System.Xml.Linq' Or '%(Reference.Identity)' == 'System.Numerics' Or '%(Reference.Identity)' == 'System.IO.Compression.FileSystem'))" />
       <_NativeCadReferenceWithHintPath Include="@(Reference)"
         Condition="'%(Reference.HintPath)' != '' And !('$(_NativeCadFutureAdapterReferencesAllowed)' == 'true' And ('%(Reference.Identity)' == 'AcMgd' Or '%(Reference.Identity)' == 'AcDbMgd' Or '%(Reference.Identity)' == 'AcCoreMgd')) And !('$(_NativeCadReviewedAdapterProject)' == 'true' And '$(UseAutodeskApiStubs)' == 'true' And '%(Reference.ReferenceSourceTarget)' == 'ResolveProjectReferences')" />
       <_NativeCadAdapterReferenceWithoutPrivateFalse Include="@(Reference)"

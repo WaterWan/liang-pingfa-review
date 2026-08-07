@@ -887,12 +887,16 @@ class ValidateSkillTests(unittest.TestCase):
 
         if shutil.which("dotnet") is None:
             self.skipTest(".NET SDK is unavailable outside the CI build image")
+        dynamic_profile_projects = {
+            validate_skill.NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT,
+            validate_skill.NATIVE_CAD_AUTOCAD_ADAPTER_TEST_PROJECT,
+        }
         for relative, expected in (
             validate_skill.NATIVE_CAD_EXPECTED_TARGET_FRAMEWORKS.items()
         ):
-            if relative == validate_skill.NATIVE_CAD_AUTOCAD_ADAPTER_PROJECT:
-                # The adapter refuses a default profile; individual explicit
-                # profile builds are covered by test_autocad_adapter.py.
+            if relative in dynamic_profile_projects:
+                # Adapter source and its isolated test host refuse to prove a
+                # default profile. Every explicit profile is checked below.
                 continue
             with self.subTest(project=relative):
                 result = subprocess.run(
@@ -915,6 +919,36 @@ class ValidateSkillTests(unittest.TestCase):
                 properties = json.loads(result.stdout)["Properties"]
                 self.assertEqual(expected, properties["TargetFramework"])
                 self.assertEqual("", properties["TargetFrameworks"])
+        for relative in dynamic_profile_projects:
+            for profile, expected in (
+                validate_skill.NATIVE_CAD_ADAPTER_PROFILE_FRAMEWORKS.items()
+            ):
+                with self.subTest(project=relative, profile=profile):
+                    result = subprocess.run(
+                        [
+                            "dotnet",
+                            "msbuild",
+                            relative,
+                            "-nologo",
+                            f"-p:CadHostProfile={profile}",
+                            "-getProperty:TargetFramework",
+                            "-getProperty:TargetFrameworks",
+                        ],
+                        cwd=self.repository,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    self.assertEqual(
+                        result.returncode,
+                        0,
+                        result.stdout + result.stderr,
+                    )
+                    properties = json.loads(result.stdout)["Properties"]
+                    self.assertEqual(expected, properties["TargetFramework"])
+                    self.assertEqual("", properties["TargetFrameworks"])
 
     def test_native_cad_build_rejects_framework_reference_and_global_tfm_override(
         self,
